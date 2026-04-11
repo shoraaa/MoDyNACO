@@ -25,4 +25,9 @@ reviewer_experiments
 results
 models
 pretrained
-checkpoints_*
+checkpoints_compare
+checkpoints_static
+checkpoints_dynamic
+checkpoints_extended
+checkpoints
+data
