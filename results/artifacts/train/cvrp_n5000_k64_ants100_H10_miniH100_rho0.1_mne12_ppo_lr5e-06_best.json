@@ -1,0 +1,106 @@
+{
+  "epochs": [
+    {
+      "epoch": -1,
+      "train_cost": 0.0,
+      "val_best": 89.1702,
+      "gap_pct": 5.15
+    },
+    {
+      "epoch": 0,
+      "train_cost": 93.1259,
+      "val_best": 88.9965,
+      "gap_pct": 4.94
+    },
+    {
+      "epoch": 1,
+      "train_cost": 91.7337,
+      "val_best": 88.9851,
+      "gap_pct": 4.92
+    },
+    {
+      "epoch": 2,
+      "train_cost": 93.6053,
+      "val_best": 89.0037,
+      "gap_pct": 4.96
+    },
+    {
+      "epoch": 3,
+      "train_cost": 91.5745,
+      "val_best": 88.9481,
+      "gap_pct": 4.89
+    },
+    {
+      "epoch": 4,
+      "train_cost": 92.1929,
+      "val_best": 88.9364,
+      "gap_pct": 4.88
+    },
+    {
+      "epoch": 5,
+      "train_cost": 92.5872,
+      "val_best": 88.79,
+      "gap_pct": 4.71
+    },
+    {
+      "epoch": 6,
+      "train_cost": 91.1803,
+      "val_best": 88.8078,
+      "gap_pct": 4.73
+    },
+    {
+      "epoch": 7,
+      "train_cost": 90.1737,
+      "val_best": 88.7526,
+      "gap_pct": 4.66
+    },
+    {
+      "epoch": 8,
+      "train_cost": 92.738,
+      "val_best": 88.8375,
+      "gap_pct": 4.76
+    },
+    {
+      "epoch": 9,
+      "train_cost": 91.9831,
+      "val_best": 88.6407,
+      "gap_pct": 4.52
+    }
+  ],
+  "total_train_time_s": 3799.53,
+  "peak_memory_gb": 0.02,
+  "total_params": 67329,
+  "trainable_params": 67329,
+  "best_epoch": {
+    "epoch": 9,
+    "train_cost": 91.9831,
+    "val_best": 88.6407,
+    "gap_pct": 4.52
+  },
+  "status": "ok",
+  "command": "/workspace/DyNACO/.venv/bin/python3 train.py --wandb_project reviewer_hyperparam --baseline none --H 10 --mini_H 100 --n_ants 100 --k_sparse 64 --epochs 10 --steps_per_epoch 32 --ppo_epochs 4 --lr 5e-06 --gamma 1.0 --min_gamma 0.0 --val_size 16 --warmup --save_dir reviewer_experiments/models --problem cvrp --rho 0.1 --min_new_edges 12 --n_node 5000",
+  "returncode": 0,
+  "log_file": "reviewer_experiments/logs/train_cvrp_n5000_k64_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.log",
+  "model_path": "reviewer_experiments/models/cvrp/n5000/cvrp_n5000_k64_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt",
+  "config": {
+    "H": 10,
+    "mini_H": 100,
+    "n_ants": 100,
+    "k_sparse": 64,
+    "epochs": 10,
+    "steps_per_epoch": 32,
+    "ppo_epochs": 4,
+    "lr": 5e-06,
+    "anneal_prior": false,
+    "gamma": 1.0,
+    "min_gamma": 0.0,
+    "val_size": 16,
+    "warmup": true,
+    "train_warmup": false,
+    "save_dir": "reviewer_experiments/models",
+    "problem": "cvrp",
+    "rho": 0.1,
+    "min_new_edges": 12,
+    "n_node": 5000
+  }
+}

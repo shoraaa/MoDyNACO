@@ -1,0 +1,3 @@
+problem,n_node,params,peak_memory_gb,training_time,inference_time,timestamp
+tsp,1000,68921,0.0,0.0,6.697864294052124,2026-04-08T12:08:34.073820
+tsp,5000,68921,0.0,0.0,13.884234428405762,2026-04-08T12:08:47.977233

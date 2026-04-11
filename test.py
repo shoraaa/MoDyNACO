@@ -164,6 +164,8 @@ def main():
     parser.add_argument("--warmup_ratio", type=float, default=0.5)
     parser.add_argument("--generate_val", action="store_true", help="Generate test set instead of loading from file")
     parser.add_argument("--save_generated", type=str, default=None, help="Path to save generated test dataset")
+    parser.add_argument("--capacity_override", type=float, default=None,
+                        help="Override CVRP capacity during generated evaluation dataset creation")
     parser.add_argument("--val_size", type=int, default=None, help="Limit validation set size")
     parser.add_argument("--log", action="store_true", help="Enable logging to file (auto-named)")
     parser.add_argument("--no_baseline", "--no-baseline", dest="no_baseline", action="store_true",
@@ -181,6 +183,8 @@ def main():
     parser.add_argument("--iter_log", action="store_true", help="Log mean/best at every mini-iteration to CSV")
     parser.add_argument("--iter_print", action="store_true", help="Print mean/best at every mini-iteration (very verbose)")
     parser.add_argument("--stage_metrics", action="store_true", help="Collect pre-LS and post-update stage metrics during evaluation")
+    parser.add_argument("--collect_guidance_metrics", action="store_true",
+                        help="Collect mean guidance and pheromone correlation metrics for executed neural methods")
     parser.add_argument("--summary_json", type=str, default=None, help="Optional path to write structured evaluation summary JSON")
 
     args = parser.parse_args()
@@ -360,7 +364,8 @@ def main():
             baseline_solver=baseline_solver,
             baseline_runs=args.baseline_runs,
             time_limit=args.baseline_time_limit,
-            device='cpu'
+            device='cpu',
+            capacity_override=args.capacity_override if args.problem == 'cvrp' else None,
         )
     elif args.dataset:
         print(f"Loading {args.dataset}...")
@@ -392,7 +397,7 @@ def main():
                 if args.problem == 'tsp':
                     val_list.append(torch.from_numpy(gen_fn(args.n_node)))
                 else:
-                    c, d, cap = gen_fn(args.n_node, device='cpu')
+                    c, d, cap = gen_fn(args.n_node, device='cpu', capacity=args.capacity_override)
                     val_list.append((c.cpu(), d.cpu(), cap))
             
             # Save for reuse
@@ -587,6 +592,8 @@ def main():
     for prefix in ["base", "model", "model_no_anneal", "mix", "mix_no_anneal"]:
         for metric_key in stage_metric_keys:
             results[f"{prefix}_{metric_key}"] = []
+        results[f"{prefix}_mean_guidance"] = []
+        results[f"{prefix}_pheromone_correlation"] = []
 
     iterable = val_list
     if args.problem == 'cvrp' and hasattr(val_list, 'tensors'):
@@ -672,6 +679,22 @@ def main():
         stage_metrics = stage_metrics or {}
         for metric_key in stage_metric_keys:
             results[f"{prefix}_{metric_key}"].append(stage_metrics.get(metric_key))
+
+    def _safe_metric_mean(values):
+        if not values:
+            return None
+        arr = np.array(values, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return None
+        return float(arr.mean())
+
+    def _append_guidance_metrics(prefix, metric_payload):
+        metric_payload = metric_payload or {}
+        prior_mean = metric_payload.get("prior_mean", [])
+        corr = metric_payload.get("corr", [])
+        results[f"{prefix}_mean_guidance"].append(_safe_metric_mean(prior_mean))
+        results[f"{prefix}_pheromone_correlation"].append(_safe_metric_mean(corr))
 
     for i, item in enumerate(tqdm(iterable)):
         opt_cost = None
@@ -805,6 +828,7 @@ def main():
               
               args_anneal = _clone_args(args, no_anneal=False)
               args_noanneal = _clone_args(args, no_anneal=True)
+              collect_guidance_metrics = bool(args.visualize or args.collect_guidance_metrics)
 
               # Model (anneal ON)
               if run_model_anneal:
@@ -814,8 +838,8 @@ def main():
                       args.k_sparse, args.n_ants, not args.no_dynamic_feats,
                       args_anneal,
                       use_heuristic_only=False,
-                      collect_metrics=args.visualize,
-                      metrics_every_step=args.visualize,
+                      collect_metrics=collect_guidance_metrics,
+                      metrics_every_step=collect_guidance_metrics,
                       seed=args.seed + i,
                       ablation_pheromone=args.ablation_pheromone_features,
                       ablation_incumbent=args.ablation_incumbent_features
@@ -829,6 +853,7 @@ def main():
                   results["model_time"].append(tm1 - tm0)
                   results["model_neural_time"].append(mod_timings.get("time_neural", 0.0))
                   _append_stage_metrics("model", mod_extra.get("stage_metrics"))
+                  _append_guidance_metrics("model", mod_extra.get("metrics"))
 
                   if args.iter_log and iter_csv_writer is not None and model_iter_stats is not None:
                       for st in model_iter_stats:
@@ -861,8 +886,8 @@ def main():
                       args.k_sparse, args.n_ants, not args.no_dynamic_feats,
                       args_noanneal,
                       use_heuristic_only=False,
-                      collect_metrics=args.visualize,
-                      metrics_every_step=args.visualize,
+                      collect_metrics=collect_guidance_metrics,
+                      metrics_every_step=collect_guidance_metrics,
                       seed=args.seed + i,
                       ablation_pheromone=args.ablation_pheromone_features,
                       ablation_incumbent=args.ablation_incumbent_features
@@ -874,6 +899,7 @@ def main():
                   results["model_time_no_anneal"].append(tm1 - tm0)
                   results["model_neural_time_no_anneal"].append(mod_na_timings.get("time_neural", 0.0))
                   _append_stage_metrics("model_no_anneal", mod_na_extra.get("stage_metrics"))
+                  _append_guidance_metrics("model_no_anneal", mod_na_extra.get("metrics"))
 
                   if args.iter_log and iter_csv_writer is not None and model_na_iter_stats is not None:
                       for st in model_na_iter_stats:
@@ -909,8 +935,8 @@ def main():
                           args.k_sparse, args.n_ants, not args.no_dynamic_feats,
                           args_anneal,
                           use_heuristic_only=False,
-                          collect_metrics=args.visualize,
-                          metrics_every_step=args.visualize,
+                          collect_metrics=collect_guidance_metrics,
+                          metrics_every_step=collect_guidance_metrics,
                           inject_step=inject_step,
                           seed=args.seed + i,
                           ablation_pheromone=args.ablation_pheromone_features,
@@ -924,6 +950,7 @@ def main():
                       results["mix_time"].append(tmi1 - tmi0)
                       results["mix_neural_time"].append(mix_timings.get("time_neural", 0.0))
                       _append_stage_metrics("mix", mix_extra.get("stage_metrics"))
+                      _append_guidance_metrics("mix", mix_extra.get("metrics"))
 
                       if args.iter_log and iter_csv_writer is not None and mix_iter_stats is not None:
                           for st in mix_iter_stats:
@@ -1443,6 +1470,11 @@ def main():
             payload["mean_neural_time_s"] = neural_mean
             payload["std_neural_time_s"] = neural_std
             payload["total_neural_time_s"] = _sum_valid(neural_times)
+
+        guidance_mean, _ = _mean_std(results.get(f"{prefix}_mean_guidance", []))
+        pher_corr_mean, _ = _mean_std(results.get(f"{prefix}_pheromone_correlation", []))
+        payload["mean_guidance"] = guidance_mean
+        payload["pheromone_correlation"] = pher_corr_mean
 
         payload.update(_stage_means(prefix))
         return payload

@@ -1,0 +1,106 @@
+{
+  "epochs": [
+    {
+      "epoch": -1,
+      "train_cost": 0.0,
+      "val_best": 53.0439,
+      "gap_pct": 4.0
+    },
+    {
+      "epoch": 0,
+      "train_cost": 53.3685,
+      "val_best": 53.1094,
+      "gap_pct": 4.13
+    },
+    {
+      "epoch": 1,
+      "train_cost": 53.1507,
+      "val_best": 52.8578,
+      "gap_pct": 3.64
+    },
+    {
+      "epoch": 2,
+      "train_cost": 52.3493,
+      "val_best": 52.4428,
+      "gap_pct": 2.83
+    },
+    {
+      "epoch": 3,
+      "train_cost": 52.0613,
+      "val_best": 52.3274,
+      "gap_pct": 2.6
+    },
+    {
+      "epoch": 4,
+      "train_cost": 52.079,
+      "val_best": 52.2721,
+      "gap_pct": 2.49
+    },
+    {
+      "epoch": 5,
+      "train_cost": 52.0737,
+      "val_best": 52.1889,
+      "gap_pct": 2.33
+    },
+    {
+      "epoch": 6,
+      "train_cost": 52.0161,
+      "val_best": 52.1989,
+      "gap_pct": 2.35
+    },
+    {
+      "epoch": 7,
+      "train_cost": 52.0781,
+      "val_best": 52.1297,
+      "gap_pct": 2.21
+    },
+    {
+      "epoch": 8,
+      "train_cost": 52.0397,
+      "val_best": 52.1449,
+      "gap_pct": 2.24
+    },
+    {
+      "epoch": 9,
+      "train_cost": 52.1098,
+      "val_best": 52.1406,
+      "gap_pct": 2.23
+    }
+  ],
+  "total_train_time_s": 1736.05,
+  "peak_memory_gb": 0.02,
+  "total_params": 67361,
+  "trainable_params": 67361,
+  "best_epoch": {
+    "epoch": 7,
+    "train_cost": 52.0781,
+    "val_best": 52.1297,
+    "gap_pct": 2.21
+  },
+  "status": "ok",
+  "command": "/workspace/DyNACO/.venv/bin/python3 train.py --wandb_project reviewer_hyperparam --baseline none --H 10 --mini_H 100 --n_ants 100 --k_sparse 32 --epochs 10 --steps_per_epoch 32 --ppo_epochs 4 --lr 5e-06 --gamma 1.0 --min_gamma 0.0 --val_size 16 --warmup --save_dir reviewer_experiments/models --problem tsp --rho 0.1 --min_new_edges 20 --n_node 5000",
+  "returncode": 0,
+  "log_file": "reviewer_experiments/logs/train_tsp_n5000_k32_ants100_H10_miniH100_rho0.1_mne20_ppo_lr5e-06_best.log",
+  "model_path": "reviewer_experiments/models/tsp/n5000/tsp_n5000_k32_ants100_H10_miniH100_rho0.1_mne20_ppo_lr5e-06_best.pt",
+  "config": {
+    "H": 10,
+    "mini_H": 100,
+    "n_ants": 100,
+    "k_sparse": 32,
+    "epochs": 10,
+    "steps_per_epoch": 32,
+    "ppo_epochs": 4,
+    "lr": 5e-06,
+    "anneal_prior": false,
+    "gamma": 1.0,
+    "min_gamma": 0.0,
+    "val_size": 16,
+    "warmup": true,
+    "train_warmup": false,
+    "save_dir": "reviewer_experiments/models",
+    "problem": "tsp",
+    "rho": 0.1,
+    "min_new_edges": 20,
+    "n_node": 5000
+  }
+}

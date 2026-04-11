@@ -1,0 +1,2 @@
+status,returncode,cost,gap,time,model_path,summary_json,log_file
+ok,0,23.3619,0.7424,0.3693,reviewer_experiments/models/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne20_ppo_lr5e-06_best.pt,reviewer_experiments/results/artifacts/test/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne20_ppo_lr5e-06_best_n1000_synthetic.json,reviewer_experiments/logs/test_tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne20_ppo_lr5e-06_best.log

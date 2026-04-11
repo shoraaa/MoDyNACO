@@ -1,0 +1,42 @@
+{
+  "checkpoint": "checkpoints/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_anneal_g1.0_mg0.0_best.pt",
+  "dataset": null,
+  "methods": {
+    "base": {
+      "avg_ant_after_ls": null,
+      "avg_ant_before_ls": null,
+      "avg_incumbent_after_aco": null,
+      "final_ant_after_ls": null,
+      "final_ant_before_ls": null,
+      "final_incumbent_after_aco": null,
+      "gap_pct": 0.34983969014137983,
+      "gap_std_pct": 0.13853680613452948,
+      "mean_cost": 23.270920038223267,
+      "mean_time_s": 0.0,
+      "std_cost": 0.21182212698177186,
+      "std_time_s": 0.0,
+      "total_time_s": 0.0
+    },
+    "model_anneal": {
+      "avg_ant_after_ls": 23.471254012346268,
+      "avg_ant_before_ls": 23.471254012346268,
+      "avg_incumbent_after_aco": 23.382721477508547,
+      "final_ant_after_ls": 23.50824534893036,
+      "final_ant_before_ls": 23.50824534893036,
+      "final_incumbent_after_aco": 23.250717997550964,
+      "gap_pct": 0.26364420520258136,
+      "gap_std_pct": 0.2479557748035818,
+      "mean_cost": 23.250717997550964,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.2888026088476181,
+      "std_cost": 0.19290714855759764,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.03891358541931636,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 4.62084174156189
+    }
+  },
+  "n_node": 1000,
+  "problem": "tsp",
+  "seed": 1234
+}

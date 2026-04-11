@@ -1233,7 +1233,7 @@ def calc_interaction_metrics(tau: torch.Tensor, prior: torch.Tensor, k: int = 5)
     }
 
 def generate_and_save_dataset(problem, n_node, n_instances, save_path, baseline_solver='lkh', 
-                               baseline_runs=1, time_limit=300.0, device='cpu'):
+                               baseline_runs=1, time_limit=300.0, device='cpu', capacity_override=None):
     """
     Generate a dataset of problem instances, compute baseline costs, and save to file.
     
@@ -1274,7 +1274,7 @@ def generate_and_save_dataset(problem, n_node, n_instances, save_path, baseline_
             dataset.append((coords_np, cost, tour, f"Gen_{i}"))
             
         elif problem == 'cvrp':
-            coords, demand, capacity = gen_cvrp_instance(n_node, device)
+            coords, demand, capacity = gen_cvrp_instance(n_node, device, capacity=capacity_override)
             if isinstance(coords, torch.Tensor):
                 coords_np = coords.cpu().numpy()
             else:
@@ -1292,7 +1292,9 @@ def generate_and_save_dataset(problem, n_node, n_instances, save_path, baseline_
                 # gen_cvrp_instance returns normalized demand (demand/capacity)
                 # HGS expects integer demands
                 # Use same capacity logic as gen_cvrp_instance
-                if n_node >= 50000:
+                if capacity_override is not None:
+                    real_cap = float(capacity_override)
+                elif n_node >= 50000:
                     real_cap = 2000
                 elif n_node >= 10000:
                     real_cap = 1000
@@ -1521,8 +1523,11 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
     
     history = []
     best_decoded_route = None
+    best_final_route = None
     t_start_total_infer = time.time()
     runtime_limit = getattr(args, "runtime_limit", None)
+    verify_requested = bool(getattr(args, "verify", False)) and (problem == 'cvrp')
+    verify_final_only = bool(getattr(args, "verify_final_only", False)) and verify_requested
     if runtime_limit is not None and runtime_limit <= 0:
         runtime_limit = None
     timed_out = False
@@ -1584,7 +1589,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                      current_prior = prior_mat * factor
 
                 # Sample
-                return_decoded = getattr(args, 'verify', False) and (problem == 'cvrp')
+                return_decoded = verify_requested and not verify_final_only
                 
                 prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior
 
@@ -1614,7 +1619,10 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                 avg_last = float(costs_t.mean().item())
                 best_idx = int(costs_t.argmin().item())
                 best_cost = float(costs_t[best_idx].item())
-                best_seen = min(best_seen, best_cost)
+                if best_cost <= best_seen:
+                    best_seen = best_cost
+                    if verify_final_only and problem == 'cvrp':
+                        best_final_route = np.asarray(flats[best_idx], dtype=np.int32).copy()
                 
                 if problem == 'tsp':
                     aco._update_pheromone_from_flat(flats[best_idx], best_cost)
@@ -1740,6 +1748,15 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
 
     extra["history"] = history
     extra["timed_out"] = timed_out
+    if verify_final_only and problem == 'cvrp':
+        try:
+            if best_final_route is None:
+                raise RuntimeError("Unable to access final CVRP route for verification")
+            best_decoded_route = best_final_route
+            verify_solution_cvrp(coords, demand, capacity, float(best_seen), best_final_route)
+        except ValueError as e:
+            print(f"Verification failed: {e}")
+            sys.exit(1)
     if best_decoded_route is not None:
         extra["best_decoded_route"] = best_decoded_route
     return avg_last, best_seen, timings, extra

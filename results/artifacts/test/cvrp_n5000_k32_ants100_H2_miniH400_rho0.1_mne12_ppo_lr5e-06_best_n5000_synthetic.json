@@ -1,0 +1,42 @@
+{
+  "checkpoint": "reviewer_experiments/models/cvrp/n5000/cvrp_n5000_k32_ants100_H2_miniH400_rho0.1_mne12_ppo_lr5e-06_best.pt",
+  "dataset": null,
+  "methods": {
+    "base": {
+      "avg_ant_after_ls": 99.38047499656676,
+      "avg_ant_before_ls": 0.2280834590241625,
+      "avg_incumbent_after_aco": 98.42196453690529,
+      "final_ant_after_ls": 97.52407836914062,
+      "final_ant_before_ls": 1.6815581571897805e-44,
+      "final_incumbent_after_aco": 96.52493095397949,
+      "gap_pct": 7.601754735412199,
+      "gap_std_pct": 1.1434617853308675,
+      "mean_cost": 96.52493095397949,
+      "mean_time_s": 2.548299416899681,
+      "std_cost": 8.155914293680746,
+      "std_time_s": 0.034716386139978725,
+      "total_time_s": 40.7727906703949
+    },
+    "model_no_anneal": {
+      "avg_ant_after_ls": 99.42087291061878,
+      "avg_ant_before_ls": 0.24381347715854645,
+      "avg_incumbent_after_aco": 98.50268788635731,
+      "final_ant_after_ls": 97.60141134262085,
+      "final_ant_before_ls": 1.6815581571897805e-44,
+      "final_incumbent_after_aco": 96.63810586929321,
+      "gap_pct": 7.687633296403084,
+      "gap_std_pct": 0.8986839162600909,
+      "mean_cost": 96.63810586929321,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 2.5918665379285812,
+      "std_cost": 8.533750577489004,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.07063103858925251,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 41.4698646068573
+    }
+  },
+  "n_node": 5000,
+  "problem": "cvrp",
+  "seed": 1234
+}

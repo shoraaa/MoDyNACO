@@ -3,6 +3,26 @@ from torch import nn
 from torch.nn import functional as F
 import torch_geometric.nn as gnn
 
+
+def move_pyg_to_module_device(module: nn.Module, pyg):
+    """Normalize a PyG batch onto the same device as the module parameters."""
+    try:
+        device = next(module.parameters()).device
+    except StopIteration:
+        return pyg
+
+    if hasattr(pyg, "to"):
+        x = getattr(pyg, "x", None)
+        edge_index = getattr(pyg, "edge_index", None)
+        edge_attr = getattr(pyg, "edge_attr", None)
+        needs_move = any(
+            tensor is not None and hasattr(tensor, "device") and tensor.device != device
+            for tensor in (x, edge_index, edge_attr)
+        )
+        if needs_move:
+            return pyg.to(device)
+    return pyg
+
 # GNN for edge embeddings
 # Single GNN layer for checkpointing
 class GNNLayer(nn.Module):
@@ -203,6 +223,7 @@ class Net(nn.Module):
 
         self.par_net_heu = ParNet(logit_net=logit_net)
     def forward(self, pyg):
+        pyg = move_pyg_to_module_device(self, pyg)
         x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
         emb = self.emb_net(x, edge_index, edge_attr)
         heu = self.par_net_heu(emb)

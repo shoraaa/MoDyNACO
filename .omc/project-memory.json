@@ -1,0 +1,283 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775871034591,
+  "projectRoot": "/home/shora/Research/old/NGFACO",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "__pycache__": {
+      "path": "__pycache__",
+      "purpose": null,
+      "fileCount": 32,
+      "lastAccessed": 1775871034568,
+      "keyFiles": [
+        "baselines.cpython-313.pyc",
+        "baselines.cpython-314.pyc",
+        "cpp_aco_wrapper.cpython-313.pyc",
+        "cross_problem_experiments.cpython-313.pyc",
+        "cross_problem_static_dynamic.cpython-313.pyc"
+      ]
+    },
+    "build": {
+      "path": "build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1775871034571,
+      "keyFiles": []
+    },
+    "checkpoints": {
+      "path": "checkpoints",
+      "purpose": null,
+      "fileCount": 24,
+      "lastAccessed": 1775871034573,
+      "keyFiles": [
+        "cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
+        "cvrp_n10000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
+        "cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
+        "cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_static_best.pt",
+        "cvrp_n50000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt"
+      ]
+    },
+    "checkpoints_compare": {
+      "path": "checkpoints_compare",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1775871034573,
+      "keyFiles": [
+        "bpp_n20_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt",
+        "bpp_n20_k32_ants20_H5_miniH5_rho0.9_lr0.0003_static_prior_best.pt",
+        "bpp_n50_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt",
+        "bpp_n50_k32_ants20_H5_miniH5_rho0.9_lr0.0003_static_prior_best.pt",
+        "mkp_n20_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt"
+      ]
+    },
+    "checkpoints_dynamic": {
+      "path": "checkpoints_dynamic",
+      "purpose": null,
+      "fileCount": 11,
+      "lastAccessed": 1775871034574,
+      "keyFiles": [
+        "bpp_n100_best.pt",
+        "bpp_n100_epoch1.pt",
+        "bpp_n100_epoch10.pt",
+        "bpp_n100_epoch2.pt",
+        "bpp_n100_epoch3.pt"
+      ]
+    },
+    "checkpoints_extended": {
+      "path": "checkpoints_extended",
+      "purpose": null,
+      "fileCount": 117,
+      "lastAccessed": 1775871034574,
+      "keyFiles": [
+        "bpp_n10_best.pt",
+        "bpp_n10_epoch1.pt",
+        "bpp_n10_epoch10.pt",
+        "bpp_n10_epoch2.pt",
+        "bpp_n10_epoch3.pt"
+      ]
+    },
+    "checkpoints_static": {
+      "path": "checkpoints_static",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775871034575,
+      "keyFiles": [
+        "bpp_n100_epoch1.pt"
+      ]
+    },
+    "csv": {
+      "path": "csv",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1775871034576,
+      "keyFiles": [
+        "corr_cvrp.csv",
+        "mean_cvrp.csv",
+        "prior_eta_corr.csv",
+        "prior_mean.csv",
+        "val_gap.csv"
+      ]
+    },
+    "data": {
+      "path": "data",
+      "purpose": "Data files",
+      "fileCount": 0,
+      "lastAccessed": 1775871034576,
+      "keyFiles": []
+    },
+    "experiments": {
+      "path": "experiments",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775871034577,
+      "keyFiles": [
+        "collect_phase1_ls_results.py",
+        "phase1_ls_matrix.py",
+        "run_phase1_ls_matrix.sh"
+      ]
+    },
+    "logs": {
+      "path": "logs",
+      "purpose": null,
+      "fileCount": 232,
+      "lastAccessed": 1775871034578,
+      "keyFiles": [
+        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_061849_annealingTrue.txt",
+        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_072650_annealingTrue.txt",
+        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_125407_annealingTrue.txt",
+        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260207_012929_annealingTrue.txt",
+        "test_cvrp_10000_cvrp_n10000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_230314_annealingTrue.txt"
+      ]
+    },
+    "models": {
+      "path": "models",
+      "purpose": "Data models",
+      "fileCount": 0,
+      "lastAccessed": 1775871034579,
+      "keyFiles": []
+    },
+    "original": {
+      "path": "original",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775871034579,
+      "keyFiles": []
+    },
+    "output": {
+      "path": "output",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775871034580,
+      "keyFiles": []
+    },
+    "pretrained": {
+      "path": "pretrained",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1775871034581,
+      "keyFiles": [
+        "tsp_n100000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt",
+        "tsp_n100000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
+        "tsp_n10000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt",
+        "tsp_n10000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_deepaco_static_best.pt",
+        "tsp_n10000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_static_best.pt"
+      ]
+    },
+    "results": {
+      "path": "results",
+      "purpose": null,
+      "fileCount": 9,
+      "lastAccessed": 1775871034581,
+      "keyFiles": [
+        "cross_scale_generalization.csv",
+        "cvrp_behavior.csv",
+        "efficiency_analysis.csv",
+        "guidance_transition.csv",
+        "hyperparam_sensitivity.csv"
+      ]
+    },
+    "reviewer_experiments": {
+      "path": "reviewer_experiments",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775871034581,
+      "keyFiles": [
+        "experiment_progress.json"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 9,
+      "lastAccessed": 1775871034582,
+      "keyFiles": [
+        "binding.cpp",
+        "faco_opt.cpython-313-x86_64-linux-gnu.so",
+        "faco_opt.cpython-314-x86_64-linux-gnu.so",
+        "kd_tree.h",
+        "mfaco_train.cpp"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 3,
+      "lastAccessed": 1775871034582,
+      "keyFiles": [
+        "test_cvrp_capacity_sweep.py",
+        "test_extended_regressions.py",
+        "test_train_and_test_cvrp.py"
+      ]
+    },
+    "wandb": {
+      "path": "wandb",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775871034582,
+      "keyFiles": []
+    },
+    "build/lib": {
+      "path": "build/lib",
+      "purpose": "Library code",
+      "fileCount": 0,
+      "lastAccessed": 1775871034584,
+      "keyFiles": []
+    },
+    "reviewer_experiments/models": {
+      "path": "reviewer_experiments/models",
+      "purpose": "Data models",
+      "fileCount": 0,
+      "lastAccessed": 1775871034589,
+      "keyFiles": []
+    },
+    "src/build": {
+      "path": "src/build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1775871034591,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

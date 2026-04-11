@@ -865,7 +865,11 @@ def train_epoch(
         if args.problem == 'tsp':
             instance_data = np.random.rand(args.n_node, 2).astype(np.float32)
         else:
-            coords_t, demand_t, capacity = gen_func(args.n_node, device=args.device)
+            coords_t, demand_t, capacity = gen_func(
+                args.n_node,
+                device=args.device,
+                capacity=args.capacity_override,
+            )
             instance_data = (
                 coords_t.detach().cpu().numpy().astype(np.float32),
                 demand_t.detach().cpu().numpy().astype(np.float32),
@@ -1299,6 +1303,8 @@ def parse_args() -> argparse.Namespace:
                         help="Generate validation set")
     parser.add_argument("--save_generated", type=str, default=None,
                         help="Path to save generated validation dataset")
+    parser.add_argument("--capacity_override", type=float, default=None,
+                        help="Override CVRP capacity during train/validation generation")
     parser.add_argument("--val_H", type=int, default=None)
     parser.add_argument("--val_mini_H", type=int, default=None)
 
@@ -1344,6 +1350,8 @@ def build_model_name(args: argparse.Namespace) -> str:
     name = (f"{args.problem}_n{args.n_node}_k{args.k_sparse}_ants{args.n_ants}"
             f"_H{args.H}_miniH{args.mini_H}_rho{args.rho}"
             f"_mne{args.min_new_edges}_{args.algo}_lr{args.lr}")
+    if args.problem == 'cvrp' and args.capacity_override is not None:
+        name += f"_cap{args.capacity_override:g}"
     
     if args.train_anneal:
         name += f"_anneal_g{args.gamma}_mg{args.min_gamma}"
@@ -1401,7 +1409,8 @@ def load_validation_data(args: argparse.Namespace, logger: Logger):
             baseline_solver=baseline_solver,
             baseline_runs=args.baseline_runs,
             time_limit=args.baseline_time_limit,
-            device='cpu'
+            device='cpu',
+            capacity_override=args.capacity_override if args.problem == 'cvrp' else None,
         )
     elif args.val_dataset:
         logger.info(f"Loading validation dataset from {args.val_dataset}...")
@@ -1487,7 +1496,7 @@ def _generate_fallback_dataset(args: argparse.Namespace):
         if args.problem == 'tsp':
             val_dataset.append(torch.from_numpy(gen_fn(args.n_node)))
         else:
-            c, d, cap = gen_fn(args.n_node, device='cpu')
+            c, d, cap = gen_fn(args.n_node, device='cpu', capacity=args.capacity_override)
             val_dataset.append((c.cpu(), d.cpu(), cap))
     
     return val_dataset
@@ -1591,7 +1600,9 @@ def main():
     # Auto-set min_new_edges for CVRP based on capacity
     if args.problem == 'cvrp' and args.min_new_edges is None:
         # Use same capacity logic as utils.gen_cvrp_instance
-        if args.n_node >= 50000:
+        if args.capacity_override is not None:
+            capacity = float(args.capacity_override)
+        elif args.n_node >= 50000:
             capacity = 2000
         elif args.n_node >= 10000:
             capacity = 1000

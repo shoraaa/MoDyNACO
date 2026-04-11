@@ -1,0 +1,2 @@
+status,returncode,cost,gap,time,model_path,summary_json,log_file
+ok,0,51.6623,1.351,0.7765,reviewer_experiments/models/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt,reviewer_experiments/results/tmp/cross_scale_tsp_train1000_test5000.json,reviewer_experiments/logs/test_tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.log
