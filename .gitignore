@@ -21,3 +21,8 @@ tmp_models
 csv
 test_mem3.py
 test_mem4.py
+reviewer_experiments
+results
+models
+pretrained
+checkpoints_*
