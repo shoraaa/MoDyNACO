@@ -1,2 +1,0 @@
-status,returncode,cost,gap,time,model_path,summary_json,log_file
-ok,0,,,,checkpoints/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt,reviewer_experiments/results/artifacts/test/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best_n1000_synthetic.json,reviewer_experiments/logs/test_cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.log

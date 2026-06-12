@@ -1,0 +1,9 @@
+problem,cvrp
+n_node,1000
+checkpoint,pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt
+dataset,../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/CVRPlib_survey_instances_converted.txt
+seed,1234
+
+Method,MeanCost,StdCost,Gap%,StdGap%,GapRef,MeanTime,TotalTime,Best
+Model(anneal),76.4222,65.3944,2.92,2.57,opt,3.50+0.09,384.52+9.92,BEST
+Model(anneal)@I1000,76.4222,65.3944,-,-,-,3.43+0.09,377.32+9.92,

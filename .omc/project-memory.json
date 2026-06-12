@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1775871034591,
+  "lastScanned": 1776842220960,
   "projectRoot": "/home/shora/Research/old/NGFACO",
   "techStack": {
     "languages": [
@@ -11,6 +11,14 @@
         "markers": [
           "pyproject.toml"
         ]
+      },
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
       }
     ],
     "frameworks": [],
@@ -18,8 +26,8 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": null,
-    "testCommand": "pytest",
+    "buildCommand": "make build",
+    "testCommand": "make test",
     "lintCommand": "ruff check",
     "devCommand": null,
     "scripts": {}
@@ -34,6 +42,7 @@
     "isMonorepo": false,
     "workspaces": [],
     "mainDirectories": [
+      "scripts",
       "src",
       "tests"
     ],
@@ -47,8 +56,8 @@
     "__pycache__": {
       "path": "__pycache__",
       "purpose": null,
-      "fileCount": 32,
-      "lastAccessed": 1775871034568,
+      "fileCount": 37,
+      "lastAccessed": 1776842220928,
       "keyFiles": [
         "baselines.cpython-313.pyc",
         "baselines.cpython-314.pyc",
@@ -61,14 +70,14 @@
       "path": "build",
       "purpose": "Build output",
       "fileCount": 0,
-      "lastAccessed": 1775871034571,
+      "lastAccessed": 1776842220931,
       "keyFiles": []
     },
     "checkpoints": {
       "path": "checkpoints",
       "purpose": null,
       "fileCount": 24,
-      "lastAccessed": 1775871034573,
+      "lastAccessed": 1776842220935,
       "keyFiles": [
         "cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
         "cvrp_n10000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
@@ -77,37 +86,11 @@
         "cvrp_n50000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt"
       ]
     },
-    "checkpoints_compare": {
-      "path": "checkpoints_compare",
-      "purpose": null,
-      "fileCount": 10,
-      "lastAccessed": 1775871034573,
-      "keyFiles": [
-        "bpp_n20_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt",
-        "bpp_n20_k32_ants20_H5_miniH5_rho0.9_lr0.0003_static_prior_best.pt",
-        "bpp_n50_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt",
-        "bpp_n50_k32_ants20_H5_miniH5_rho0.9_lr0.0003_static_prior_best.pt",
-        "mkp_n20_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt"
-      ]
-    },
-    "checkpoints_dynamic": {
-      "path": "checkpoints_dynamic",
-      "purpose": null,
-      "fileCount": 11,
-      "lastAccessed": 1775871034574,
-      "keyFiles": [
-        "bpp_n100_best.pt",
-        "bpp_n100_epoch1.pt",
-        "bpp_n100_epoch10.pt",
-        "bpp_n100_epoch2.pt",
-        "bpp_n100_epoch3.pt"
-      ]
-    },
     "checkpoints_extended": {
       "path": "checkpoints_extended",
       "purpose": null,
-      "fileCount": 117,
-      "lastAccessed": 1775871034574,
+      "fileCount": 129,
+      "lastAccessed": 1776842220936,
       "keyFiles": [
         "bpp_n10_best.pt",
         "bpp_n10_epoch1.pt",
@@ -116,85 +99,40 @@
         "bpp_n10_epoch3.pt"
       ]
     },
-    "checkpoints_static": {
-      "path": "checkpoints_static",
+    "configs": {
+      "path": "configs",
       "purpose": null,
-      "fileCount": 1,
-      "lastAccessed": 1775871034575,
+      "fileCount": 8,
+      "lastAccessed": 1776842220937,
       "keyFiles": [
-        "bpp_n100_epoch1.pt"
-      ]
-    },
-    "csv": {
-      "path": "csv",
-      "purpose": null,
-      "fileCount": 5,
-      "lastAccessed": 1775871034576,
-      "keyFiles": [
-        "corr_cvrp.csv",
-        "mean_cvrp.csv",
-        "prior_eta_corr.csv",
-        "prior_mean.csv",
-        "val_gap.csv"
+        "bpp_n50_ppo.yaml",
+        "cvrp_n1000_ppo.yaml",
+        "mkp_n50_ppo.yaml",
+        "op_n50_ppo.yaml",
+        "test_tsp_n1000_ppo.yaml"
       ]
     },
     "data": {
       "path": "data",
       "purpose": "Data files",
       "fileCount": 0,
-      "lastAccessed": 1775871034576,
+      "lastAccessed": 1776842220938,
       "keyFiles": []
     },
     "experiments": {
       "path": "experiments",
       "purpose": null,
-      "fileCount": 3,
-      "lastAccessed": 1775871034577,
+      "fileCount": 1,
+      "lastAccessed": 1776842220941,
       "keyFiles": [
-        "collect_phase1_ls_results.py",
-        "phase1_ls_matrix.py",
-        "run_phase1_ls_matrix.sh"
+        "index.csv"
       ]
-    },
-    "logs": {
-      "path": "logs",
-      "purpose": null,
-      "fileCount": 232,
-      "lastAccessed": 1775871034578,
-      "keyFiles": [
-        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_061849_annealingTrue.txt",
-        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_072650_annealingTrue.txt",
-        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_125407_annealingTrue.txt",
-        "test_cvrp_100000_cvrp_n100000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260207_012929_annealingTrue.txt",
-        "test_cvrp_10000_cvrp_n10000_k32_ants100_H10_miniH100_rho0.5_mne20_ppo_lr5e-06_best_gen_20260206_230314_annealingTrue.txt"
-      ]
-    },
-    "models": {
-      "path": "models",
-      "purpose": "Data models",
-      "fileCount": 0,
-      "lastAccessed": 1775871034579,
-      "keyFiles": []
-    },
-    "original": {
-      "path": "original",
-      "purpose": null,
-      "fileCount": 0,
-      "lastAccessed": 1775871034579,
-      "keyFiles": []
-    },
-    "output": {
-      "path": "output",
-      "purpose": null,
-      "fileCount": 0,
-      "lastAccessed": 1775871034580,
-      "keyFiles": []
     },
     "pretrained": {
       "path": "pretrained",
       "purpose": null,
       "fileCount": 13,
-      "lastAccessed": 1775871034581,
+      "lastAccessed": 1776842220942,
       "keyFiles": [
         "tsp_n100000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt",
         "tsp_n100000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
@@ -203,33 +141,24 @@
         "tsp_n10000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_static_best.pt"
       ]
     },
-    "results": {
-      "path": "results",
-      "purpose": null,
-      "fileCount": 9,
-      "lastAccessed": 1775871034581,
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 8,
+      "lastAccessed": 1776842220944,
       "keyFiles": [
-        "cross_scale_generalization.csv",
-        "cvrp_behavior.csv",
-        "efficiency_analysis.csv",
-        "guidance_transition.csv",
-        "hyperparam_sensitivity.csv"
-      ]
-    },
-    "reviewer_experiments": {
-      "path": "reviewer_experiments",
-      "purpose": null,
-      "fileCount": 1,
-      "lastAccessed": 1775871034581,
-      "keyFiles": [
-        "experiment_progress.json"
+        "clean.py",
+        "compare.py",
+        "evaluate.py",
+        "indexExperiments.py",
+        "migrate_checkpoints.py"
       ]
     },
     "src": {
       "path": "src",
       "purpose": "Source code",
       "fileCount": 9,
-      "lastAccessed": 1775871034582,
+      "lastAccessed": 1776842220948,
       "keyFiles": [
         "binding.cpp",
         "faco_opt.cpython-313-x86_64-linux-gnu.so",
@@ -241,43 +170,267 @@
     "tests": {
       "path": "tests",
       "purpose": "Test files",
-      "fileCount": 3,
-      "lastAccessed": 1775871034582,
+      "fileCount": 10,
+      "lastAccessed": 1776842220948,
       "keyFiles": [
+        "__init__.py",
+        "test_cvrp.py",
         "test_cvrp_capacity_sweep.py",
-        "test_extended_regressions.py",
-        "test_train_and_test_cvrp.py"
+        "test_cvrp_graph_regressions.py",
+        "test_extended_common.py"
       ]
     },
     "wandb": {
       "path": "wandb",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1775871034582,
+      "lastAccessed": 1776842220950,
       "keyFiles": []
     },
     "build/lib": {
       "path": "build/lib",
       "purpose": "Library code",
       "fileCount": 0,
-      "lastAccessed": 1775871034584,
-      "keyFiles": []
-    },
-    "reviewer_experiments/models": {
-      "path": "reviewer_experiments/models",
-      "purpose": "Data models",
-      "fileCount": 0,
-      "lastAccessed": 1775871034589,
+      "lastAccessed": 1776842220950,
       "keyFiles": []
     },
     "src/build": {
       "path": "src/build",
       "purpose": "Build output",
       "fileCount": 0,
-      "lastAccessed": 1775871034591,
+      "lastAccessed": 1776842220959,
       "keyFiles": []
     }
   },
-  "hotPaths": [],
+  "hotPaths": [
+    {
+      "path": "faco.py",
+      "accessCount": 77,
+      "lastAccessed": 1776844949861,
+      "type": "file"
+    },
+    {
+      "path": "utils.py",
+      "accessCount": 56,
+      "lastAccessed": 1776845282953,
+      "type": "file"
+    },
+    {
+      "path": "test.py",
+      "accessCount": 45,
+      "lastAccessed": 1776844696985,
+      "type": "file"
+    },
+    {
+      "path": "train.py",
+      "accessCount": 40,
+      "lastAccessed": 1776845283176,
+      "type": "file"
+    },
+    {
+      "path": "faco_extended.py",
+      "accessCount": 25,
+      "lastAccessed": 1776741772240,
+      "type": "directory"
+    },
+    {
+      "path": "utils_extended.py",
+      "accessCount": 23,
+      "lastAccessed": 1776726746943,
+      "type": "file"
+    },
+    {
+      "path": "smoke_test.py",
+      "accessCount": 20,
+      "lastAccessed": 1776741353808,
+      "type": "file"
+    },
+    {
+      "path": "extended_common.py",
+      "accessCount": 18,
+      "lastAccessed": 1776844949959,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_extended_regressions.py",
+      "accessCount": 11,
+      "lastAccessed": 1776741807267,
+      "type": "file"
+    },
+    {
+      "path": "scripts/train.py",
+      "accessCount": 10,
+      "lastAccessed": 1776621178145,
+      "type": "file"
+    },
+    {
+      "path": "scripts/evaluate.py",
+      "accessCount": 7,
+      "lastAccessed": 1776659679071,
+      "type": "file"
+    },
+    {
+      "path": "net_extended.py",
+      "accessCount": 7,
+      "lastAccessed": 1776726590433,
+      "type": "file"
+    },
+    {
+      "path": "net.py",
+      "accessCount": 7,
+      "lastAccessed": 1776844895113,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 6,
+      "lastAccessed": 1776693679038,
+      "type": "directory"
+    },
+    {
+      "path": "verify_unification.py",
+      "accessCount": 4,
+      "lastAccessed": 1776668069314,
+      "type": "file"
+    },
+    {
+      "path": "scripts/compare.py",
+      "accessCount": 3,
+      "lastAccessed": 1776659773043,
+      "type": "file"
+    },
+    {
+      "path": "cpp_aco_wrapper.py",
+      "accessCount": 3,
+      "lastAccessed": 1776669736217,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_extended_common.py",
+      "accessCount": 3,
+      "lastAccessed": 1776742868100,
+      "type": "file"
+    },
+    {
+      "path": "scripts/indexExperiments.py",
+      "accessCount": 2,
+      "lastAccessed": 1776620640656,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1776660977592,
+      "type": "file"
+    },
+    {
+      "path": "net_tsp_l2c.py",
+      "accessCount": 2,
+      "lastAccessed": 1776845282665,
+      "type": "file"
+    },
+    {
+      "path": "env_tsp_l2c.py",
+      "accessCount": 2,
+      "lastAccessed": 1776845282673,
+      "type": "file"
+    },
+    {
+      "path": "train_tsp_l2c.py",
+      "accessCount": 2,
+      "lastAccessed": 1776845283036,
+      "type": "file"
+    },
+    {
+      "path": "Makefile",
+      "accessCount": 1,
+      "lastAccessed": 1776618602444,
+      "type": "file"
+    },
+    {
+      "path": "configs/tsp_n1000_ppo.yaml",
+      "accessCount": 1,
+      "lastAccessed": 1776619727322,
+      "type": "file"
+    },
+    {
+      "path": "configs/test_tsp_n1000_ppo.yaml",
+      "accessCount": 1,
+      "lastAccessed": 1776619733206,
+      "type": "file"
+    },
+    {
+      "path": "configs/test_tsp_n100_ppo.yaml",
+      "accessCount": 1,
+      "lastAccessed": 1776619943199,
+      "type": "file"
+    },
+    {
+      "path": "PIPELINE.md",
+      "accessCount": 1,
+      "lastAccessed": 1776660960635,
+      "type": "file"
+    },
+    {
+      "path": "QUICKREF.md",
+      "accessCount": 1,
+      "lastAccessed": 1776661001512,
+      "type": "file"
+    },
+    {
+      "path": "experiments/index.csv",
+      "accessCount": 1,
+      "lastAccessed": 1776661296111,
+      "type": "file"
+    },
+    {
+      "path": "pyproject.toml",
+      "accessCount": 1,
+      "lastAccessed": 1776661667717,
+      "type": "file"
+    },
+    {
+      "path": "src/binding.cpp",
+      "accessCount": 1,
+      "lastAccessed": 1776661783961,
+      "type": "file"
+    },
+    {
+      "path": "src/setup.py",
+      "accessCount": 1,
+      "lastAccessed": 1776661795463,
+      "type": "file"
+    },
+    {
+      "path": "src",
+      "accessCount": 1,
+      "lastAccessed": 1776664057625,
+      "type": "directory"
+    },
+    {
+      "path": "tests/test_unified_entrypoints.py",
+      "accessCount": 1,
+      "lastAccessed": 1776664342816,
+      "type": "file"
+    },
+    {
+      "path": ".claude/plans/dreamy-brewing-kernighan.md",
+      "accessCount": 1,
+      "lastAccessed": 1776664665805,
+      "type": "file"
+    },
+    {
+      "path": "tests",
+      "accessCount": 1,
+      "lastAccessed": 1776665525748,
+      "type": "directory"
+    },
+    {
+      "path": "baselines.py",
+      "accessCount": 1,
+      "lastAccessed": 1776844949914,
+      "type": "file"
+    }
+  ],
   "userDirectives": []
 }

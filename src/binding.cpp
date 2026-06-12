@@ -193,30 +193,7 @@ public:
 
   void seed_rng(uint64_t seed) { solver->seed_rng(seed); }
 
-  py::tuple
-  sample(float invtemp = 1.0f, // unused for now, heuristic is pre-baked
-         bool require_prob = false, py::object prior_obj = py::none(),
-         bool parallel_traced = false) {
-    const float *prior_ptr = nullptr;
-    py::array_t<float> prior_arr;
-
-    if (!prior_obj.is_none()) {
-      prior_arr = prior_obj.cast<
-          py::array_t<float, py::array::c_style | py::array::forcecast>>();
-      auto buf = prior_arr.request();
-      if (buf.ndim != 2 || buf.shape[0] != solver->n ||
-          buf.shape[1] != solver->k) {
-        throw std::runtime_error("prior must be shape (n, k)");
-      }
-      prior_ptr = static_cast<const float *>(buf.ptr);
-    }
-
-    SampleResult result;
-    {
-      py::gil_scoped_release release;
-      solver->sample(require_prob, prior_ptr, result, parallel_traced);
-    }
-
+  py::tuple result_to_tuple(SampleResult &result, bool require_prob) {
     py::array_t<float> costs(solver->n_ants);
     auto costs_buf = costs.mutable_unchecked<1>();
     for (int32_t a = 0; a < solver->n_ants; ++a)
@@ -297,6 +274,88 @@ public:
     return py::make_tuple(costs, flats, touched_list, logps_arr, traces_obj,
                           costs_raw_obj, flats_raw_obj, new_edges_arr,
                           survival_arr);
+  }
+
+  py::tuple
+  sample(float invtemp = 1.0f, // unused for now, heuristic is pre-baked
+         bool require_prob = false, py::object prior_obj = py::none(),
+         bool parallel_traced = false) {
+    const float *prior_ptr = nullptr;
+    py::array_t<float> prior_arr;
+
+    if (!prior_obj.is_none()) {
+      prior_arr = prior_obj.cast<
+          py::array_t<float, py::array::c_style | py::array::forcecast>>();
+      auto buf = prior_arr.request();
+      if (buf.ndim != 2 || buf.shape[0] != solver->n ||
+          buf.shape[1] != solver->k) {
+        throw std::runtime_error("prior must be shape (n, k)");
+      }
+      prior_ptr = static_cast<const float *>(buf.ptr);
+    }
+
+    SampleResult result;
+    {
+      py::gil_scoped_release release;
+      solver->sample(require_prob, prior_ptr, result, parallel_traced);
+    }
+    return result_to_tuple(result, require_prob);
+  }
+
+  py::tuple sample_ant_priors(
+      bool require_prob,
+      py::array_t<float, py::array::c_style | py::array::forcecast>
+          ant_priors,
+      bool parallel_traced = false) {
+    auto buf = ant_priors.request();
+    if (buf.ndim != 3 || buf.shape[0] != solver->n_ants ||
+        buf.shape[1] != solver->n || buf.shape[2] != solver->k) {
+      throw std::runtime_error("ant_priors must be shape (n_ants, n, k)");
+    }
+    const float *prior_ptr = static_cast<const float *>(buf.ptr);
+    SampleResult result;
+    {
+      py::gil_scoped_release release;
+      solver->sample_ant_priors(require_prob, prior_ptr, result,
+                                parallel_traced);
+    }
+    return result_to_tuple(result, require_prob);
+  }
+
+  py::tuple sample_head_priors(
+      bool require_prob,
+      py::array_t<float, py::array::c_style | py::array::forcecast>
+          head_priors,
+      bool parallel_traced = false, py::object head_counts_obj = py::none()) {
+    auto buf = head_priors.request();
+    if (buf.ndim != 3 || buf.shape[0] < 1 ||
+        buf.shape[0] > solver->n_ants || buf.shape[1] != solver->n ||
+        buf.shape[2] != solver->k) {
+      throw std::runtime_error(
+          "head_priors must be shape (n_heads, n, k), with 1 <= n_heads <= n_ants");
+    }
+    const float *prior_ptr = static_cast<const float *>(buf.ptr);
+    int32_t n_heads = static_cast<int32_t>(buf.shape[0]);
+    py::array_t<int32_t, py::array::c_style | py::array::forcecast>
+        head_counts_arr;
+    const int32_t *head_counts_ptr = nullptr;
+    if (!head_counts_obj.is_none()) {
+      head_counts_arr =
+          head_counts_obj.cast<py::array_t<int32_t, py::array::c_style |
+                                                    py::array::forcecast>>();
+      auto counts_buf = head_counts_arr.request();
+      if (counts_buf.ndim != 1 || counts_buf.shape[0] != n_heads) {
+        throw std::runtime_error("head_counts must be shape (n_heads,)");
+      }
+      head_counts_ptr = static_cast<const int32_t *>(counts_buf.ptr);
+    }
+    SampleResult result;
+    {
+      py::gil_scoped_release release;
+      solver->sample_head_priors(require_prob, prior_ptr, n_heads, result,
+                                 parallel_traced, head_counts_ptr);
+    }
+    return result_to_tuple(result, require_prob);
   }
 
   void update_pheromone_from_flat(
@@ -441,6 +500,126 @@ public:
     {
       py::gil_scoped_release release;
       solver->sample(require_prob, prior_ptr, result, parallel_traced);
+    }
+
+    py::array_t<float> costs(solver->n_ants);
+    auto cb = costs.mutable_unchecked<1>();
+    for (int32_t a = 0; a < solver->n_ants; ++a)
+      cb(a) = result.costs[a];
+
+    py::list routes;
+    for (int32_t a = 0; a < solver->n_ants; ++a) {
+      const auto &r = result.routes[a];
+      py::array_t<int32_t> r_arr((py::ssize_t)r.size());
+      auto rb = r_arr.mutable_unchecked<1>();
+      for (size_t i = 0; i < r.size(); ++i)
+        rb(i) = r[i];
+      routes.append(r_arr);
+    }
+
+    py::object decoded_obj = py::none();
+    if (return_decoded) {
+      decoded_obj = routes;
+    }
+
+    py::object traces_obj = py::none();
+    if (require_prob) {
+      auto t = std::make_unique<PyMFACOTrace>();
+      t->batch = std::move(result.traces);
+      t->n_ants = solver->n_ants;
+      traces_obj = py::cast(std::move(t));
+    }
+
+    py::array_t<float> costs_raw(solver->n_ants);
+    if (!result.costs_raw.empty()) {
+      auto cb = costs_raw.mutable_unchecked<1>();
+      for (int32_t a = 0; a < solver->n_ants; ++a)
+        cb(a) = result.costs_raw[a];
+    }
+
+    py::list perms_raw;
+    if (!result.routes_raw.empty()) {
+      for (int32_t a = 0; a < solver->n_ants; ++a) {
+        if (!result.routes_raw[a].empty()) {
+          const auto &r = result.routes_raw[a];
+          py::array_t<int32_t> r_arr((py::ssize_t)r.size());
+          auto rb = r_arr.mutable_unchecked<1>();
+          for (size_t i = 0; i < r.size(); ++i)
+            rb(i) = r[i];
+          perms_raw.append(r_arr);
+        } else {
+          perms_raw.append(py::none());
+        }
+      }
+    }
+
+    py::array_t<float> logps_arr(solver->n_ants);
+    if (!result.logps.empty()) {
+      auto logps_buf = logps_arr.mutable_unchecked<1>();
+      for (int32_t a = 0; a < solver->n_ants; ++a) {
+        logps_buf(a) = result.logps[a];
+      }
+    }
+
+    py::array_t<int32_t> new_edges_arr(solver->n_ants);
+    auto ne_buf = new_edges_arr.mutable_unchecked<1>();
+    if (!result.new_edges_count.empty()) {
+      for (int32_t a = 0; a < solver->n_ants; ++a) {
+        ne_buf(a) = result.new_edges_count[a];
+      }
+    } else {
+      for (int32_t a = 0; a < solver->n_ants; ++a)
+        ne_buf(a) = 0;
+    }
+
+    py::array_t<float> survival_arr(solver->n_ants);
+    auto surv_buf = survival_arr.mutable_unchecked<1>();
+    if (!result.edge_survival.empty()) {
+      for (int32_t a = 0; a < solver->n_ants; ++a)
+        surv_buf(a) = result.edge_survival[a];
+    } else {
+      for (int32_t a = 0; a < solver->n_ants; ++a)
+        surv_buf(a) = 0.0f;
+    }
+
+    return py::make_tuple(costs, routes, decoded_obj, logps_arr, traces_obj,
+                          costs_raw, perms_raw, new_edges_arr, survival_arr);
+  }
+
+  py::tuple sample_head_priors(
+      bool require_prob,
+      py::array_t<float, py::array::c_style | py::array::forcecast>
+          head_priors,
+      bool parallel_traced = false, bool return_decoded = false,
+      py::object head_counts_obj = py::none()) {
+    auto hbuf = head_priors.request();
+    if (hbuf.ndim != 3 || hbuf.shape[0] < 1 ||
+        hbuf.shape[0] > solver->n_ants || hbuf.shape[1] != solver->n ||
+        hbuf.shape[2] != solver->k) {
+      throw std::runtime_error(
+          "head_priors must be shape (n_heads, n, k), with 1 <= n_heads <= n_ants");
+    }
+
+    const float *prior_ptr = static_cast<const float *>(hbuf.ptr);
+    int32_t n_heads = static_cast<int32_t>(hbuf.shape[0]);
+    py::array_t<int32_t, py::array::c_style | py::array::forcecast>
+        head_counts_arr;
+    const int32_t *head_counts_ptr = nullptr;
+    if (!head_counts_obj.is_none()) {
+      head_counts_arr =
+          head_counts_obj.cast<py::array_t<int32_t, py::array::c_style |
+                                                    py::array::forcecast>>();
+      auto counts_buf = head_counts_arr.request();
+      if (counts_buf.ndim != 1 || counts_buf.shape[0] != n_heads) {
+        throw std::runtime_error("head_counts must be shape (n_heads,)");
+      }
+      head_counts_ptr = static_cast<const int32_t *>(counts_buf.ptr);
+    }
+    SampleResult result;
+    {
+      py::gil_scoped_release release;
+      solver->sample_head_priors(require_prob, prior_ptr, n_heads, result,
+                                 parallel_traced, head_counts_ptr);
     }
 
     py::array_t<float> costs(solver->n_ants);
@@ -927,6 +1106,13 @@ PYBIND11_MODULE(faco_opt, m) {
       .def("sample", &PyMFACO_TSP::sample, py::arg("invtemp") = 1.0f,
            py::arg("require_prob") = false, py::arg("prior") = py::none(),
            py::arg("parallel_traced") = false)
+      .def("sample_ant_priors", &PyMFACO_TSP::sample_ant_priors,
+           py::arg("require_prob"), py::arg("ant_priors"),
+           py::arg("parallel_traced") = false)
+      .def("sample_head_priors", &PyMFACO_TSP::sample_head_priors,
+           py::arg("require_prob"), py::arg("head_priors"),
+           py::arg("parallel_traced") = false,
+           py::arg("head_counts") = py::none())
       .def("_update_pheromone_from_flat",
            &PyMFACO_TSP::update_pheromone_from_flat)
       .def("load_snapshot", &PyMFACO_TSP::load_snapshot)
@@ -975,6 +1161,11 @@ PYBIND11_MODULE(faco_opt, m) {
       .def("sample", &PyMFACO_CVRP::sample, py::arg("require_prob") = false,
            py::arg("prior") = py::none(), py::arg("parallel_traced") = false,
            py::arg("return_decoded") = false)
+      .def("sample_head_priors", &PyMFACO_CVRP::sample_head_priors,
+           py::arg("require_prob"), py::arg("head_priors"),
+           py::arg("parallel_traced") = false,
+           py::arg("return_decoded") = false,
+           py::arg("head_counts") = py::none())
       .def("update_pheromone_from_route",
            &PyMFACO_CVRP::update_pheromone_from_route)
       .def_property(

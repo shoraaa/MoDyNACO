@@ -1,0 +1,91 @@
+{
+  "checkpoint": "pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_mh4_hg0_hdants_ha25-25-25-25_anchor1_balanced_anchor_best.pt",
+  "dataset": "../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/TSP_survey_converted.txt",
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 4432300.506786377,
+      "avg_ant_before_ls": 4443395.140957935,
+      "avg_incumbent_after_aco": 4428776.287190399,
+      "final_ant_after_ls": 4329089.948014912,
+      "final_ant_before_ls": 4355729.344935367,
+      "final_incumbent_after_aco": 4322208.962081775,
+      "gap_pct": 1.9566753276995703,
+      "gap_std_pct": 1.8473012357179315,
+      "guidance_diagnostics": {
+        "enhance": 0.15094986984683936,
+        "head_best_after": [
+          4429140.6228904035,
+          null,
+          null,
+          null
+        ],
+        "head_best_before": [
+          4434385.876701166,
+          null,
+          null,
+          null
+        ],
+        "head_best_fraction": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "head_enhance": [
+          0.15094542705980865,
+          0.1509516470503928,
+          0.1509505003774457,
+          0.1509520435699654
+        ],
+        "head_improvement_fraction": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "head_logit_corr": 1.0000049223851042,
+        "head_mean_after": [
+          4432300.509512656,
+          null,
+          null,
+          null
+        ],
+        "head_mean_before": [
+          4443395.142598075,
+          null,
+          null,
+          null
+        ],
+        "head_rebellion": [
+          0.008065637720445712,
+          0.008065404706658548,
+          0.008065552072014868,
+          0.008065295303419606
+        ],
+        "head_suppression": [
+          0.16670331146339315,
+          0.16670660552029548,
+          0.16670634013911087,
+          0.16670686780033928
+        ],
+        "head_topk_overlap": 0.9999961303393214,
+        "num_heads": 4,
+        "rebellion": 0.008065491463339002,
+        "suppression": 0.1667070489964987
+      },
+      "mean_cost": 4322208.962081775,
+      "mean_guidance": 5.6297628837720195,
+      "mean_neural_time_s": 0.35996618814635695,
+      "mean_time_s": 6.85756510600709,
+      "pheromone_correlation": 0.09479148021642904,
+      "std_cost": 17172670.945759915,
+      "std_neural_time_s": 0.6440972615467421,
+      "std_time_s": 13.452621959082892,
+      "total_neural_time_s": 82.07229089736938,
+      "total_time_s": 1563.5248441696167
+    }
+  },
+  "n_node": 1000,
+  "problem": "tsp",
+  "seed": 1234
+}

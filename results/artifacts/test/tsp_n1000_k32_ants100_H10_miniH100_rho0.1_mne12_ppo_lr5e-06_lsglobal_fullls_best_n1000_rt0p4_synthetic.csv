@@ -1,2 +1,0 @@
-status,returncode,cost,gap,time,model_path,summary_json,log_file
-ok,0,23.199,0.0398,0.4051,reviewer_experiments/models/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_lsglobal_fullls_best.pt,reviewer_experiments/results/artifacts/test/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_lsglobal_fullls_best_n1000_rt0p4_synthetic.json,reviewer_experiments/logs/test_tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_lsglobal_fullls_best.log

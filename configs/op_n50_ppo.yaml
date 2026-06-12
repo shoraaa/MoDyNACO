@@ -1,0 +1,31 @@
+# DyNACO Configuration: Orienteering Problem (OP) with PPO
+problem: op
+n_node: 50
+k_sparse: 32
+n_ants: 20
+H: 5
+mini_H: 5
+epochs: 10
+algo: ppo
+rho: 0.9
+lr: 0.0003
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+
+# OP-specific
+max_len: 4.0
+
+# Experiment metadata
+experiment_name: op_n50_ppo_v1
+description: "OP-50 with PPO"
+author: "DyNACO Team"
+
+# W&B
+use_wandb: true
+wandb_project: "dyanco"
+wandb_entity: null

@@ -1,0 +1,31 @@
+# DyNACO Configuration: Multiple Knapsack Problem (MKP) with PPO
+problem: mkp
+n_node: 50
+k_sparse: 32
+n_ants: 20
+H: 5
+mini_H: 5
+epochs: 10
+algo: ppo
+rho: 0.9
+lr: 0.0003
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+
+# MKP-specific
+m: 5  # Number of knapsacks/constraints
+
+# Experiment metadata
+experiment_name: mkp_n50_ppo_v1
+description: "MKP-50 with PPO"
+author: "DyNACO Team"
+
+# W&B
+use_wandb: true
+wandb_project: "dyanco"
+wandb_entity: null

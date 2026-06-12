@@ -1,0 +1,29 @@
+{
+  "checkpoint": "pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_ha85-5-5-5_anchor1_anchored_best.pt",
+  "dataset": "../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/CVRPlib_survey_instances_converted.txt",
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 77.32089511008698,
+      "avg_ant_before_ls": 3.2817789978223424e+16,
+      "avg_incumbent_after_aco": 76.80684509300752,
+      "final_ant_after_ls": 76.96530715768988,
+      "final_ant_before_ls": 0.0,
+      "final_incumbent_after_aco": 76.37035378542814,
+      "gap_pct": 2.8909506864422134,
+      "gap_std_pct": 2.5407252528487576,
+      "mean_cost": 76.37035378542814,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 4.076945796879855,
+      "pheromone_correlation": null,
+      "std_cost": 65.2791498333716,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 7.709656033036772,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 448.46403765678406
+    }
+  },
+  "n_node": 1000,
+  "problem": "cvrp",
+  "seed": 1234
+}

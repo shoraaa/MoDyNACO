@@ -63,7 +63,6 @@ def fresh_seed(seed: int | None) -> int:
     return int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
 
 
-# Export the C++ classes
 def get_aco_bpp():
     """Get the ACO_BPP class from the C++ module."""
     return load_alphaant_cpp_module().ACO_BPP
@@ -80,8 +79,7 @@ def get_aco_op():
 
 
 if __name__ == "__main__":
-    # Test loading the module
     print("Loading AlphaAnt C++ module...")
     module = load_alphaant_cpp_module()
-    print(f"Module loaded successfully!")
+    print("Module loaded successfully!")
     print(f"Available classes: {dir(module)}")

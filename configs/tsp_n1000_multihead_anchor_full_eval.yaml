@@ -1,0 +1,30 @@
+problem: tsp
+n_node: 1000
+k_sparse: 32
+alg: faco
+
+n_ants: 100
+H: 10
+mini_H: 100
+rho: 0.1
+min_new_edges: 12
+alpha: 1.0
+beta: 1.0
+gamma: 1.0
+min_gamma: 0.0
+
+multi_head: true
+num_heads: 4
+head_zdim: 16
+head_deploy: ants
+head_ant_weights: "85,5,5,5"
+head_index: 0
+
+checkpoint: pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_mh4_hg2_hdants_ha85-5-5-5_anchor1_anchored_best.pt
+dataset: ../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/TSP_survey_converted.txt
+run_model_anneal: true
+no_baseline: true
+summary_json: results/tsp_tsplib_full_n1000_multihead_anchor_summary.json
+
+device: cuda:0
+seed: 1234

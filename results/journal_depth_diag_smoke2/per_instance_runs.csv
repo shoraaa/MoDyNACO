@@ -1,0 +1,2 @@
+run,idx,name,opt,model_anneal,gap_pct
+tsp_full_mh_25-25-25-25,0,wi29,27603.0,27601.166015625,-0.00664415

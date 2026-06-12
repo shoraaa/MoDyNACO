@@ -252,6 +252,407 @@ void MFACO_TSP::sample(bool require_prob, const float *prior,
   }
 }
 
+void MFACO_TSP::sample_ant_priors(bool require_prob, const float *ant_priors,
+                                  SampleResult &result,
+                                  bool parallel_traced) {
+  if (ant_priors == nullptr) {
+    sample(require_prob, nullptr, result, parallel_traced);
+    return;
+  }
+
+  result.clear();
+  result.costs.resize(n_ants);
+  result.routes.resize(n_ants);
+  if (require_prob) {
+    result.costs_raw.resize(n_ants);
+    result.routes_raw.resize(n_ants);
+  }
+  result.new_edges_count.resize(n_ants);
+  result.edge_survival.resize(n_ants);
+
+  std::vector<int32_t> start_nodes(n_ants);
+  for (int32_t a = 0; a < n_ants; ++a) {
+    start_nodes[a] = rng_.next_uint(n);
+  }
+
+  std::vector<uint64_t> ant_seeds;
+  auto ensure_ant_seeds = [&]() {
+    if (!ant_seeds.empty())
+      return;
+    ant_seeds.resize(static_cast<size_t>(n_ants));
+    for (int32_t a = 0; a < n_ants; ++a) {
+      uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
+      uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
+      ant_seeds[static_cast<size_t>(a)] =
+          (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
+    }
+  };
+
+  const int64_t prior_stride = static_cast<int64_t>(n) * static_cast<int64_t>(k);
+
+  if (require_prob) {
+    result.logps.resize(n_ants);
+    if (!parallel_traced) {
+      result.traces.reserve(n_ants, n * n_ants);
+      result.traces.starts.push_back(0);
+
+      std::vector<int32_t> checklist;
+      checklist.reserve(n);
+      std::vector<float> probmat(n * k);
+
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const float *prior_a = ant_priors + static_cast<int64_t>(a) * prior_stride;
+        compute_probmat(prior_a, probmat);
+        result.routes[a].resize(n);
+        result.routes_raw[a].resize(n);
+        MFACOTrace trace;
+        trace.reserve(min_new_edges * 2);
+
+        float logp_sum = 0.0f;
+        int32_t mne_out = 0;
+        float surv_out = 0.0f;
+        float cost = sample_ant_traced(
+            probmat.data(), start_nodes[a], result.routes[a],
+            result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
+            trace, rng_, logp_sum, surv_out, prior_a);
+        result.new_edges_count[a] = mne_out;
+        result.edge_survival[a] = surv_out;
+        result.costs[a] = cost;
+        result.logps[a] = logp_sum;
+
+        result.traces.start_nodes.push_back(trace.start_node);
+        for (size_t i = 0; i < trace.curr_nodes.size(); ++i) {
+          result.traces.curr_nodes.push_back(trace.curr_nodes[i]);
+          result.traces.chosen_nodes.push_back(trace.chosen_nodes[i]);
+          result.traces.is_stochastic.push_back(trace.is_stochastic[i]);
+          result.traces.pick_j.push_back(trace.pick_j[i]);
+          result.traces.valid_mask.push_back(trace.valid_mask[i]);
+          result.traces.is_new_edge.push_back(trace.is_new_edge[i]);
+        }
+        result.traces.starts.push_back(
+            static_cast<int32_t>(result.traces.curr_nodes.size()));
+      }
+    } else {
+      ensure_ant_seeds();
+      std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
+
+#pragma omp parallel
+      {
+        std::vector<int32_t> checklist;
+        checklist.reserve(n);
+        std::vector<float> probmat(n * k);
+
+#pragma omp for schedule(static, 1)
+        for (int32_t a = 0; a < n_ants; ++a) {
+          const float *prior_a = ant_priors + static_cast<int64_t>(a) * prior_stride;
+          compute_probmat(prior_a, probmat);
+          result.routes[a].resize(n);
+          result.routes_raw[a].resize(n);
+          MFACOTrace &trace = traces_per_ant[static_cast<size_t>(a)];
+          trace.reserve(min_new_edges * 2);
+          Xoshiro128Plus rng_local;
+          rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+
+          float logp_sum = 0.0f;
+          int32_t mne_out = 0;
+          float surv_out = 0.0f;
+          result.costs[a] = sample_ant_traced(
+              probmat.data(), start_nodes[a], result.routes[a],
+              result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
+              trace, rng_local, logp_sum, surv_out, prior_a);
+          result.new_edges_count[a] = mne_out;
+          result.edge_survival[a] = surv_out;
+          result.logps[a] = logp_sum;
+        }
+      }
+
+      result.traces.clear();
+      result.traces.starts.resize(static_cast<size_t>(n_ants) + 1);
+      result.traces.start_nodes.resize(static_cast<size_t>(n_ants));
+      result.traces.starts[0] = 0;
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
+        result.traces.start_nodes[static_cast<size_t>(a)] = t.start_node;
+        result.traces.starts[static_cast<size_t>(a) + 1] =
+            result.traces.starts[static_cast<size_t>(a)] +
+            static_cast<int32_t>(t.curr_nodes.size());
+      }
+      int32_t total = result.traces.starts[static_cast<size_t>(n_ants)];
+      result.traces.curr_nodes.resize(static_cast<size_t>(total));
+      result.traces.chosen_nodes.resize(static_cast<size_t>(total));
+      result.traces.is_stochastic.resize(static_cast<size_t>(total));
+      result.traces.pick_j.resize(static_cast<size_t>(total));
+      result.traces.valid_mask.resize(static_cast<size_t>(total));
+      result.traces.is_new_edge.resize(static_cast<size_t>(total));
+
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
+        int32_t off = result.traces.starts[static_cast<size_t>(a)];
+        for (size_t i = 0; i < t.curr_nodes.size(); ++i) {
+          result.traces.curr_nodes[static_cast<size_t>(off) + i] =
+              t.curr_nodes[i];
+          result.traces.chosen_nodes[static_cast<size_t>(off) + i] =
+              t.chosen_nodes[i];
+          result.traces.is_stochastic[static_cast<size_t>(off) + i] =
+              t.is_stochastic[i];
+          result.traces.pick_j[static_cast<size_t>(off) + i] = t.pick_j[i];
+          result.traces.valid_mask[static_cast<size_t>(off) + i] =
+              t.valid_mask[i];
+          result.traces.is_new_edge[static_cast<size_t>(off) + i] =
+              t.is_new_edge[i];
+        }
+      }
+    }
+  } else {
+    ensure_ant_seeds();
+#pragma omp parallel
+    {
+      std::vector<int32_t> checklist;
+      checklist.reserve(n);
+      std::vector<float> probmat(n * k);
+
+#pragma omp for schedule(static, 1)
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const float *prior_a = ant_priors + static_cast<int64_t>(a) * prior_stride;
+        compute_probmat(prior_a, probmat);
+        result.routes[a].resize(n);
+        Xoshiro128Plus rng_local;
+        rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+        result.costs[a] = sample_ant_fast(
+            probmat.data(), start_nodes[a], result.routes[a],
+            result.new_edges_count[a], checklist, rng_local, prior_a);
+      }
+    }
+  }
+}
+
+void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
+                                   int32_t n_heads, SampleResult &result,
+                                   bool parallel_traced,
+                                   const int32_t *head_counts) {
+  if (head_priors == nullptr) {
+    sample(require_prob, nullptr, result, parallel_traced);
+    return;
+  }
+  if (n_heads <= 0 || n_heads > n_ants) {
+    throw std::runtime_error("n_heads must be in [1, n_ants]");
+  }
+
+  result.clear();
+  result.costs.resize(n_ants);
+  result.routes.resize(n_ants);
+  if (require_prob) {
+    result.costs_raw.resize(n_ants);
+    result.routes_raw.resize(n_ants);
+  }
+  result.new_edges_count.resize(n_ants);
+  result.edge_survival.resize(n_ants);
+
+  const int64_t prior_stride = static_cast<int64_t>(n) * static_cast<int64_t>(k);
+
+  std::vector<int32_t> ant_head(n_ants);
+  int32_t ant = 0;
+  if (head_counts != nullptr) {
+    int32_t total = 0;
+    for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+      int32_t count = head_counts[hidx];
+      if (count < 0) {
+        throw std::runtime_error("head_counts must be non-negative");
+      }
+      total += count;
+      for (int32_t j = 0; j < count; ++j) {
+        if (ant >= n_ants) {
+          throw std::runtime_error("sum(head_counts) exceeds n_ants");
+        }
+        ant_head[static_cast<size_t>(ant++)] = hidx;
+      }
+    }
+    if (total != n_ants) {
+      throw std::runtime_error("sum(head_counts) must equal n_ants");
+    }
+  } else {
+    int32_t base = n_ants / n_heads;
+    int32_t rem = n_ants % n_heads;
+    for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+      int32_t count = base + (hidx < rem ? 1 : 0);
+      for (int32_t j = 0; j < count; ++j) {
+        ant_head[static_cast<size_t>(ant++)] = hidx;
+      }
+    }
+  }
+
+  std::vector<float> probmats(static_cast<size_t>(n_heads) *
+                              static_cast<size_t>(prior_stride));
+  std::vector<float> head_probmat;
+  for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+    const float *prior_h =
+        head_priors + static_cast<int64_t>(hidx) * prior_stride;
+    compute_probmat(prior_h, head_probmat);
+    std::copy(head_probmat.begin(), head_probmat.end(),
+              probmats.begin() + static_cast<int64_t>(hidx) * prior_stride);
+  }
+
+  std::vector<int32_t> start_nodes(n_ants);
+  for (int32_t a = 0; a < n_ants; ++a) {
+    start_nodes[a] = rng_.next_uint(n);
+  }
+
+  std::vector<uint64_t> ant_seeds;
+  auto ensure_ant_seeds = [&]() {
+    if (!ant_seeds.empty())
+      return;
+    ant_seeds.resize(static_cast<size_t>(n_ants));
+    for (int32_t a = 0; a < n_ants; ++a) {
+      uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
+      uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
+      ant_seeds[static_cast<size_t>(a)] =
+          (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
+    }
+  };
+
+  if (require_prob) {
+    result.logps.resize(n_ants);
+    if (!parallel_traced) {
+      result.traces.reserve(n_ants, n * n_ants);
+      result.traces.starts.push_back(0);
+
+      std::vector<int32_t> checklist;
+      checklist.reserve(n);
+
+      for (int32_t a = 0; a < n_ants; ++a) {
+        int32_t hidx = ant_head[static_cast<size_t>(a)];
+        const float *prior_h =
+            head_priors + static_cast<int64_t>(hidx) * prior_stride;
+        const float *prob_h =
+            probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
+        result.routes[a].resize(n);
+        result.routes_raw[a].resize(n);
+        MFACOTrace trace;
+        trace.reserve(min_new_edges * 2);
+
+        float logp_sum = 0.0f;
+        int32_t mne_out = 0;
+        float surv_out = 0.0f;
+        float cost = sample_ant_traced(
+            prob_h, start_nodes[a], result.routes[a], result.routes_raw[a],
+            result.costs_raw[a], mne_out, checklist, trace, rng_, logp_sum,
+            surv_out, prior_h);
+        result.new_edges_count[a] = mne_out;
+        result.edge_survival[a] = surv_out;
+        result.costs[a] = cost;
+        result.logps[a] = logp_sum;
+
+        result.traces.start_nodes.push_back(trace.start_node);
+        for (size_t i = 0; i < trace.curr_nodes.size(); ++i) {
+          result.traces.curr_nodes.push_back(trace.curr_nodes[i]);
+          result.traces.chosen_nodes.push_back(trace.chosen_nodes[i]);
+          result.traces.is_stochastic.push_back(trace.is_stochastic[i]);
+          result.traces.pick_j.push_back(trace.pick_j[i]);
+          result.traces.valid_mask.push_back(trace.valid_mask[i]);
+          result.traces.is_new_edge.push_back(trace.is_new_edge[i]);
+        }
+        result.traces.starts.push_back(
+            static_cast<int32_t>(result.traces.curr_nodes.size()));
+      }
+    } else {
+      ensure_ant_seeds();
+      std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
+
+#pragma omp parallel
+      {
+        std::vector<int32_t> checklist;
+        checklist.reserve(n);
+
+#pragma omp for schedule(static, 1)
+        for (int32_t a = 0; a < n_ants; ++a) {
+          int32_t hidx = ant_head[static_cast<size_t>(a)];
+          const float *prior_h =
+              head_priors + static_cast<int64_t>(hidx) * prior_stride;
+          const float *prob_h =
+              probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
+          result.routes[a].resize(n);
+          result.routes_raw[a].resize(n);
+          MFACOTrace &trace = traces_per_ant[static_cast<size_t>(a)];
+          trace.reserve(min_new_edges * 2);
+          Xoshiro128Plus rng_local;
+          rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+
+          float logp_sum = 0.0f;
+          int32_t mne_out = 0;
+          float surv_out = 0.0f;
+          result.costs[a] = sample_ant_traced(
+              prob_h, start_nodes[a], result.routes[a], result.routes_raw[a],
+              result.costs_raw[a], mne_out, checklist, trace, rng_local,
+              logp_sum, surv_out, prior_h);
+          result.new_edges_count[a] = mne_out;
+          result.edge_survival[a] = surv_out;
+          result.logps[a] = logp_sum;
+        }
+      }
+
+      result.traces.clear();
+      result.traces.starts.resize(static_cast<size_t>(n_ants) + 1);
+      result.traces.start_nodes.resize(static_cast<size_t>(n_ants));
+      result.traces.starts[0] = 0;
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
+        result.traces.start_nodes[static_cast<size_t>(a)] = t.start_node;
+        result.traces.starts[static_cast<size_t>(a) + 1] =
+            result.traces.starts[static_cast<size_t>(a)] +
+            static_cast<int32_t>(t.curr_nodes.size());
+      }
+      int32_t total = result.traces.starts[static_cast<size_t>(n_ants)];
+      result.traces.curr_nodes.resize(static_cast<size_t>(total));
+      result.traces.chosen_nodes.resize(static_cast<size_t>(total));
+      result.traces.is_stochastic.resize(static_cast<size_t>(total));
+      result.traces.pick_j.resize(static_cast<size_t>(total));
+      result.traces.valid_mask.resize(static_cast<size_t>(total));
+      result.traces.is_new_edge.resize(static_cast<size_t>(total));
+
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
+        int32_t off = result.traces.starts[static_cast<size_t>(a)];
+        for (size_t i = 0; i < t.curr_nodes.size(); ++i) {
+          result.traces.curr_nodes[static_cast<size_t>(off) + i] =
+              t.curr_nodes[i];
+          result.traces.chosen_nodes[static_cast<size_t>(off) + i] =
+              t.chosen_nodes[i];
+          result.traces.is_stochastic[static_cast<size_t>(off) + i] =
+              t.is_stochastic[i];
+          result.traces.pick_j[static_cast<size_t>(off) + i] = t.pick_j[i];
+          result.traces.valid_mask[static_cast<size_t>(off) + i] =
+              t.valid_mask[i];
+          result.traces.is_new_edge[static_cast<size_t>(off) + i] =
+              t.is_new_edge[i];
+        }
+      }
+    }
+  } else {
+    ensure_ant_seeds();
+#pragma omp parallel
+    {
+      std::vector<int32_t> checklist;
+      checklist.reserve(n);
+
+#pragma omp for schedule(static, 1)
+      for (int32_t a = 0; a < n_ants; ++a) {
+        int32_t hidx = ant_head[static_cast<size_t>(a)];
+        const float *prior_h =
+            head_priors + static_cast<int64_t>(hidx) * prior_stride;
+        const float *prob_h =
+            probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
+        result.routes[a].resize(n);
+        Xoshiro128Plus rng_local;
+        rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+        result.costs[a] =
+            sample_ant_fast(prob_h, start_nodes[a], result.routes[a],
+                            result.new_edges_count[a], checklist, rng_local,
+                            prior_h);
+      }
+    }
+  }
+}
+
 void MFACO_TSP::update_pheromone(const int32_t *best_flat,
                                  float new_best_cost) {
   // Update global best
@@ -1909,6 +2310,267 @@ void MFACO_CVRP::sample(bool require_prob, const float *prior_ptr,
         result.decoded_routes[a] = result.routes[a];
 
         // Recompute true CVRP cost over the depot-separated route.
+        result.costs[a] = route_cost_euclid(result.routes[a]);
+      }
+    }
+  }
+}
+
+void MFACO_CVRP::sample_head_priors(bool require_prob,
+                                    const float *head_priors, int32_t n_heads,
+                                    SampleResult &result,
+                                    bool parallel_traced,
+                                    const int32_t *head_counts) {
+  if (head_priors == nullptr) {
+    sample(require_prob, nullptr, result, parallel_traced);
+    return;
+  }
+  if (n_heads <= 0 || n_heads > n_ants) {
+    throw std::runtime_error("n_heads must be in [1, n_ants]");
+  }
+
+  auto route_cost_euclid = [&](const std::vector<int32_t> &route) -> float {
+    float c = 0.0f;
+    if (route.size() < 2)
+      return c;
+    for (size_t i = 0; i + 1 < route.size(); ++i)
+      c += dist(route[i], route[i + 1]);
+    return c;
+  };
+
+  result.clear();
+  result.costs.resize(n_ants);
+  result.routes.resize(n_ants);
+  result.decoded_routes.resize(n_ants);
+  if (require_prob) {
+    result.costs_raw.resize(n_ants);
+    result.routes_raw.resize(n_ants);
+    result.logps.resize(n_ants);
+  }
+  result.new_edges_count.resize(n_ants);
+  result.edge_survival.resize(n_ants);
+
+  const int64_t prior_stride = static_cast<int64_t>(n) * static_cast<int64_t>(k);
+
+  std::vector<int32_t> ant_head(n_ants);
+  int32_t ant = 0;
+  if (head_counts != nullptr) {
+    int32_t total = 0;
+    for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+      int32_t count = head_counts[hidx];
+      if (count < 0) {
+        throw std::runtime_error("head_counts must be non-negative");
+      }
+      total += count;
+      for (int32_t j = 0; j < count; ++j) {
+        if (ant >= n_ants) {
+          throw std::runtime_error("sum(head_counts) exceeds n_ants");
+        }
+        ant_head[static_cast<size_t>(ant++)] = hidx;
+      }
+    }
+    if (total != n_ants) {
+      throw std::runtime_error("sum(head_counts) must equal n_ants");
+    }
+  } else {
+    int32_t base = n_ants / n_heads;
+    int32_t rem = n_ants % n_heads;
+    for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+      int32_t count = base + (hidx < rem ? 1 : 0);
+      for (int32_t j = 0; j < count; ++j) {
+        ant_head[static_cast<size_t>(ant++)] = hidx;
+      }
+    }
+  }
+
+  std::vector<float> probmats(static_cast<size_t>(n_heads) *
+                              static_cast<size_t>(prior_stride));
+  std::vector<float> head_probmat;
+  for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+    const float *prior_h =
+        head_priors + static_cast<int64_t>(hidx) * prior_stride;
+    compute_probmat(prior_h, head_probmat);
+    std::copy(head_probmat.begin(), head_probmat.end(),
+              probmats.begin() + static_cast<int64_t>(hidx) * prior_stride);
+  }
+
+  std::vector<int32_t> start_nodes(n_ants);
+  for (int32_t a = 0; a < n_ants; ++a) {
+    start_nodes[a] = 1 + static_cast<int32_t>(rng_.next_uint(static_cast<uint32_t>(m)));
+  }
+
+  std::vector<uint64_t> ant_seeds;
+  auto ensure_ant_seeds = [&]() {
+    if (!ant_seeds.empty())
+      return;
+    ant_seeds.resize(static_cast<size_t>(n_ants));
+    for (int32_t a = 0; a < n_ants; ++a) {
+      uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
+      uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
+      ant_seeds[static_cast<size_t>(a)] =
+          (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
+    }
+  };
+
+  if (require_prob) {
+    if (!parallel_traced) {
+      result.traces.reserve(n_ants, n_ants * min_new_edges * 2);
+      result.traces.starts.push_back(0);
+
+      std::vector<int32_t> checklist;
+      checklist.reserve(m);
+
+      for (int32_t a = 0; a < n_ants; ++a) {
+        int32_t hidx = ant_head[static_cast<size_t>(a)];
+        const float *prior_h =
+            head_priors + static_cast<int64_t>(hidx) * prior_stride;
+        const float *prob_h =
+            probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
+        result.decoded_routes[a].clear();
+        std::vector<int32_t> route_raw_unused;
+        MFACOTrace trace;
+        trace.reserve(min_new_edges * 2);
+
+        float logp_sum = 0.0f;
+        int32_t mne_out = 0;
+        float surv_out = 0.0f;
+        (void)sample_ant_direct_traced(
+            prob_h, start_nodes[a], result.decoded_routes[a], route_raw_unused,
+            result.costs_raw[a], mne_out, checklist, trace, rng_, logp_sum,
+            surv_out, prior_h);
+        result.new_edges_count[a] = mne_out;
+        result.edge_survival[a] = surv_out;
+        result.logps[a] = logp_sum;
+
+        if (result.decoded_routes[a].empty() ||
+            result.decoded_routes[a].front() != 0)
+          result.decoded_routes[a].insert(result.decoded_routes[a].begin(), 0);
+        if (result.decoded_routes[a].back() != 0)
+          result.decoded_routes[a].push_back(0);
+        result.routes[a] = result.decoded_routes[a];
+        result.costs[a] = route_cost_euclid(result.routes[a]);
+
+        result.traces.start_nodes.push_back(trace.start_node);
+        for (size_t i = 0; i < trace.curr_nodes.size(); ++i) {
+          result.traces.curr_nodes.push_back(trace.curr_nodes[i]);
+          result.traces.chosen_nodes.push_back(trace.chosen_nodes[i]);
+          result.traces.is_stochastic.push_back(trace.is_stochastic[i]);
+          result.traces.pick_j.push_back(trace.pick_j[i]);
+          result.traces.valid_mask.push_back(trace.valid_mask[i]);
+          result.traces.is_new_edge.push_back(trace.is_new_edge[i]);
+        }
+        result.traces.starts.push_back(
+            static_cast<int32_t>(result.traces.curr_nodes.size()));
+      }
+    } else {
+      ensure_ant_seeds();
+      std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
+
+#pragma omp parallel
+      {
+        std::vector<int32_t> checklist;
+        checklist.reserve(m);
+
+#pragma omp for schedule(static, 1)
+        for (int32_t a = 0; a < n_ants; ++a) {
+          int32_t hidx = ant_head[static_cast<size_t>(a)];
+          const float *prior_h =
+              head_priors + static_cast<int64_t>(hidx) * prior_stride;
+          const float *prob_h =
+              probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
+          MFACOTrace &trace = traces_per_ant[static_cast<size_t>(a)];
+          trace.reserve(min_new_edges * 2);
+          Xoshiro128Plus rng_local;
+          rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+
+          float logp_sum = 0.0f;
+          int32_t mne_out = 0;
+          float surv_out = 0.0f;
+          (void)sample_ant_direct_traced(
+              prob_h, start_nodes[a], result.routes[a], result.routes_raw[a],
+              result.costs_raw[a], mne_out, checklist, trace, rng_local,
+              logp_sum, surv_out, prior_h);
+          result.new_edges_count[a] = mne_out;
+          result.edge_survival[a] = surv_out;
+          result.logps[a] = logp_sum;
+
+          if (result.routes[a].empty() || result.routes[a].front() != 0)
+            result.routes[a].insert(result.routes[a].begin(), 0);
+          if (result.routes[a].back() != 0)
+            result.routes[a].push_back(0);
+          if (!result.routes_raw[a].empty()) {
+            if (result.routes_raw[a].front() != 0)
+              result.routes_raw[a].insert(result.routes_raw[a].begin(), 0);
+            if (result.routes_raw[a].back() != 0)
+              result.routes_raw[a].push_back(0);
+          }
+          result.decoded_routes[a] = result.routes[a];
+          result.costs[a] = route_cost_euclid(result.routes[a]);
+        }
+      }
+
+      result.traces.clear();
+      result.traces.starts.resize(static_cast<size_t>(n_ants) + 1);
+      result.traces.start_nodes.resize(static_cast<size_t>(n_ants));
+      result.traces.starts[0] = 0;
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
+        result.traces.start_nodes[static_cast<size_t>(a)] = t.start_node;
+        result.traces.starts[static_cast<size_t>(a) + 1] =
+            result.traces.starts[static_cast<size_t>(a)] +
+            static_cast<int32_t>(t.curr_nodes.size());
+      }
+      int32_t total = result.traces.starts[static_cast<size_t>(n_ants)];
+      result.traces.curr_nodes.resize(static_cast<size_t>(total));
+      result.traces.chosen_nodes.resize(static_cast<size_t>(total));
+      result.traces.is_stochastic.resize(static_cast<size_t>(total));
+      result.traces.pick_j.resize(static_cast<size_t>(total));
+      result.traces.valid_mask.resize(static_cast<size_t>(total));
+      result.traces.is_new_edge.resize(static_cast<size_t>(total));
+
+      for (int32_t a = 0; a < n_ants; ++a) {
+        const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
+        int32_t off = result.traces.starts[static_cast<size_t>(a)];
+        for (size_t i = 0; i < t.curr_nodes.size(); ++i) {
+          result.traces.curr_nodes[static_cast<size_t>(off) + i] =
+              t.curr_nodes[i];
+          result.traces.chosen_nodes[static_cast<size_t>(off) + i] =
+              t.chosen_nodes[i];
+          result.traces.is_stochastic[static_cast<size_t>(off) + i] =
+              t.is_stochastic[i];
+          result.traces.pick_j[static_cast<size_t>(off) + i] = t.pick_j[i];
+          result.traces.valid_mask[static_cast<size_t>(off) + i] =
+              t.valid_mask[i];
+          result.traces.is_new_edge[static_cast<size_t>(off) + i] =
+              t.is_new_edge[i];
+        }
+      }
+    }
+  } else {
+    ensure_ant_seeds();
+#pragma omp parallel
+    {
+      std::vector<int32_t> checklist;
+      checklist.reserve(m);
+
+#pragma omp for schedule(static, 1)
+      for (int32_t a = 0; a < n_ants; ++a) {
+        int32_t hidx = ant_head[static_cast<size_t>(a)];
+        const float *prior_h =
+            head_priors + static_cast<int64_t>(hidx) * prior_stride;
+        const float *prob_h =
+            probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
+        Xoshiro128Plus rng_local;
+        rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+        (void)sample_ant_direct(prob_h, start_nodes[a], result.routes[a],
+                                result.new_edges_count[a], checklist,
+                                rng_local, prior_h);
+
+        if (result.routes[a].empty() || result.routes[a].front() != 0)
+          result.routes[a].insert(result.routes[a].begin(), 0);
+        if (result.routes[a].back() != 0)
+          result.routes[a].push_back(0);
+        result.decoded_routes[a] = result.routes[a];
         result.costs[a] = route_cost_euclid(result.routes[a]);
       }
     }

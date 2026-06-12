@@ -56,7 +56,34 @@ uv run python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch
 
 ## Usage
 
-### Training
+### Quick Pipeline (Recommended)
+
+The DyNACO repository includes a complete experiment management pipeline. See [PIPELINE.md](PIPELINE.md) for full documentation.
+
+```bash
+# 1. Configure experiment via YAML
+# See configs/test_tsp_n100_ppo.yaml for an example
+
+# 2. Train
+make train CONFIG=configs/my_experiment.yaml
+
+# 3. Evaluate
+make eval EXP=experiments/{experiment_name}_timestamp
+
+# 4. Compare across all experiments
+make compare
+
+# 5. View master index
+cat experiments/index.csv
+```
+
+All artifacts are saved under `experiments/{name}/` with:
+- `config.yaml` - Full configuration + git metadata
+- `checkpoints/` - Model files (best.pt, last.pt, epoch*.pt)
+- `logs/stdout.txt` - Training output
+- `results/final.json` - Evaluation metrics
+
+### Direct Training (Legacy)
 
 Train DyNACO on TSP-1K (default configuration, ~30 min on RTX 5090):
 
@@ -68,6 +95,19 @@ Train on CVRP-1K:
 
 ```bash
 uv run python train.py --problem cvrp --n_node 1000
+```
+
+Train the unified entrypoint on extended combinatorial problems:
+
+```bash
+# Bin Packing
+uv run python train.py --problem bpp --n_node 50 --capacity 150
+
+# Multiple Knapsack
+uv run python train.py --problem mkp --n_node 50 --m 5
+
+# Orienteering
+uv run python train.py --problem op --n_node 50 --max_len 4.0
 ```
 
 Scale to larger instances:
@@ -84,7 +124,7 @@ Key training arguments:
 
 | Argument | Default | Description |
 |---|---|---|
-| `--problem` | (required) | `tsp` or `cvrp` |
+| `--problem` | (required) | `tsp`, `cvrp`, `bpp`, `mkp`, or `op` |
 | `--n_node` | 1000 | Problem size |
 | `--k_sparse` | 32 | K-NN candidate graph size |
 | `--n_ants` | 100 | Number of ants |
@@ -96,6 +136,9 @@ Key training arguments:
 | `--lr` / `--ppo_lr` | 5e-6 | Learning rate |
 | `--device` | cuda:0 | Device |
 | `--save_dir` | pretrained | Checkpoint directory |
+| `--capacity` | 150.0 | Bin capacity for `bpp` |
+| `--m` | 5 | Number of constraints for `mkp` |
+| `--max_len` | 4.0 | Route-length budget for `op` |
 
 ### Evaluation
 
@@ -130,6 +173,20 @@ Run unguided ACO baseline (no neural guidance):
 uv run python test.py --problem tsp --n_node 1000 --no_model
 ```
 
+Evaluate extended-problem checkpoints with the same `test.py` entrypoint:
+
+```bash
+# BPP
+uv run python test.py \
+    --problem bpp --n_node 50 \
+    --checkpoint checkpoints_extended/bpp_n50_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt
+
+# MKP
+uv run python test.py \
+    --problem mkp --n_node 50 --m 5 \
+    --checkpoint checkpoints_extended/mkp_n50_k32_ants20_H5_miniH5_rho0.9_lr0.0003_best.pt
+```
+
 Key evaluation arguments:
 
 | Argument | Default | Description |
@@ -143,6 +200,8 @@ Key evaluation arguments:
 | `--timed` | false | Enable detailed timing |
 | `--warmup` | true | Phased injection |
 | `--no_anneal` | false | Disable guidance annealing |
+| `--test_size` | 16 | Test instances for `bpp`/`mkp`/`op` |
+| `--static_compare` | false | Compare dynamic vs static prior on `bpp`/`mkp`/`op` |
 
 ### Pretrained Checkpoints
 
@@ -153,8 +212,8 @@ The 1K-trained model transfers zero-shot to larger scales with minimal degradati
 ## Project Structure
 
 ```
-├── train.py          # Training script (PPO with trajectory replay)
-├── test.py           # Evaluation script
+├── train.py          # Unified training entrypoint for TSP/CVRP/BPP/MKP/OP
+├── test.py           # Unified evaluation entrypoint for TSP/CVRP/BPP/MKP/OP
 ├── net.py            # GNN encoder + MLP decoder (~50K params)
 ├── faco.py           # ACO environment wrapper
 ├── utils.py          # Utilities, metrics, analysis tools

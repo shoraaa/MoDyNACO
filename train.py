@@ -8,6 +8,7 @@ that guide ant colony optimization for TSP and CVRP problems.
 
 import time
 import torch
+import torch.nn.functional as F
 import os
 import psutil
 import argparse
@@ -19,6 +20,7 @@ from tqdm import tqdm
 import sys
 from typing import Optional, Dict, List, Any, Tuple, Union
 import gc
+import yaml
 
 # Shared helpers
 import wandb
@@ -26,12 +28,13 @@ import functools
 
 # Unified modules
 import net
+import net as dynaco_net
 import faco
 import utils
 import baselines
 
 # Specific class imports
-from net import Net
+from net import MultiDecoderNet, MultiHeadNet, Net
 from baselines import get_baseline
 
 # Import from utils
@@ -40,6 +43,69 @@ from utils import (
     top1_flip_rate, safe_corr, top_overlap_frac, row_top1_match_rate, EPS,
     Logger, MetricsCollector, get_logger, init_logger
 )
+from extended_common import (
+    add_extended_problem_args,
+    align_edge_attr_width as align_extended_edge_attr_width,
+    build_model_name as build_extended_model_name,
+    build_pyg_data as build_extended_pyg_data,
+    compute_relative_improvement as compute_extended_relative_improvement,
+    create_model as create_extended_model,
+    extract_problem_data as extract_extended_problem_data,
+    get_model_edge_feats as get_extended_model_edge_feats,
+    prior_kwargs as get_extended_prior_kwargs,
+    raw_values_to_objective as extended_raw_values_to_objective,
+    reshape_prior_output as reshape_extended_prior_output,
+    select_best_value as select_extended_best_value,
+    setup_aco as setup_extended_aco,
+    use_dynamic_edge_features as use_extended_dynamic_edge_features,
+)
+
+BASE_PROBLEMS = {"tsp", "cvrp"}
+EXTENDED_PROBLEMS = {"bpp", "mkp", "op"}
+
+
+def save_experiment_config(args, exp_dir: Path):
+    """Save experiment configuration to YAML with git metadata."""
+    import yaml
+    import subprocess
+
+    config_dict = _serializable_args(args)
+
+    # Add git information
+    try:
+        config_dict['git_commit'] = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        config_dict['git_diff_stat'] = subprocess.check_output(
+            ['git', 'diff', '--stat'],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        config_dict['git_commit'] = 'unknown'
+        config_dict['git_diff_stat'] = ''
+
+    # Add timestamp
+    from datetime import datetime
+    config_dict['timestamp'] = datetime.now().isoformat()
+
+    config_path = exp_dir / "config.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(config_dict, f, sort_keys=False)
+
+    print(f"[Experiment] Saved config to {config_path}")
+
+
+def _serializable_args(args: argparse.Namespace) -> Dict[str, Any]:
+    config = {}
+    for key, value in vars(args).items():
+        if key.startswith("_"):
+            continue
+        if isinstance(value, (str, int, float, bool, type(None), list, tuple, dict)):
+            config[key] = value
+        else:
+            config[key] = str(value)
+    return config
 
 
 # =============================================================================
@@ -145,6 +211,57 @@ def replay_logp_from_cpp_batch_trace(
 
     return logp_sum, ndec
 
+
+def replay_logp_from_cpp_batch_trace_ant_priors(
+    traces,
+    log_prob_ant_sparse: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Replay C++ traces when each ant has its own sparse log-weight matrix."""
+    device = log_prob_ant_sparse.device
+    k = int(log_prob_ant_sparse.size(2))
+    curr = torch.as_tensor(
+        np.asarray(traces.curr_nodes, dtype=np.int64), device=device
+    )
+    is_stoch = torch.as_tensor(
+        np.asarray(traces.is_stochastic, dtype=np.uint8), device=device
+    ).bool()
+    pick = torch.as_tensor(
+        np.asarray(traces.pick_j, dtype=np.int64), device=device
+    )
+    vm_arr = np.asarray(traces.valid_mask, dtype=np.uint64)
+    vm_i64 = torch.as_tensor(vm_arr, device=device).to(torch.int64)
+    starts_t = torch.as_tensor(
+        np.asarray(traces.starts, dtype=np.int64),
+        device=device,
+        dtype=torch.int64,
+    )
+    n_ants = int(getattr(traces, "n_ants", int(starts_t.numel() - 1)))
+    counts_t = (starts_t[1:1 + n_ants] - starts_t[:n_ants]).to(torch.int64)
+    ant_idx_all = torch.repeat_interleave(
+        torch.arange(n_ants, device=device, dtype=torch.int64),
+        counts_t,
+    )
+    ndec = torch.bincount(ant_idx_all[is_stoch], minlength=n_ants).to(torch.int32)
+    logp_sum = torch.zeros((n_ants,), device=device, dtype=torch.float32)
+    roulette = is_stoch & (pick >= 0)
+    idx = roulette.nonzero(as_tuple=False).squeeze(1)
+    if idx.numel() > 0:
+        ants_r = ant_idx_all[idx]
+        curr_r = curr[idx]
+        pick_r = pick[idx]
+        vm_r = vm_i64[idx]
+        log_w = log_prob_ant_sparse[ants_r, curr_r]
+        magic_mask = (1 << torch.arange(k, device=device))
+        valid_bits = (vm_r.unsqueeze(1) & magic_mask) != 0
+        log_mask_val = torch.empty_like(log_w).fill_(float('-inf'))
+        log_mask_val.masked_fill_(valid_bits, 0.0)
+        log_w_valid = log_w + log_mask_val
+        log_denom = torch.logsumexp(log_w_valid, dim=1)
+        log_numer = log_w.gather(1, pick_r.unsqueeze(1)).squeeze(1)
+        step_logp = log_numer - log_denom
+        logp_sum.scatter_add_(0, ants_r, step_logp)
+    return logp_sum, ndec
+
 # =============================================================================
 # PROBABILITY COMPUTATION
 # =============================================================================
@@ -177,6 +294,21 @@ def log_prob_sparse_from_tau_eta_prior(
     if prior_nk is not None:
         log_w = log_w + prior_nk
     return log_w
+
+
+def _device_uses_cuda(device: Any) -> bool:
+    """Return True only when the requested device is explicitly CUDA."""
+    try:
+        return torch.device(device).type == "cuda"
+    except (TypeError, ValueError, RuntimeError):
+        return False
+
+
+def _gpu_memory_allocated_gb(device: Any) -> Optional[float]:
+    """Return current allocated CUDA memory in GB for CUDA devices, else None."""
+    if not torch.cuda.is_available() or not _device_uses_cuda(device):
+        return None
+    return torch.cuda.memory_allocated(device) / 1024**3
 
 
 
@@ -225,7 +357,13 @@ def setup_aco(
             'ls_budget': args.ls_budget,
             'ls_max_opt': args.ls_max_opt,
         }
-        pyg_args = (coords, args.device, args.ablation_pheromone_features, args.ablation_incumbent_features)
+        pyg_args = (
+            coords,
+            args.device,
+            args.ablation_pheromone_features,
+            args.ablation_incumbent_features,
+            args.edge_feature_set,
+        )
         
         if args.alg == 'mmas':
             aco = faco.ACO_TSP(
@@ -268,7 +406,14 @@ def setup_aco(
             'ls_budget': args.ls_budget,
             'ls_max_opt': args.ls_max_opt,
         }
-        pyg_args = (coords, demand, args.device, args.ablation_pheromone_features, args.ablation_incumbent_features)
+        pyg_args = (
+            coords,
+            demand,
+            args.device,
+            args.ablation_pheromone_features,
+            args.ablation_incumbent_features,
+            args.edge_feature_set,
+        )
         
         if args.alg == 'mmas':
             aco = faco.ACO_CVRP(
@@ -318,17 +463,391 @@ def compute_warmup_steps(args: argparse.Namespace, use_train: bool = True) -> in
     warmup_attr = 'train_warmup' if use_train else 'warmup'
     if not getattr(args, warmup_attr, False):
         return 0
-    
+
     # Warmup should use at most half of H, but always leave at least 1 step for neural guidance
     max_limit = int(args.H * getattr(args, 'warmup_ratio', 0.5))
-    
+
     # Ensure we don't warmup for all H steps - need at least 1 step with neural guidance
     max_limit = min(max_limit, args.H - 1)
-    
+
     if max_limit <= 0:
         return 0
-    
+
     return np.random.randint(1, max_limit + 1) if use_train else max_limit
+
+
+def _multi_head_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "multi_head", False) or getattr(args, "num_heads", 1) > 1)
+
+
+def _head_input_transform_mode(args: argparse.Namespace) -> str:
+    return str(getattr(args, "head_input_transform", "none") or "none").lower()
+
+
+def _transform_coords_for_head(coords: Any, head_idx: int, mode: str) -> Any:
+    if mode in {"none", "identity"}:
+        return coords
+    if mode != "d4":
+        raise ValueError(f"Unsupported head_input_transform: {mode}")
+
+    variants = int(head_idx) % 8
+    if torch.is_tensor(coords):
+        c = coords.clone()
+        center = (c.amin(dim=0, keepdim=True) + c.amax(dim=0, keepdim=True)) * 0.5
+        rel = c - center
+        x, y = rel[..., 0], rel[..., 1]
+        if variants == 0:
+            out = torch.stack((x, y), dim=-1)
+        elif variants == 1:
+            out = torch.stack((-x, y), dim=-1)
+        elif variants == 2:
+            out = torch.stack((x, -y), dim=-1)
+        elif variants == 3:
+            out = torch.stack((-x, -y), dim=-1)
+        elif variants == 4:
+            out = torch.stack((y, x), dim=-1)
+        elif variants == 5:
+            out = torch.stack((-y, x), dim=-1)
+        elif variants == 6:
+            out = torch.stack((y, -x), dim=-1)
+        else:
+            out = torch.stack((-y, -x), dim=-1)
+        return out + center
+
+    arr = np.array(coords, copy=True)
+    center = (arr.min(axis=0, keepdims=True) + arr.max(axis=0, keepdims=True)) * 0.5
+    rel = arr - center
+    x, y = rel[..., 0], rel[..., 1]
+    if variants == 0:
+        out = np.stack((x, y), axis=-1)
+    elif variants == 1:
+        out = np.stack((-x, y), axis=-1)
+    elif variants == 2:
+        out = np.stack((x, -y), axis=-1)
+    elif variants == 3:
+        out = np.stack((-x, -y), axis=-1)
+    elif variants == 4:
+        out = np.stack((y, x), axis=-1)
+    elif variants == 5:
+        out = np.stack((-y, x), axis=-1)
+    elif variants == 6:
+        out = np.stack((y, -x), axis=-1)
+    else:
+        out = np.stack((-y, -x), axis=-1)
+    return out + center
+
+
+def _build_head_pyg_data(
+    aco: Any,
+    build_fn: Any,
+    pyg_args: Tuple[Any, ...],
+    problem: str,
+    head_idx: int,
+    args: argparse.Namespace,
+    dynamic: bool,
+) -> Any:
+    mode = _head_input_transform_mode(args)
+    if mode in {"none", "identity"}:
+        return build_fn(aco, *pyg_args, dynamic=dynamic)
+
+    if problem == "tsp":
+        coords, device, ablation_pheromone, ablation_incumbent, edge_feature_set = pyg_args
+        return build_fn(
+            aco,
+            _transform_coords_for_head(coords, head_idx, mode),
+            device,
+            ablation_pheromone=ablation_pheromone,
+            ablation_incumbent=ablation_incumbent,
+            edge_feature_set=edge_feature_set,
+            dynamic=dynamic,
+        )
+
+    coords, demand, device, ablation_pheromone, ablation_incumbent, edge_feature_set = pyg_args
+    return build_fn(
+        aco,
+        _transform_coords_for_head(coords, head_idx, mode),
+        demand,
+        device,
+        ablation_pheromone=ablation_pheromone,
+        ablation_incumbent=ablation_incumbent,
+        edge_feature_set=edge_feature_set,
+        dynamic=dynamic,
+    )
+
+
+def _model_to_prior(model: Net, pyg_data: Any, n: int, k: int, args: argparse.Namespace) -> torch.Tensor:
+    output = model(pyg_data)
+    return net.output_to_sparse_prior(
+        output,
+        n,
+        k,
+        deploy=getattr(args, "head_deploy", "head"),
+        head_index=getattr(args, "head_index", 0),
+    )
+
+
+def _model_to_multi_priors(
+    model: Net,
+    pyg_data: Any,
+    n: int,
+    k: int,
+    args: Optional[argparse.Namespace] = None,
+    aco: Any = None,
+    build_fn: Any = None,
+    pyg_args: Optional[Tuple[Any, ...]] = None,
+    problem: Optional[str] = None,
+    dynamic: bool = True,
+) -> torch.Tensor:
+    if (
+        args is not None
+        and _head_input_transform_mode(args) not in {"none", "identity"}
+        and aco is not None
+        and build_fn is not None
+        and pyg_args is not None
+        and problem is not None
+    ):
+        outputs = []
+        num_heads = int(getattr(args, "num_heads", 1))
+        for head_idx in range(num_heads):
+            head_pyg = _build_head_pyg_data(aco, build_fn, pyg_args, problem, head_idx, args, dynamic)
+            head_output = model(head_pyg)
+            if head_output.dim() != 2:
+                raise ValueError(
+                    f"Expected multi-head output for transformed head inference, got {tuple(head_output.shape)}"
+                )
+            outputs.append(head_output[:, head_idx])
+        return torch.stack(outputs, dim=0).contiguous().view(num_heads, n, k)
+    return net.output_to_multi_sparse_priors(model(pyg_data), n, k)
+
+
+def _head_competition_weights(head_costs: torch.Tensor, args: argparse.Namespace) -> torch.Tensor:
+    mode = getattr(args, "head_score_mode", "mean")
+    if isinstance(head_costs, (list, tuple)):
+        if mode == "mean":
+            cost_score = torch.stack([c.mean() for c in head_costs])
+        elif mode == "topq":
+            scores = []
+            for c in head_costs:
+                q = max(1, min(int(getattr(args, "head_topq", 1)), c.shape[0]))
+                scores.append(c.topk(q, largest=False).values.mean())
+            cost_score = torch.stack(scores)
+        else:
+            raise ValueError(f"Unsupported head_score_mode: {mode}")
+        return torch.softmax(-float(getattr(args, "head_gamma", 2.0)) * cost_score.detach(), dim=0)
+    if mode == "mean":
+        cost_score = head_costs.mean(dim=1)
+    elif mode == "topq":
+        q = max(1, min(int(getattr(args, "head_topq", 1)), head_costs.shape[1]))
+        cost_score = head_costs.topk(q, largest=False, dim=1).values.mean(dim=1)
+    else:
+        raise ValueError(f"Unsupported head_score_mode: {mode}")
+    return torch.softmax(-float(getattr(args, "head_gamma", 2.0)) * cost_score.detach(), dim=0)
+
+
+def _split_ant_counts(n_ants: int, num_heads: int) -> List[int]:
+    return _split_ant_counts_from_weights(n_ants, num_heads, None)
+
+
+def _parse_head_ant_weights(raw: Any, num_heads: int) -> Optional[List[float]]:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        vals = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    elif isinstance(raw, (list, tuple)):
+        vals = [float(x) for x in raw]
+    else:
+        raise ValueError(f"Unsupported head_ant_weights value: {raw!r}")
+    if len(vals) != num_heads:
+        raise ValueError(f"head_ant_weights must provide {num_heads} values, got {len(vals)}")
+    if any(v < 0 for v in vals) or sum(vals) <= 0:
+        raise ValueError("head_ant_weights must be non-negative and sum to a positive value")
+    return vals
+
+
+def _split_ant_counts_from_weights(
+    n_ants: int,
+    num_heads: int,
+    weights: Optional[Any],
+) -> List[int]:
+    if num_heads <= 0:
+        raise ValueError("num_heads must be positive")
+    vals = _parse_head_ant_weights(weights, num_heads)
+    if vals is None:
+        base = n_ants // num_heads
+        rem = n_ants % num_heads
+        counts = [base + (1 if h < rem else 0) for h in range(num_heads)]
+    else:
+        total = sum(vals)
+        exact = [n_ants * v / total for v in vals]
+        counts = [int(np.floor(x)) for x in exact]
+        for i, v in enumerate(vals):
+            if v > 0 and counts[i] == 0:
+                counts[i] = 1
+        while sum(counts) > n_ants:
+            candidates = [i for i, v in enumerate(vals) if counts[i] > (1 if v > 0 else 0)]
+            if not candidates:
+                break
+            i = min(candidates, key=lambda j: exact[j] - counts[j])
+            counts[i] -= 1
+        while sum(counts) < n_ants:
+            i = max(range(num_heads), key=lambda j: exact[j] - counts[j])
+            counts[i] += 1
+    if any(c <= 0 for c in counts):
+        raise ValueError(
+            f"n_ants={n_ants} must allocate at least one ant to each active head; got counts={counts}"
+        )
+    return counts
+
+
+def _expand_head_priors_to_ants(
+    head_priors: torch.Tensor,
+    n_ants: int,
+    head_ant_weights: Optional[Any] = None,
+) -> Tuple[torch.Tensor, List[int]]:
+    counts = _split_ant_counts_from_weights(
+        n_ants, int(head_priors.shape[0]), head_ant_weights
+    )
+    ant_priors = torch.cat(
+        [head_priors[h:h + 1].expand(count, -1, -1) for h, count in enumerate(counts)],
+        dim=0,
+    ).contiguous()
+    return ant_priors, counts
+
+
+def _expand_head_priors_with_counts(
+    head_priors: torch.Tensor,
+    head_counts: List[int],
+) -> torch.Tensor:
+    if len(head_counts) != int(head_priors.shape[0]):
+        raise ValueError(
+            f"head_counts must have {head_priors.shape[0]} entries, got {len(head_counts)}"
+        )
+    if any(int(c) <= 0 for c in head_counts):
+        raise ValueError(f"head_counts must be positive, got {head_counts}")
+    return torch.cat(
+        [head_priors[h:h + 1].expand(int(count), -1, -1) for h, count in enumerate(head_counts)],
+        dim=0,
+    ).contiguous()
+
+
+def _split_ant_vector_by_heads(values: torch.Tensor, counts: List[int]) -> List[torch.Tensor]:
+    return list(torch.split(values, counts, dim=0))
+
+
+def _multi_head_diversity_loss(priors: torch.Tensor) -> torch.Tensor:
+    if priors.shape[0] <= 1:
+        return priors.new_tensor(0.0)
+    probs = torch.softmax(priors, dim=-1)
+    losses = []
+    for i in range(probs.shape[0]):
+        for j in range(i + 1, probs.shape[0]):
+            m = 0.5 * (probs[i] + probs[j])
+            js = 0.5 * (
+                F.kl_div((probs[i] + EPS).log(), m, reduction="batchmean")
+                + F.kl_div((probs[j] + EPS).log(), m, reduction="batchmean")
+            )
+            losses.append(js)
+    return torch.stack(losses).mean()
+
+
+def _head_complementarity_reward(priors: torch.Tensor, top_frac: float = 0.1) -> torch.Tensor:
+    if priors.dim() != 3 or priors.shape[0] <= 1:
+        return priors.new_tensor(0.0)
+    heads = priors.reshape(priors.shape[0], -1)
+    probs = torch.softmax(heads, dim=-1)
+    rewards = []
+    for i in range(probs.shape[0]):
+        for j in range(i + 1, probs.shape[0]):
+            scaled_overlap = (probs[i] * probs[j]).sum() * probs.shape[1]
+            rewards.append(-scaled_overlap)
+    if not rewards:
+        return priors.new_tensor(0.0)
+    return torch.stack(rewards).mean()
+
+
+def _copy_single_head_weights_into_multi_head(model: Net, checkpoint_path: str, device: str) -> None:
+    """Initialize a multi-head model from a trained single-head decoder."""
+    if not isinstance(model, (MultiHeadNet, MultiDecoderNet)):
+        raise ValueError("Single-head initialization requires a multi-head target")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+    emb_state = {
+        k[len("emb_net."):]: v
+        for k, v in state_dict.items()
+        if k.startswith("emb_net.")
+    }
+    missing, unexpected = model.emb_net.load_state_dict(emb_state, strict=False)
+    if unexpected:
+        raise RuntimeError(f"Unexpected encoder keys while loading {checkpoint_path}: {unexpected}")
+    if missing:
+        print(f"Warning: missing encoder keys during single-head init: {missing}")
+
+    single_prefix = "par_net_heu.lins."
+    required = [
+        f"{single_prefix}0.weight", f"{single_prefix}0.bias",
+        f"{single_prefix}1.weight", f"{single_prefix}1.bias",
+        f"{single_prefix}2.weight", f"{single_prefix}2.bias",
+    ]
+    missing_single = [k for k in required if k not in state_dict]
+    if missing_single:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_path} does not look like a compatible single-head Net; "
+            f"missing {missing_single}"
+        )
+
+    with torch.no_grad():
+        if isinstance(model, MultiHeadNet):
+            par = model.par_net_heu
+            par.input.weight.copy_(state_dict[f"{single_prefix}0.weight"])
+            par.input.bias.copy_(state_dict[f"{single_prefix}0.bias"])
+            par.hidden[0].weight.copy_(state_dict[f"{single_prefix}1.weight"])
+            par.hidden[0].bias.copy_(state_dict[f"{single_prefix}1.bias"])
+            par.output.weight.copy_(state_dict[f"{single_prefix}2.weight"])
+            par.output.bias.copy_(state_dict[f"{single_prefix}2.bias"])
+            for gamma, beta in zip(par.gamma, par.beta):
+                gamma.weight.zero_()
+                gamma.bias.zero_()
+                beta.weight.zero_()
+                beta.bias.zero_()
+        else:
+            for decoder in model.par_net_heu:
+                decoder.lins[0].weight.copy_(state_dict[f"{single_prefix}0.weight"])
+                decoder.lins[0].bias.copy_(state_dict[f"{single_prefix}0.bias"])
+                decoder.lins[1].weight.copy_(state_dict[f"{single_prefix}1.weight"])
+                decoder.lins[1].bias.copy_(state_dict[f"{single_prefix}1.bias"])
+                decoder.lins[2].weight.copy_(state_dict[f"{single_prefix}2.weight"])
+                decoder.lins[2].bias.copy_(state_dict[f"{single_prefix}2.bias"])
+    print(f"Initialized multi-head model from single-head checkpoint: {checkpoint_path}")
+
+
+def _build_single_head_teacher(args: argparse.Namespace, checkpoint_path: Optional[str], feats: int, edge_feats: int) -> Optional[Net]:
+    if not checkpoint_path:
+        return None
+    teacher = Net(
+        feats=feats,
+        edge_feats=edge_feats,
+        logit_net=not args.no_logit_net,
+        grad_checkpointing=False,
+    ).to(args.device)
+    checkpoint = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    teacher.load_state_dict(state_dict)
+    teacher.eval()
+    for param in teacher.parameters():
+        param.requires_grad_(False)
+    print(f"Loaded single-head teacher for head-0 anchoring: {checkpoint_path}")
+    return teacher
+
+
+def _head_anchor_loss(head_priors: torch.Tensor, teacher_prior: torch.Tensor) -> torch.Tensor:
+    if head_priors.dim() != 3:
+        return head_priors.new_tensor(0.0)
+    return F.mse_loss(head_priors[0], teacher_prior)
 
 
 
@@ -433,7 +952,7 @@ def train_instance_reinforce(
         prior_old = None
         if outer >= warmup_steps:
             with torch.no_grad():
-                prior_old = model(pyg_data).view(-1).view(aco.n, aco.k)
+                prior_old = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
                 t_neural_total += time.time() - t0
                 
                 prior_prev_cpu = _collect_prior_metrics(
@@ -494,7 +1013,7 @@ def train_instance_reinforce(
         optimizer.zero_grad(set_to_none=True)
         
         t0 = time.time()
-        prior_new_base = model(pyg_data).view(-1).view(aco.n, aco.k)
+        prior_new_base = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
         t_neural_total += time.time() - t0
         
         if getattr(args, 'smallvram', False):
@@ -593,8 +1112,13 @@ def train_instance_ppo(
         Tuple of (avg_cost, best_cost, metrics_dict)
     """
     model.train()
+    if _multi_head_enabled(args) and getattr(args, "smallvram", False):
+        raise ValueError("--smallvram is not implemented for multi-head PPO")
     
     aco, pyg_args = setup_aco(args, instance_data, args.problem)
+    head_router = None
+    if _multi_head_enabled(args):
+        head_router = utils.make_head_router(args, int(getattr(args, "num_heads", 1)), args.n_ants)
     eta_nk = get_heuristic_tensor(aco, args.problem, args.device)
     if args.problem == 'tsp':
         build_fn = utils.build_pyg_data_tsp
@@ -621,13 +1145,30 @@ def train_instance_ppo(
         pyg_data = build_fn(aco, *pyg_args, dynamic=not args.no_dynamic_feats)
         
         prior_old = None
+        prior_old_for_metrics = None
         if outer >= warmup_steps:
             with torch.no_grad():
-                prior_old = model(pyg_data).view(-1).view(aco.n, aco.k)
+                if _multi_head_enabled(args):
+                    prior_old = _model_to_multi_priors(
+                        model,
+                        pyg_data,
+                        aco.n,
+                        aco.k,
+                        args=args,
+                        aco=aco,
+                        build_fn=build_fn,
+                        pyg_args=pyg_args,
+                        problem=args.problem,
+                        dynamic=not args.no_dynamic_feats,
+                    )
+                    prior_old_for_metrics = prior_old.mean(dim=0)
+                else:
+                    prior_old = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
+                    prior_old_for_metrics = prior_old
                 t_neural_total += time.time() - t0
                 
                 prior_prev_cpu = _collect_prior_metrics(
-                    metrics, prior_old, prior_prev_cpu, eta_nk, args.simple_train
+                    metrics, prior_old_for_metrics, prior_prev_cpu, eta_nk, args.simple_train
                 )
 
         # Storage for PPO update
@@ -651,6 +1192,83 @@ def train_instance_ppo(
                     inner, args.mini_H, args.gamma, args.min_gamma
                 )
                 current_prior = prior_old * factor
+
+            if _multi_head_enabled(args) and current_prior is not None:
+                tau_nk = aco.tau_nk_torch().detach()
+                head_counts = utils.head_counts_for_router(
+                    args, int(current_prior.shape[0]), args.n_ants, head_router
+                )
+                ant_priors = _expand_head_priors_with_counts(current_prior, head_counts)
+                incumbent_before = best_seen
+                res = aco.sample_mixed_priors(
+                    current_prior,
+                    require_prob=True,
+                    parallel_traced=args.parallel_traced,
+                    head_counts=head_counts,
+                )
+                costs, flats, _, _, traces, costs_raw, flats_raw, new_edges, survival = res
+                costs_all = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+                costs_t = [x.detach() for x in _split_ant_vector_by_heads(costs_all, head_counts)]
+                costs_raw_t = costs_t
+
+                with torch.no_grad():
+                    tau_ant = tau_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+                    eta_ant = eta_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+                    log_prob_old = log_prob_sparse_from_tau_eta_prior(
+                        tau_ant, eta_ant, ant_priors,
+                        alpha=args.alpha, beta=args.beta, eps=EPS
+                    )
+                    logp_old_all, ndec_all = replay_logp_from_cpp_batch_trace_ant_priors(
+                        traces, log_prob_old
+                    )
+                    ndec_f = ndec_all.to(torch.float32).clamp_min(1.0)
+                    logp_old_all = (logp_old_all / ndec_f).detach()
+                head_logp_old = [x.detach() for x in _split_ant_vector_by_heads(logp_old_all, head_counts)]
+                head_ndec = [x.detach() for x in _split_ant_vector_by_heads(ndec_all, head_counts)]
+
+                tau_list.append(tau_nk)
+                traces_list.append((traces, head_counts))
+                flats_list.append(flats)
+                costs_list.append(costs_t)
+                logp_old_list.append(head_logp_old)
+                ndec_list.append(head_ndec)
+
+                weights = _head_competition_weights(costs_t, args)
+                metrics.add("head_weight_entropy", float(-(weights * (weights + EPS).log()).sum().item()))
+                metrics.add("head_cost_spread", float(torch.stack([c.mean() for c in costs_t]).std(unbiased=False).item()))
+                metrics.add("head_ants_min", float(min(head_counts)))
+                metrics.add("head_ants_max", float(max(head_counts)))
+                if new_edges is not None:
+                    metrics.add("new_edges", np.asarray(new_edges, dtype=np.float32).mean())
+                if survival is not None:
+                    metrics.add("survival", np.asarray(survival, dtype=np.float32).mean())
+                metrics.add("ndec", float(torch.cat([x.float() for x in head_ndec]).mean().item()))
+                entropy = float(torch.cat([(-lp / nd.float().clamp_min(1.0)) for lp, nd in zip(head_logp_old, head_ndec)]).mean().item())
+                metrics.add("entropy", entropy)
+
+                best_idx = int(costs_all.argmin().item())
+                best_cost_iter = float(costs_all[best_idx].item())
+                best_seen = min(best_seen, best_cost_iter)
+                head_utility = utils.update_head_router(
+                    head_router,
+                    head_counts,
+                    costs_all,
+                    incumbent_before=incumbent_before,
+                    best_idx=best_idx,
+                )
+                router_metrics = utils.head_router_metrics(head_router, head_counts)
+                for key, value in router_metrics.items():
+                    if isinstance(value, list):
+                        continue
+                    metrics.add(key, float(value))
+                if head_utility is not None:
+                    for h, value in enumerate(head_utility):
+                        metrics.add(f"head_utility_{h}", float(value))
+                if not args.train_deepaco:
+                    with torch.no_grad():
+                        aco.update_pheromone(flats[best_idx], best_cost_iter)
+                avg_cost_last = float(torch.cat(costs_t).mean().item())
+                continue
 
             # Sample from ACO
             res = aco.sample(require_prob=True, prior=current_prior, parallel_traced=args.parallel_traced)
@@ -716,7 +1334,21 @@ def train_instance_ppo(
             optimizer.zero_grad(set_to_none=True)
             
             t0 = time.time()
-            prior_new_base = model(pyg_data).view(-1).view(aco.n, aco.k)
+            if _multi_head_enabled(args):
+                prior_new_base = _model_to_multi_priors(
+                    model,
+                    pyg_data,
+                    aco.n,
+                    aco.k,
+                    args=args,
+                    aco=aco,
+                    build_fn=build_fn,
+                    pyg_args=pyg_args,
+                    problem=args.problem,
+                    dynamic=not args.no_dynamic_feats,
+                )
+            else:
+                prior_new_base = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
             t_neural_total += time.time() - t0
             
             if getattr(args, 'smallvram', False):
@@ -741,6 +1373,48 @@ def train_instance_ppo(
                 traces = traces_list[inner]
                 costs_t = costs_list[inner]
                 logp_old = logp_old_list[inner]
+
+                if _multi_head_enabled(args):
+                    traces_obj, head_counts = traces
+                    ant_priors = _expand_head_priors_with_counts(current_prior, head_counts)
+                    tau_ant = tau_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+                    eta_ant = eta_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+                    log_prob_new = log_prob_sparse_from_tau_eta_prior(
+                        tau_ant, eta_ant, ant_priors,
+                        alpha=args.alpha, beta=args.beta, eps=EPS
+                    )
+                    logp_new_all, ndec_new_all = replay_logp_from_cpp_batch_trace_ant_priors(
+                        traces_obj, log_prob_new
+                    )
+                    ndec_f_all = ndec_new_all.to(torch.float32).clamp_min(1.0)
+                    logp_new_all = logp_new_all / ndec_f_all
+                    logp_new_heads = _split_ant_vector_by_heads(logp_new_all, head_counts)
+                    head_losses = []
+                    head_kls = []
+                    head_clip_fracs = []
+                    for h in range(current_prior.shape[0]):
+                        logp_new = logp_new_heads[h]
+                        ratio = torch.exp(logp_new - logp_old[h])
+                        log_ratio = logp_new - logp_old[h]
+                        head_kls.append((log_ratio.pow(2) * 0.5).mean())
+                        clipped = (ratio > 1 + args.ppo_clip) | (ratio < 1 - args.ppo_clip)
+                        head_clip_fracs.append(clipped.float().mean())
+                        baseline = costs_t[h].mean()
+                        adv = (baseline - costs_t[h]).detach()
+                        if not args.no_adv_norm:
+                            adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
+                        surr1 = ratio * adv
+                        surr2 = torch.clamp(ratio, 1 - args.ppo_clip, 1 + args.ppo_clip) * adv
+                        head_losses.append(-torch.mean(torch.min(surr1, surr2)))
+
+                    head_loss_t = torch.stack(head_losses)
+                    weights = _head_competition_weights(costs_t, args)
+                    loss = (weights * head_loss_t).sum()
+                    all_losses.append(loss)
+                    all_param_kl.append(torch.stack(head_kls).mean().detach().item())
+                    all_clip_frac.append(torch.stack(head_clip_fracs).mean().detach().item())
+                    total_loss_val_epoch += loss.item()
+                    continue
                 
                 log_prob_new = log_prob_sparse_from_tau_eta_prior(
                     tau_nk, eta_nk, current_prior,
@@ -788,6 +1462,28 @@ def train_instance_ppo(
                 prior_new_base.backward(prior_new.grad)
             else:
                 total_loss = torch.stack(all_losses).mean()
+                if _multi_head_enabled(args) and getattr(args, "head_diversity_coef", 0.0) > 0:
+                    diversity = _multi_head_diversity_loss(prior_new_base)
+                    total_loss = total_loss - float(args.head_diversity_coef) * diversity
+                    metrics.add("head_diversity", diversity.detach().item())
+                if _multi_head_enabled(args) and float(getattr(args, "head_complement_coef", 0.0) or 0.0) > 0:
+                    complement = _head_complementarity_reward(prior_new_base)
+                    total_loss = total_loss - float(args.head_complement_coef) * complement
+                    metrics.add("head_complement", complement.detach().item())
+                teacher = getattr(args, "_head_anchor_teacher", None)
+                anchor_coef = float(getattr(args, "head_anchor_coef", 0.0) or 0.0)
+                if _multi_head_enabled(args) and teacher is not None and anchor_coef > 0:
+                    with torch.no_grad():
+                        teacher_prior = net.output_to_sparse_prior(
+                            teacher(pyg_data),
+                            aco.n,
+                            aco.k,
+                            deploy="head",
+                            head_index=0,
+                        )
+                    anchor = _head_anchor_loss(prior_new_base, teacher_prior)
+                    total_loss = total_loss + anchor_coef * anchor
+                    metrics.add("head_anchor_loss", anchor.detach().item())
                 total_loss.backward()
             
             # Compute gradient variance
@@ -860,7 +1556,12 @@ def train_epoch(
     epoch_time_neural = 0.0
     epoch_time_aco = 0.0
     
-    for step in tqdm(range(steps), desc="Epoch", leave=True):
+    for step in tqdm(
+        range(steps),
+        desc=f"Epoch {epoch}",
+        leave=False,
+        dynamic_ncols=True,
+    ):
         # Generate instance
         if args.problem == 'tsp':
             instance_data = np.random.rand(args.n_node, 2).astype(np.float32)
@@ -937,6 +1638,9 @@ def infer_instance(
     best_seen = float("inf")
     if net is not None:
         net.eval()
+    head_router = None
+    if net is not None and _multi_head_enabled(args):
+        head_router = utils.make_head_router(args, int(getattr(args, "num_heads", 1)), args.n_ants)
     
     # Initialize metrics
     metrics_log: Dict[str, List[float]] = {}
@@ -988,18 +1692,67 @@ def infer_instance(
         
         # Use normalized coordinates for the network to match training distribution
         if net is not None:
-             if args.problem == 'tsp':
-                 pyg_data_net = build_fn(aco, norm_coords, args.device, ablation_pheromone=args.ablation_pheromone_features, ablation_incumbent=args.ablation_incumbent_features, dynamic=dynamic)
-             else:
-                 # Pass normalized coordinates and original demand for network input
-                 pyg_data_net = build_fn(aco, norm_coords[0], norm_coords[1], args.device, ablation_pheromone=args.ablation_pheromone_features, ablation_incumbent=args.ablation_incumbent_features, dynamic=dynamic)
+            if args.problem == 'tsp':
+                pyg_args_net = (
+                    norm_coords,
+                    args.device,
+                    args.ablation_pheromone_features,
+                    args.ablation_incumbent_features,
+                    args.edge_feature_set,
+                )
+                pyg_data_net = build_fn(
+                    aco,
+                    *pyg_args_net,
+                    dynamic=dynamic,
+                )
+            else:
+                # Pass normalized coordinates and original demand for network input
+                pyg_args_net = (
+                    norm_coords[0],
+                    norm_coords[1],
+                    args.device,
+                    args.ablation_pheromone_features,
+                    args.ablation_incumbent_features,
+                    args.edge_feature_set,
+                )
+                pyg_data_net = build_fn(
+                    aco,
+                    *pyg_args_net,
+                    dynamic=dynamic,
+                )
         else:
-             pyg_data_net = pyg_data
+            pyg_data_net = pyg_data
 
         guidance = None
+        guidance_multi = None
         if net is not None and outer >= warmup_steps:
             with torch.no_grad():
-                guidance = net(pyg_data_net).view(-1).view(aco.n, aco.k)
+                if (
+                    _multi_head_enabled(args)
+                    and getattr(args, "head_deploy", "ants") == "ants"
+                ):
+                    guidance_multi = _model_to_multi_priors(
+                        net,
+                        pyg_data_net,
+                        aco.n,
+                        aco.k,
+                        args=args,
+                        aco=aco,
+                        build_fn=build_fn,
+                        pyg_args=pyg_args_net,
+                        problem=args.problem,
+                        dynamic=dynamic,
+                    )
+                    guidance = guidance_multi.mean(dim=0)
+                else:
+                    prior_output = net(pyg_data_net)
+                    guidance = dynaco_net.output_to_sparse_prior(
+                        prior_output,
+                        aco.n,
+                        aco.k,
+                        deploy=getattr(args, "head_deploy", "head"),
+                        head_index=getattr(args, "head_index", 0),
+                    )
         
         # Track prior metrics
         if collect_metrics and guidance is not None:
@@ -1019,16 +1772,29 @@ def infer_instance(
         
         # Inner loop
         for inner in range(args.mini_H):
-            current_prior = guidance
-            if guidance is not None and not args.no_anneal:
+            current_prior = guidance_multi if guidance_multi is not None else guidance
+            if current_prior is not None and not args.no_anneal:
                 factor = compute_annealing_factor(
                     inner, args.mini_H, args.gamma, args.min_gamma
                 )
-                current_prior = guidance * factor
+                current_prior = current_prior * factor
             
-            costs, flats, _, _, _, costs_raw, _, new_edges, survival = aco.sample(
-                prior=current_prior, require_prob=False
-            )
+            incumbent_before = best_seen
+            guidance_head_counts = None
+            if current_prior is not None and getattr(current_prior, "dim", lambda: 0)() == 3:
+                guidance_head_counts = utils.head_counts_for_router(
+                    args, int(current_prior.shape[0]), args.n_ants, head_router
+                )
+                costs, flats, _, _, _, costs_raw, _, new_edges, survival = aco.sample_mixed_priors(
+                    current_prior,
+                    require_prob=False,
+                    parallel_traced=True,
+                    head_counts=guidance_head_counts,
+                )
+            else:
+                costs, flats, _, _, _, costs_raw, _, new_edges, survival = aco.sample(
+                    prior=current_prior, require_prob=False
+                )
             if costs_raw is not None:
                 costs_before_ls = np.asarray(costs_raw, dtype=np.float32)
             else:
@@ -1044,6 +1810,18 @@ def infer_instance(
             best_val = costs[best_idx]
             best_seen = min(best_seen, best_val)
             best_seen_before_ls = min(best_seen_before_ls, float(costs_before_ls.min()))
+            if current_prior is not None and getattr(current_prior, "dim", lambda: 0)() == 3:
+                utils.update_head_router(
+                    head_router,
+                    guidance_head_counts,
+                    costs,
+                    incumbent_before=incumbent_before,
+                    best_idx=int(best_idx),
+                )
+                router_metrics = utils.head_router_metrics(head_router, guidance_head_counts)
+                for key, value in router_metrics.items():
+                    if not isinstance(value, list):
+                        metrics_log.setdefault(key, []).append(float(value))
             
             aco.update_pheromone(flats[best_idx], best_val)
     
@@ -1083,7 +1861,7 @@ def validation(
         Tuple of (avg_last, avg_best, avg_gap, aggregated_metrics)
     """
     logger = get_logger()
-    logger.info(f"Validating on {len(val_dataset)} instances...")
+    logger.debug(f"Validating on {len(val_dataset)} instances...")
     
     # Create validation args with overrides
     val_args = argparse.Namespace(**vars(args))
@@ -1096,7 +1874,7 @@ def validation(
     if net is None:
         cached_res = utils.load_pure_mfaco_cache(val_args, val_dataset)
         if cached_res is not None:
-            logger.info("Loaded Pure MFACO result from cache.")
+            logger.debug("Loaded Pure MFACO result from cache.")
             return (
                 cached_res['avg_last'], 
                 cached_res['avg_best'], 
@@ -1163,7 +1941,7 @@ def validation(
             'metrics': out_metrics
         }
         utils.save_pure_mfaco_cache(val_args, val_dataset, cache_data)
-        logger.info("Saved Pure MFACO result to cache.")
+        logger.debug("Saved Pure MFACO result to cache.")
 
     return avg_last, avg_aco_best, avg_gap, out_metrics
 
@@ -1194,25 +1972,364 @@ def _preprocess_val_item(item: Any, problem: str) -> Any:
     
     return item
 
+
+# =============================================================================
+# EXTENDED PROBLEM TRAINING (BPP / MKP / OP)
+# =============================================================================
+
+def _train_extended_instance_reinforce(
+    model: Any,
+    optimizer: torch.optim.Optimizer,
+    instance_data: Any,
+    args: argparse.Namespace,
+) -> Tuple[float, float, Dict[str, float]]:
+    """Train on a single extended-problem instance using REINFORCE."""
+    model.train()
+
+    data = extract_extended_problem_data(args.problem, instance_data)
+    aco, pyg_args = setup_extended_aco(args, instance_data, args.problem, heuristic=None)
+    expected_edge_feats = get_extended_model_edge_feats(args)
+    dynamic_graph = use_extended_dynamic_edge_features(args)
+
+    static_pyg_data = None
+    if args.static_prior:
+        static_pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=False)
+        static_pyg_data = align_extended_edge_attr_width(static_pyg_data, expected_edge_feats)
+
+    best_seen = float("-inf")
+    avg_cost_last = None
+    metrics = MetricsCollector()
+    t_neural_total = 0.0
+    t_aco_total = 0.0
+
+    outer_pbar = tqdm(range(args.H), desc="Outer", leave=False)
+    for outer in outer_pbar:
+        t0 = time.time()
+        if args.static_prior:
+            pyg_data = static_pyg_data
+        else:
+            pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=dynamic_graph)
+            pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
+
+        prior_output = model(pyg_data)
+        prior = reshape_extended_prior_output(
+            prior_output,
+            args.problem,
+            **get_extended_prior_kwargs(args.problem, data),
+        )
+        t_neural_total += time.time() - t0
+
+        all_logp_sums = []
+        all_objectives = []
+
+        for inner in range(args.mini_H):
+            t_aco_start_inner = time.time()
+            current_prior = prior
+            if args.train_anneal:
+                factor = compute_annealing_factor(inner, args.mini_H, args.gamma, args.min_gamma)
+                current_prior = prior * factor
+
+            aco.heuristic = current_prior.to(device=args.device, dtype=torch.float32)
+            aco._sync_cpp_inputs()
+
+            costs, paths, logps, _ = aco.sample(require_prob=True, prior=None, parallel_traced=True)
+            costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+            objective_t = extended_raw_values_to_objective(costs_t, args.problem)
+            best_cost_obj = select_extended_best_value(costs_t, args.problem)
+            best_seen = max(best_seen, best_cost_obj)
+
+            with torch.no_grad():
+                aco.update_pheromone(paths, costs)
+
+            avg_cost_last = float(objective_t.mean().item())
+            t_aco_total += time.time() - t_aco_start_inner
+
+            if outer >= args.warmup:
+                if args.static_prior:
+                    logp_steps_new = aco._replay_logp_from_paths(
+                        paths,
+                        current_prior,
+                        pheromone=aco.pheromone,
+                        heuristic=current_prior,
+                    )
+                    if logp_steps_new.size(0) > 0:
+                        logp_sum = logp_steps_new.sum(dim=0)
+                    else:
+                        logp_sum = torch.zeros((paths.size(1),), device=args.device)
+                else:
+                    logp_sum = logps.sum(dim=0)
+
+                all_logp_sums.append(logp_sum)
+                all_objectives.append(objective_t)
+
+        if outer >= args.warmup and all_logp_sums:
+            logp_sums_t = torch.cat(all_logp_sums)
+            objectives_t = torch.cat(all_objectives)
+            baseline = objectives_t.mean()
+            adv = (objectives_t - baseline).detach()
+            loss = -torch.sum(adv * logp_sums_t) / (aco.n_ants * args.mini_H)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            metrics.add("loss", loss.item())
+            metrics.add("grad_norm", grad_norm.item())
+            metrics.add("prior_mean", prior.mean().item())
+            metrics.add("prior_std", prior.std().item())
+            outer_pbar.set_postfix({
+                "obj": f"{best_seen:.4f}",
+                "avg": f"{avg_cost_last:.4f}",
+                "loss": f"{loss.item():.4f}",
+            })
+
+    out_metrics = metrics.get_all_means()
+    out_metrics["time_neural"] = t_neural_total
+    out_metrics["time_aco"] = t_aco_total
+    return avg_cost_last, best_seen, out_metrics
+
+
+def _run_extended_validation_epoch(
+    model: Any,
+    val_instances: List[Any],
+    args: argparse.Namespace,
+) -> Tuple[float, float, float]:
+    """Run the extended validation loop and compare guided vs unguided ACO."""
+    val_with_prior = []
+    val_without_prior = []
+    dynamic_graph = use_extended_dynamic_edge_features(args)
+    expected_edge_feats = get_extended_model_edge_feats(args)
+
+    for instance_data in val_instances:
+        data = extract_extended_problem_data(args.problem, instance_data)
+        aco, pyg_args = setup_extended_aco(args, instance_data, args.problem, heuristic=None)
+
+        model.eval()
+        with torch.no_grad():
+            if args.static_prior:
+                pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=False)
+                pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
+                prior_output = model(pyg_data)
+                prior = reshape_extended_prior_output(
+                    prior_output,
+                    args.problem,
+                    **get_extended_prior_kwargs(args.problem, data),
+                )
+                aco.heuristic = prior.to(device=args.device, dtype=torch.float32)
+                aco._sync_cpp_inputs()
+
+            for outer in range(args.H):
+                if not args.static_prior:
+                    pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=dynamic_graph)
+                    pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
+                    prior_output = model(pyg_data)
+                    prior = reshape_extended_prior_output(
+                        prior_output,
+                        args.problem,
+                        **get_extended_prior_kwargs(args.problem, data),
+                    )
+
+                for inner in range(args.mini_H):
+                    current_prior = prior
+                    if args.train_anneal:
+                        factor = compute_annealing_factor(inner, args.mini_H, args.gamma, args.min_gamma)
+                        current_prior = prior * factor
+
+                    aco.heuristic = current_prior.to(device=args.device, dtype=torch.float32)
+                    aco._sync_cpp_inputs()
+                    costs, paths, _, _ = aco.sample(require_prob=False, prior=None, parallel_traced=True)
+                    with torch.no_grad():
+                        aco.update_pheromone(paths, costs)
+
+            costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+            val_with_prior.append(select_extended_best_value(costs_t, args.problem))
+
+        aco_baseline, _ = setup_extended_aco(args, instance_data, args.problem)
+        costs_baseline, _, _, _ = aco_baseline.sample(require_prob=False, prior=None, parallel_traced=True)
+        costs_baseline_t = torch.as_tensor(costs_baseline, device=args.device, dtype=torch.float32)
+        val_without_prior.append(select_extended_best_value(costs_baseline_t, args.problem))
+        model.train()
+
+    avg_val_with_prior = float(np.mean(val_with_prior))
+    avg_val_without_prior = float(np.mean(val_without_prior))
+    improvement = compute_extended_relative_improvement(
+        avg_val_with_prior,
+        avg_val_without_prior,
+        args.problem,
+        objective_mode=True,
+    )
+    return avg_val_with_prior, avg_val_without_prior, 0.0 if improvement is None else float(improvement)
+
+
+def _train_extended_main(args: argparse.Namespace):
+    """Main training loop for BPP, MKP, and OP."""
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    model_name = build_extended_model_name(args)
+
+    if args.wandb_project and not args.no_wandb:
+        run_id = wandb.util.generate_id()
+        run_name = args.run_name if args.run_name else model_name
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            id=run_id,
+            group=args.wandb_group,
+            config=_serializable_args(args),
+            mode="online" if not args.dry_run else "disabled",
+        )
+
+    edge_feats = get_extended_model_edge_feats(args)
+    model = create_extended_model(
+        args.problem,
+        m=args.m,
+        edge_feats=edge_feats,
+    ).to(args.device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    val_instances = []
+    torch.manual_seed(args.seed + 1000)
+    np.random.seed(args.seed + 1000)
+    for _ in range(args.val_size):
+        val_instances.append(utils.get_problem_data(args.problem, args.n_node, args.device, args.k_sparse, m=args.m))
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+        train_costs = []
+
+        for step in range(args.steps_per_epoch):
+            instance_data = utils.get_problem_data(args.problem, args.n_node, args.device, args.k_sparse, m=args.m)
+            avg_cost, best_cost, metrics = _train_extended_instance_reinforce(model, optimizer, instance_data, args)
+            train_costs.append(avg_cost)
+
+            if args.wandb_project and not args.no_wandb:
+                wandb.log({
+                    "epoch": epoch,
+                    "step": step,
+                    "train_cost": avg_cost,
+                    "best_cost": best_cost,
+                    **metrics,
+                })
+
+        avg_val_with_prior, avg_val_without_prior, improvement = _run_extended_validation_epoch(model, val_instances, args)
+        print(f"  Train Cost: {np.mean(train_costs):.4f}")
+        print(f"  Val Cost (with prior): {avg_val_with_prior:.4f}")
+        print(f"  Val Cost (without prior): {avg_val_without_prior:.4f}")
+        print(f"  Improvement: {improvement:.2f}%")
+
+        if args.wandb_project and not args.no_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "train_cost": np.mean(train_costs),
+                "val_cost_with_prior": avg_val_with_prior,
+                "val_cost_without_prior": avg_val_without_prior,
+                "improvement": improvement,
+            })
+
+        if (epoch + 1) % args.save_interval == 0:
+            checkpoint_path = Path(args.save_dir) / f"{model_name}_epoch{epoch+1}.pt"
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_cost": np.mean(train_costs),
+                "val_cost_with_prior": avg_val_with_prior,
+                "val_cost_without_prior": avg_val_without_prior,
+                "improvement": improvement,
+                "config": _serializable_args(args),
+            }, checkpoint_path)
+            print(f"  Saved checkpoint: {checkpoint_path}")
+
+    final_path = Path(args.save_dir) / f"{model_name}_best.pt"
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": _serializable_args(args),
+    }, final_path)
+    print(f"\nSaved final model: {final_path}")
+
+    if args.wandb_project and not args.no_wandb:
+        wandb.finish()
+
+
+def _parse_extended_train_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse training arguments for BPP/MKP/OP."""
+    parser = argparse.ArgumentParser(description="Train NGFACO for BPP, MKP, OP", allow_abbrev=False)
+
+    # Configuration file
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML configuration file")
+
+    add_extended_problem_args(parser)
+    parser.add_argument("--H", type=int, default=5, help="Number of outer iterations (replaces T)")
+    parser.add_argument("--mini_H", type=int, default=5, help="Number of inner iterations")
+    parser.add_argument("--n_ants", type=int, default=20, help="Number of ants")
+    parser.add_argument("--k_sparse", type=int, default=32, help="K-NN size")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument("--steps_per_epoch", type=int, default=64, help="Steps per epoch")
+    parser.add_argument("--val_size", type=int, default=16, help="Validation size")
+    parser.add_argument("--aco_iters_per_sample", type=int, default=20, help="ACO iterations per sample")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--rho", type=float, default=0.9, help="Pheromone retention")
+    parser.add_argument("--alpha", type=float, default=1.0, help="Pheromone weight")
+    parser.add_argument("--beta", type=float, default=1.0, help="Heuristic weight")
+    parser.add_argument("--gamma", type=float, default=1.0, help="Prior scaling")
+    parser.add_argument("--min_gamma", type=float, default=0.0, help="Minimum prior scaling")
+    parser.add_argument("--warmup", type=int, default=0, help="Warmup steps")
+    parser.add_argument("--train_anneal", action="store_true", help="Use annealing")
+    parser.add_argument("--no_dynamic_feats", action="store_true", help="Disable dynamic features")
+    parser.add_argument("--smallvram", action="store_true", help="Use small VRAM mode")
+    parser.add_argument(
+        "--static_prior",
+        action="store_true",
+        help="Train a DeepACO-style static-prior baseline (1 edge feature, no dynamic prior)",
+    )
+    parser.add_argument("--wandb_project", type=str, default="ngfaco_extended", help="WandB project")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="WandB entity")
+    parser.add_argument("--wandb_group", type=str, default=None, help="WandB group")
+    parser.add_argument("--run_name", type=str, default=None, help="WandB run name")
+    parser.add_argument("--no_wandb", action="store_true", help="Disable wandb")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to use",
+    )
+    parser.add_argument("--seed", type=int, default=1234, help="Random seed")
+    parser.add_argument("--save_dir", type=str, default="checkpoints_extended", help="Save directory")
+    parser.add_argument("--save_interval", type=int, default=1, help="Save interval")
+    parser.add_argument("--dry_run", action="store_true", help="Dry run")
+    return parser.parse_args(argv)
+
 # =============================================================================
 # ARGUMENT PARSING
 # =============================================================================
 
-def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
+def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse command line arguments for the original TSP/CVRP training flow."""
     parser = argparse.ArgumentParser(
-        description="Train neural-guided ACO for TSP/CVRP"
+        description="Train neural-guided ACO for TSP/CVRP",
+        allow_abbrev=False,
     )
-    
+
+    # Configuration file
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML configuration file")
+
     # Problem configuration
-    parser.add_argument("--problem", type=str, required=True, 
+    parser.add_argument("--problem", type=str, default=None,
                         choices=['tsp', 'cvrp'])
     parser.add_argument("--n_node", type=int, default=1000)
     parser.add_argument("--k_sparse", type=int, default=32)
     parser.add_argument("--algo", choices=["reinforce", "ppo"], default="ppo")
     parser.add_argument("--alg", choices=["faco", "mmas"], default="faco",
                         help="Algorithm type")
-    
+
     # PPO hyperparameters
     parser.add_argument("--ppo_epochs", type=int, default=4)
     parser.add_argument("--ppo_clip", type=float, default=0.1)
@@ -1250,6 +2367,13 @@ def parse_args() -> argparse.Namespace:
                         help="Remove pheromone-based features (tau_cv, log_tau_rel)")
     parser.add_argument("--ablation_incumbent_features", action="store_true", 
                         help="Remove incumbent-based features (source_succ, source_pred, new_edge)")
+    parser.add_argument(
+        "--edge_feature_set",
+        "--edge-feature-set",
+        choices=["full", "compact3"],
+        default="full",
+        help="Edge feature layout: full=6 channels, compact3=dist_norm/log_tau_rel/is_in_incumbent",
+    )
 
 
     # Traced sampling parallelism
@@ -1280,6 +2404,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_logit_net", action="store_true")
     parser.add_argument("--smallvram", action="store_true", help="Fix OOM mathematically perfectly via graph detachment inner loop")
     parser.add_argument("--grad_checkpointing", action="store_true", help="Enable PyTorch gradient checkpointing to save VRAM at the cost of compute")
+
+    # Multi-head prediction
+    parser.add_argument("--multi_head", action="store_true",
+                        help="Use a Multi-Prediction style K-head edge-prior decoder")
+    parser.add_argument("--num_heads", type=int, default=1,
+                        help="Number of prediction heads; values >1 enable multi-head training")
+    parser.add_argument("--head_zdim", type=int, default=16,
+                        help="Latent code width for each multi-head decoder head")
+    parser.add_argument("--head_decoder_type", choices=["film", "separate"], default="film",
+                        help="Multi-head decoder implementation: FiLM-conditioned shared decoder or separate decoders")
+    parser.add_argument("--head_gamma", type=float, default=2.0,
+                        help="Softmax strength for head competition during training")
+    parser.add_argument("--head_score_mode", choices=["mean", "topq"], default="mean",
+                        help="How to score heads for competition weights")
+    parser.add_argument("--head_topq", type=int, default=1,
+                        help="Number of best ants used when head_score_mode=topq")
+    parser.add_argument("--head_diversity_coef", type=float, default=0.01,
+                        help="Coefficient for pairwise head-diversity reward")
+    parser.add_argument("--head_deploy", choices=["ants", "head"], default="ants",
+                        help="How to deploy K heads: mixed ant groups or one fixed head")
+    parser.add_argument("--head_index", type=int, default=0,
+                        help="Head index used when --head_deploy=head")
+    parser.add_argument("--head_ant_weights", type=str, default=None,
+                        help="Comma-separated ant allocation weights/counts for mixed-head deployment, e.g. 50,20,15,15")
+    parser.add_argument("--head_router", choices=["static", "ema"], default="static",
+                        help="Ant routing for mixed-head deployment; static preserves head_ant_weights")
+    parser.add_argument("--head_router_alpha", type=float, default=0.25,
+                        help="EMA update rate for adaptive head utility routing")
+    parser.add_argument("--head_router_gamma", type=float, default=2.0,
+                        help="Softmax strength for converting head utility to ant counts")
+    parser.add_argument("--head_router_min_frac", type=float, default=0.0,
+                        help="Minimum allocation fraction blended into each head by adaptive routing")
+    parser.add_argument("--head_router_score_mode", choices=["mean", "topq", "best", "improvement"], default="topq",
+                        help="Per-head score used by adaptive routing")
+    parser.add_argument("--head_complement_coef", type=float, default=0.0,
+                        help="Coefficient for high-priority edge complementarity reward across heads")
+    parser.add_argument(
+        "--head_input_transform",
+        "--head-input-transform",
+        choices=["none", "d4"],
+        default="none",
+        help="Apply a deterministic distance-preserving coordinate transform per head before encoding",
+    )
+    parser.add_argument("--init_single_head_checkpoint", type=str, default=None,
+                        help="Initialize a multi-head decoder from a trained single-head checkpoint")
+    parser.add_argument("--head_anchor_checkpoint", type=str, default=None,
+                        help="Frozen single-head teacher checkpoint used to keep head 0 anchored during multi-head PPO")
+    parser.add_argument("--head_anchor_coef", type=float, default=0.0,
+                        help="MSE coefficient that keeps multi-head head 0 close to the single-head teacher prior")
     
     # Wandb settings and output
     parser.add_argument("--no_wandb", action="store_true")
@@ -1287,6 +2460,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_group", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default="pretrained")
+    parser.add_argument("--run_tag", type=str, default=None,
+                        help="Optional suffix for checkpoint filenames")
     parser.add_argument("--no_dynamic_feats", action="store_true")
     
     # Baseline configuration
@@ -1334,8 +2509,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", type=str, nargs="?", const="auto", default=None,
                         help="Resume from checkpoint. Use without path for auto-detection based on config.")
 
-    
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _normalize_cli_argv(argv: Optional[List[str]] = None) -> List[str]:
+    """Return a mutable CLI argument list."""
+    if argv is None:
+        return list(sys.argv[1:])
+    return list(argv)
+
+
+def _extract_cli_value(argv: List[str], flag: str) -> Optional[str]:
+    """Extract a simple --flag value from argv, supporting --flag=value syntax."""
+    for idx, token in enumerate(argv):
+        if token == flag and idx + 1 < len(argv):
+            return argv[idx + 1]
+        if token.startswith(f"{flag}="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _infer_train_problem(argv: Optional[List[str]] = None) -> Optional[str]:
+    """Infer the requested problem before selecting the parser/implementation."""
+    args_list = _normalize_cli_argv(argv)
+    return _extract_cli_value(args_list, "--problem")
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse arguments for either the base or extended training entrypoint."""
+    args_list = _normalize_cli_argv(argv)
+    problem = _infer_train_problem(args_list)
+    if problem in EXTENDED_PROBLEMS:
+        return _parse_extended_train_args(args_list)
+    return _parse_base_args(args_list)
 
 
 def setup_seeds(seed: int):
@@ -1385,10 +2591,32 @@ def build_model_name(args: argparse.Namespace) -> str:
         name += "_noPherFeat"
     if args.ablation_incumbent_features:
         name += "_noIncumbFeat"
+    if getattr(args, "edge_feature_set", "full") != "full":
+        name += f"_{args.edge_feature_set}"
+    if _multi_head_enabled(args):
+        name += f"_mh{args.num_heads}_hg{args.head_gamma:g}_hd{args.head_deploy}"
+        if str(getattr(args, "head_decoder_type", "film") or "film").lower() != "film":
+            name += f"_hdec{getattr(args, 'head_decoder_type')}"
+        if getattr(args, "head_ant_weights", None):
+            alloc = str(args.head_ant_weights).replace(",", "-").replace(" ", "")
+            name += f"_ha{alloc}"
+        if str(getattr(args, "head_router", "static") or "static").lower() != "static":
+            name += f"_hr{getattr(args, 'head_router')}"
+            name += f"_hra{float(getattr(args, 'head_router_alpha', 0.25)):g}"
+            name += f"_hrg{float(getattr(args, 'head_router_gamma', args.head_gamma)):g}"
+        if float(getattr(args, "head_complement_coef", 0.0) or 0.0) > 0:
+            name += f"_hc{float(getattr(args, 'head_complement_coef')):g}"
+        if _head_input_transform_mode(args) != "none":
+            name += f"_ht{_head_input_transform_mode(args)}"
+        if getattr(args, "head_anchor_checkpoint", None):
+            name += f"_anchor{float(getattr(args, 'head_anchor_coef', 0.0)):g}"
 
     if args.alg == 'mmas':
         name += "_mmas"
-    
+    if getattr(args, "run_tag", None):
+        tag = str(args.run_tag).strip().replace(" ", "_")
+        if tag:
+            name += f"_{tag}"
 
     return name
 
@@ -1536,7 +2764,7 @@ def save_checkpoint(
         "model_state_dict": net.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
-        "config": vars(args)
+        "config": _serializable_args(args)
     }
     if val_cost is not None:
         checkpoint["val_cost"] = val_cost
@@ -1550,9 +2778,42 @@ def save_checkpoint(
 # MAIN ENTRY POINT
 # =============================================================================
 
-def main():
+def main(argv: Optional[List[str]] = None):
     """Main training entry point."""
-    args = parse_args()
+    args_list = _normalize_cli_argv(argv)
+    problem = _infer_train_problem(args_list)
+    if problem in EXTENDED_PROBLEMS:
+        args = _parse_extended_train_args(args_list)
+        return _train_extended_main(args)
+
+    args = _parse_base_args(args_list)
+
+    # Load configuration from YAML if provided
+    if hasattr(args, 'config') and args.config:
+        print(f"Loading configuration from YAML: {args.config}")
+        with open(args.config) as f:
+            yaml_config = yaml.safe_load(f) or {}
+
+        def _cli_has_flag(key: str) -> bool:
+            flag = "--" + key
+            flag_hyphen = "--" + key.replace("_", "-")
+            return any(
+                token == flag
+                or token == flag_hyphen
+                or token.startswith(f"{flag}=")
+                or token.startswith(f"{flag_hyphen}=")
+                for token in args_list
+            )
+
+        # Override parser defaults with YAML values unless the CLI explicitly set the flag.
+        for key, value in yaml_config.items():
+            if not hasattr(args, key):
+                setattr(args, key, value)
+            elif not _cli_has_flag(key):
+                setattr(args, key, value)
+
+    if args.problem is None:
+        raise ValueError("Problem must be specified via --problem or the YAML config")
 
     # Load configuration from checkpoint if resuming with a specific path
     if args.resume and args.resume != "auto" and os.path.isfile(args.resume):
@@ -1593,6 +2854,8 @@ def main():
     
     if args.lr is None:
         args.lr = args.ppo_lr if args.algo == 'ppo' else args.reinforce_lr
+    if _multi_head_enabled(args) and args.algo != "ppo":
+        raise ValueError("Multi-head training is currently implemented for --algo ppo")
     
     if args.baseline == 'default':
         args.baseline = 'lkh' if args.problem == 'tsp' else 'hgs'
@@ -1634,10 +2897,15 @@ def main():
 
     # Build model name
     model_name = build_model_name(args)
-    
+
     # Create save directory
     save_dir = Path(args.save_dir) / args.problem / f"n{args.n_node}"
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    # NEW: Save experiment configuration if running under experiment wrapper
+    if os.getenv("NGFACO_EXPERIMENT_DIR"):
+        exp_dir = Path(os.getenv("NGFACO_EXPERIMENT_DIR"))
+        save_experiment_config(args, exp_dir)
 
     # Initialize wandb
     run_id = wandb.util.generate_id()
@@ -1653,42 +2921,78 @@ def main():
             name=run_name,
             id=run_id,
             group=wandb_group,
-            config=vars(args)
+            config=_serializable_args(args)
         )
 
     # Initialize model
-    feats = 2 if args.problem == 'tsp' else 1
+    feats = 2 if args.problem == 'tsp' else 4
     
-    full_edge_feats = 6
-    minus_feats = 0
-    if args.ablation_pheromone_features:
-        minus_feats += 2
-    if args.ablation_incumbent_features:
-        minus_feats += 3
-        
-    edge_feats = full_edge_feats - minus_feats
-    print(f"Using {edge_feats} edge features (ablation_pheromone={args.ablation_pheromone_features}, ablation_incumbent={args.ablation_incumbent_features})")
+    if args.edge_feature_set == "compact3":
+        edge_feats = 3
+    else:
+        full_edge_feats = 6
+        minus_feats = 0
+        if args.ablation_pheromone_features:
+            minus_feats += 2
+        if args.ablation_incumbent_features:
+            minus_feats += 3
+        edge_feats = full_edge_feats - minus_feats
+    train_epoch_fn = train_epoch
+    validation_fn = validation
 
+    print(
+        f"Using {edge_feats} edge features "
+        f"(edge_feature_set={args.edge_feature_set}, "
+        f"ablation_pheromone={args.ablation_pheromone_features}, "
+        f"ablation_incumbent={args.ablation_incumbent_features})"
+    )
+    if _multi_head_enabled(args):
+        decoder_type = str(getattr(args, "head_decoder_type", "film") or "film").lower()
+        model_cls = MultiDecoderNet if decoder_type == "separate" else MultiHeadNet
+    else:
+        model_cls = Net
+    model_kwargs = {}
+    if _multi_head_enabled(args):
+        args.multi_head = True
+        model_kwargs.update(num_heads=args.num_heads, head_zdim=args.head_zdim)
+        print(
+            f"Using multi-head decoder: heads={args.num_heads}, "
+            f"gamma={args.head_gamma}, deploy={args.head_deploy}, "
+            f"decoder={getattr(args, 'head_decoder_type', 'film')}"
+        )
 
-    net_model = Net(
+    net_model = model_cls(
         feats=feats,
         edge_feats=edge_feats,
         logit_net=not args.no_logit_net,
-        grad_checkpointing=getattr(args, 'grad_checkpointing', False)
+        grad_checkpointing=getattr(args, 'grad_checkpointing', False),
+        **model_kwargs,
     ).to(args.device)
+
+    if _multi_head_enabled(args) and getattr(args, "init_single_head_checkpoint", None):
+        _copy_single_head_weights_into_multi_head(
+            net_model,
+            args.init_single_head_checkpoint,
+            args.device,
+        )
+    args._head_anchor_teacher = _build_single_head_teacher(
+        args,
+        getattr(args, "head_anchor_checkpoint", None),
+        feats,
+        edge_feats,
+    )
+    optimizer = torch.optim.AdamW(net_model.parameters(), lr=args.lr)
 
     # Count model parameters
     total_params = sum(p.numel() for p in net_model.parameters())
     trainable_params = sum(p.numel() for p in net_model.parameters() if p.requires_grad)
     print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
 
-    # Log memory usage if CUDA is available
-    if torch.cuda.is_available():
+    # Log memory usage only for CUDA devices
+    initial_memory = _gpu_memory_allocated_gb(args.device)
+    if initial_memory is not None:
         torch.cuda.empty_cache()
-        initial_memory = torch.cuda.memory_allocated(args.device) / 1024**3  # GB
         print(f"Initial GPU memory: {initial_memory:.2f} GB")
-
-    optimizer = torch.optim.AdamW(net_model.parameters(), lr=args.lr)
 
     # Resume from checkpoint if requested
     start_epoch = 0
@@ -1732,17 +3036,31 @@ def main():
             print(f"Loading checkpoint from {checkpoint_path}...")
             checkpoint = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
             
-            # Infer edge_feats from checkpoint model weights for backward compatibility
+            # Infer input feature sizes from checkpoint model weights for backward compatibility
             state_dict = checkpoint["model_state_dict"]
+            if "emb_net.v_lin0.weight" in state_dict:
+                ckpt_feats = state_dict["emb_net.v_lin0.weight"].shape[1]
+                if ckpt_feats != feats:
+                    print(f"Checkpoint feats={ckpt_feats} differs from current={feats}. Recreating model...")
+                    feats = ckpt_feats
+                    net_model = model_cls(
+                        feats=feats,
+                        edge_feats=edge_feats,
+                        logit_net=not args.no_logit_net,
+                        **model_kwargs,
+                    ).to(args.device)
+                    optimizer = torch.optim.AdamW(net_model.parameters(), lr=args.lr)
+
             if "emb_net.e_lin0.weight" in state_dict:
                 ckpt_edge_feats = state_dict["emb_net.e_lin0.weight"].shape[1]
                 if ckpt_edge_feats != edge_feats:
                     print(f"Checkpoint edge_feats={ckpt_edge_feats} differs from current={edge_feats}. Recreating model...")
                     edge_feats = ckpt_edge_feats
-                    net_model = Net(
+                    net_model = model_cls(
                         feats=feats,
                         edge_feats=edge_feats,
                         logit_net=not args.no_logit_net,
+                        **model_kwargs,
                     ).to(args.device)
                     optimizer = torch.optim.AdamW(net_model.parameters(), lr=args.lr)
                     
@@ -1788,7 +3106,7 @@ def main():
         # Epoch -1: Pure MFACO check (no model)
         # This ensures we see the performance of the underlying ACO without random weights
         logger.info("Running pre-training validation (Pure MFACO)...")
-        avg_last, avg_best, avg_gap, val_metrics = validation(
+        avg_last, avg_best, avg_gap, val_metrics = validation_fn(
             None, val_dataset, args, baseline_values
         )
         logger.log_epoch_summary(-1, 0.0, avg_best, avg_gap)
@@ -1799,42 +3117,41 @@ def main():
 
     for epoch in range(start_epoch, args.epochs):
         # Track peak memory before epoch
-        if torch.cuda.is_available():
+        epoch_end_memory = None
+        best_saved = False
+        if _device_uses_cuda(args.device):
             torch.cuda.synchronize()
-            epoch_start_memory = torch.cuda.memory_allocated(args.device) / 1024**3  # GB
 
         # Train one epoch
         (global_step, avg_train, t_neural, t_aco,
-         epoch_train_time) = train_epoch(
+         epoch_train_time) = train_epoch_fn(
             net_model, optimizer, global_step, epoch, args
         )
         total_train_time += epoch_train_time
 
         # Track peak memory after epoch
-        if torch.cuda.is_available():
+        epoch_end_memory = _gpu_memory_allocated_gb(args.device)
+        if epoch_end_memory is not None:
             torch.cuda.synchronize()
-            epoch_end_memory = torch.cuda.memory_allocated(args.device) / 1024**3  # GB
             peak_memory_gb = max(peak_memory_gb, epoch_end_memory)
-            logger.info(f"Epoch {epoch} GPU memory: {epoch_end_memory:.2f} GB (peak: {peak_memory_gb:.2f} GB)")
 
         # Validate
         if val_dataset is not None:
-            avg_last, avg_best, avg_gap, val_metrics = validation(
+            avg_last, avg_best, avg_gap, val_metrics = validation_fn(
                 net_model, val_dataset, args, baseline_values
             )
-
-            logger.log_epoch_summary(epoch, avg_train, avg_best, avg_gap)
 
             # Track and save best model
             if avg_best < best_val_cost:
                 best_val_cost = avg_best
+                best_saved = True
                 best_model_state = {
                     "model_state_dict": net_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "epoch": epoch,
                     "val_cost": avg_best,
                     "val_gap": avg_gap,
-                    "config": vars(args),
+                    "config": _serializable_args(args),
                     "total_params": total_params,
                     "trainable_params": trainable_params,
                     "peak_memory_gb": peak_memory_gb,
@@ -1842,6 +3159,16 @@ def main():
                 best_path = save_dir / f"{model_name}_best.pt"
                 torch.save(best_model_state, best_path)
                 logger.log_model_saved(best_path, epoch, avg_best, avg_gap)
+
+            logger.log_epoch_summary(
+                epoch,
+                avg_train,
+                avg_best,
+                avg_gap,
+                gpu_memory_gb=epoch_end_memory,
+                peak_memory_gb=peak_memory_gb if epoch_end_memory is not None else None,
+                best_saved=best_saved,
+            )
 
             # Log validation metrics
             logger.log_validation(

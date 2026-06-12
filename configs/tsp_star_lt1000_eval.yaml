@@ -1,0 +1,16 @@
+# Default DyNACO evaluation profile for STAR TSP instances with fewer than 1000 nodes.
+problem: tsp
+n_node: 500
+k_sparse: 32
+n_ants: 100
+H: 10
+mini_H: 100
+rho: 0.5
+min_new_edges: 12
+device: cuda:0
+seed: 1234
+dataset: data/TSP/data/test_set/STAR_TSP_lt1000.txt
+checkpoint: pretrained/tsp/n500/tsp_n500_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt
+summary_json: results/tsp_star_lt1000_default_summary.json
+no_baseline: true
+run_model_anneal: true

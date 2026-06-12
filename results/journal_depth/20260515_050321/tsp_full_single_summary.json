@@ -1,0 +1,34 @@
+{
+  "checkpoint": "pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt",
+  "dataset": "../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/TSP_survey_converted.txt",
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 4450442.592003318,
+      "avg_ant_before_ls": 4461459.350904362,
+      "avg_incumbent_after_aco": 4446971.173374627,
+      "final_ant_after_ls": 4342423.678707591,
+      "final_ant_before_ls": 4368684.288833351,
+      "final_incumbent_after_aco": 4335858.432613574,
+      "gap_pct": 2.062364166383423,
+      "gap_std_pct": 1.9190351255081752,
+      "guidance_diagnostics": {
+        "enhance": 0.1506265939440039,
+        "rebellion": 0.008113780648663076,
+        "suppression": 0.16112685292109585
+      },
+      "mean_cost": 4335858.432613574,
+      "mean_guidance": 5.264365441319808,
+      "mean_neural_time_s": 0.35556588151998686,
+      "mean_time_s": 4.36194094754102,
+      "pheromone_correlation": 0.0947898964860253,
+      "std_cost": 17216671.93591883,
+      "std_neural_time_s": 0.6397394334172305,
+      "std_time_s": 8.021079131470604,
+      "total_neural_time_s": 81.069020986557,
+      "total_time_s": 994.5225360393524
+    }
+  },
+  "n_node": 1000,
+  "problem": "tsp",
+  "seed": 1234
+}

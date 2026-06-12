@@ -1,15 +1,14 @@
 {
   "version": 1,
-  "active": true,
-  "skill": "analyze",
-  "keyword": "Investigate",
-  "phase": "planning",
-  "activated_at": "2026-04-09T03:30:04.612Z",
-  "updated_at": "2026-04-09T03:30:04.612Z",
+  "active": false,
+  "skill": "ultrawork",
+  "keyword": "parallel",
+  "phase": "qa",
+  "activated_at": "2026-04-22T08:29:23.231Z",
+  "updated_at": "2026-04-22T08:34:17.544Z",
   "source": "keyword-detector",
-  "session_id": "",
-  "thread_id": "019d7042-9be2-71c0-9e74-771de2e925a6",
-  "turn_id": "019d7049-03bf-7603-aa86-18a0849c4acb",
-  "iteration": 70,
-  "last_turn_at": "2026-04-11T01:27:33.704Z"
+  "input_lock": null,
+  "session_id": "omx-1776843616303-vld36w",
+  "turn_id": "019db447-9a6a-79f2-a07b-3a1c8836c425",
+  "active_skills": []
 }

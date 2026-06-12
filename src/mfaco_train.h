@@ -296,6 +296,30 @@ public:
               bool parallel_traced = false);
 
   /**
+   * Sample solutions with one sparse neural prior per ant.
+   *
+   * @param ant_priors Required (n_ants, n, k) row-major neural priors.
+   *                   Ant a uses ant_priors + a*n*k for construction,
+   *                   tracing, and prior-guided local search.
+   */
+  void sample_ant_priors(bool require_prob, const float *ant_priors,
+                         SampleResult &result, bool parallel_traced = false);
+
+  /**
+   * Sample solutions with one sparse neural prior per head.
+   *
+   * @param head_priors Required (n_heads, n, k) row-major neural priors.
+   *                    Ants are split contiguously across heads. If
+   *                    head_counts is null the split is as even as possible.
+   *                    Otherwise head_counts must sum to n_ants. Each head
+   *                    probmat is computed once.
+   */
+  void sample_head_priors(bool require_prob, const float *head_priors,
+                          int32_t n_heads, SampleResult &result,
+                          bool parallel_traced = false,
+                          const int32_t *head_counts = nullptr);
+
+  /**
    * Update pheromone: evaporate + deposit on best route.
    * Updates source solution and tau limits.
    *
@@ -577,6 +601,11 @@ public:
 
   void sample(bool require_prob, const float *prior_ptr, SampleResult &result,
               bool parallel_traced);
+
+  void sample_head_priors(bool require_prob, const float *head_priors,
+                          int32_t n_heads, SampleResult &result,
+                          bool parallel_traced = false,
+                          const int32_t *head_counts = nullptr);
 
   void reset_timings();
 

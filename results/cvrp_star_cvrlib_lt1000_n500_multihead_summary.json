@@ -1,0 +1,29 @@
+{
+  "checkpoint": "pretrained/cvrp/n500/cvrp_n500_k32_ants100_H2_miniH20_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_best.pt",
+  "dataset": "data/CVRP/data/test_set/STAR_CVRPlib_lt1000.txt",
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 66.23450182330006,
+      "avg_ant_before_ls": 0.06477805997867776,
+      "avg_incumbent_after_aco": 65.65887566741789,
+      "final_ant_after_ls": 66.01767244242659,
+      "final_ant_before_ls": 0.0,
+      "final_incumbent_after_aco": 65.45780441014453,
+      "gap_pct": 2.7818309226312476,
+      "gap_std_pct": 2.2141556516241847,
+      "mean_cost": 65.45780441014453,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 2.0627020561333858,
+      "pheromone_correlation": null,
+      "std_cost": 54.26517447910103,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.9629323968488509,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 204.2075035572052
+    }
+  },
+  "n_node": 500,
+  "problem": "cvrp",
+  "seed": 1234
+}

@@ -1,34 +1,113 @@
+# DyNACO: Dynamic Neural Guidance for ACO
+# Comprehensive .gitignore for research code
+
+# Python
 __pycache__/
-.venv
-uv.lock
-wandb
-uv.lock
-tuning_results
-visualizations
-test_data
-paper.tex
-data_old
-pretrained_old
-search_results
-pretrained
-logs
-experiments_checkpoints
-output
-experiments
-data
-tmp_models
-*.pdf
-csv
-test_mem3.py
-test_mem4.py
-reviewer_experiments
-results
-models
-pretrained
-checkpoints_compare
-checkpoints_static
-checkpoints_dynamic
-checkpoints_extended
-checkpoints
-data
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+*.egg-info/
+*.dist-info/
+build/
+bdist.linux-x86_64/
+dist/
+*.egg
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific generated data (everything under experiments/)
+experiments/
+output/
+logs/
+results_extended/
+tmp_models/
+tuning_results/
+search_results/
+visualizations/
+rebuttal_results.csv
+
+# W&B
+wandb/
+.wandb/
+
+# Data generated at runtime (keep curated benchmarks in data/ only)
+data/generated/
+data/cache/
+
+# C++ build
+src/build/
+src/.cache/
+src/*.so
+src/*.pyd
+src/ngfaco.egg-info/
+temp.linux-*/
+bdist.*/
+lib/
+
+# System files (but keep project-specific dotfiles)
 .*
+!.gitignore
+!.claude/
+!.claude.settings.json
+
+# OmniFocus/OmniOutliner (from .omx)
+.omx/
+.omc/
+
+# Plan files (temporary)
+PLAN.MD
+
+# Test memory files
+test_mem*.py
+
+# Old directories (clean these up eventually)
+data_old/
+pretrained_old/
+reviewer_experiments/
+
+# VRAM notes
+vram.md
+
+# Coverage data
+.coverage
+coverage.xml
+htmlcov/
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# IPython
+.ipynb_checkpoints/
+
+# Latex auxiliary (if writing paper)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+pretrained/
+checkpoints/
+chechpoints_extended/

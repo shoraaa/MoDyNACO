@@ -1,0 +1,29 @@
+{
+  "checkpoint": "pretrained/tsp/n500/tsp_n500_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_best.pt",
+  "dataset": "data/TSP/data/test_set/STAR_TSP_lt1000.txt",
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 28186.255505398964,
+      "avg_ant_before_ls": 28186.255505398964,
+      "avg_incumbent_after_aco": 27550.604050759575,
+      "final_ant_after_ls": 28657.13691600855,
+      "final_ant_before_ls": 28657.13691600855,
+      "final_incumbent_after_aco": 27523.104091920715,
+      "gap_pct": 0.5537042890513981,
+      "gap_std_pct": 0.7497960046472277,
+      "mean_cost": 27523.104091920715,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.7366506154986395,
+      "pheromone_correlation": null,
+      "std_cost": 32586.42158761064,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.18184096660780497,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 50.82889246940613
+    }
+  },
+  "n_node": 500,
+  "problem": "tsp",
+  "seed": 1234
+}

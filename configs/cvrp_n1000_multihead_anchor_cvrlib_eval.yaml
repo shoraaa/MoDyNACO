@@ -1,0 +1,30 @@
+problem: cvrp
+n_node: 1000
+k_sparse: 32
+alg: faco
+
+n_ants: 100
+H: 10
+mini_H: 100
+rho: 0.5
+min_new_edges: 12
+alpha: 1.0
+beta: 1.0
+gamma: 1.0
+min_gamma: 0.0
+
+multi_head: true
+num_heads: 4
+head_zdim: 16
+head_deploy: ants
+head_ant_weights: "85,5,5,5"
+head_index: 0
+
+checkpoint: pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_ha85-5-5-5_anchor1_anchored_best.pt
+dataset: ../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/CVRPlib_survey_instances_converted.txt
+run_model_anneal: true
+no_baseline: true
+summary_json: results/cvrp_star_cvrlib_n1000_multihead_anchor_summary.json
+
+device: cuda:0
+seed: 1234

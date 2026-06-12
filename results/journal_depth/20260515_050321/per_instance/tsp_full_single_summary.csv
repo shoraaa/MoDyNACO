@@ -1,0 +1,9 @@
+problem,tsp
+n_node,1000
+checkpoint,pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt
+dataset,../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/TSP_survey_converted.txt
+seed,1234
+
+Method,MeanCost,StdCost,Gap%,StdGap%,GapRef,MeanTime,TotalTime,Best
+Model(anneal),4335858.4326,17216671.9359,2.06,1.92,opt,4.01+0.36,913.45+81.07,BEST
+Model(anneal)@I1000,4335858.4326,17216671.9359,2.06,1.92,bl,3.77+0.36,860.52+81.07,

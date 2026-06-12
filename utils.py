@@ -6,13 +6,15 @@ from torch.utils.data import TensorDataset
 import ast
 import logging
 import sys
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union, Tuple
 from dataclasses import dataclass, field
 import time
 import math
 import faco
+import net as dynaco_net
 import hashlib
 import json
+from torch import Tensor
 
 
 import random
@@ -28,6 +30,363 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _parse_head_ant_weights(raw: Any, num_heads: int) -> Optional[List[float]]:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        vals = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    elif isinstance(raw, (list, tuple)):
+        vals = [float(x) for x in raw]
+    else:
+        raise ValueError(f"Unsupported head_ant_weights value: {raw!r}")
+    if len(vals) != num_heads:
+        raise ValueError(f"head_ant_weights must provide {num_heads} values, got {len(vals)}")
+    if any(v < 0 for v in vals) or sum(vals) <= 0:
+        raise ValueError("head_ant_weights must be non-negative and sum to a positive value")
+    return vals
+
+
+def split_ant_counts_from_weights(
+    n_ants: int,
+    num_heads: int,
+    weights: Optional[Any] = None,
+) -> List[int]:
+    vals = _parse_head_ant_weights(weights, num_heads)
+    if vals is None:
+        base = n_ants // num_heads
+        rem = n_ants % num_heads
+        counts = [base + (1 if h < rem else 0) for h in range(num_heads)]
+    else:
+        total = sum(vals)
+        exact = [n_ants * v / total for v in vals]
+        counts = [int(np.floor(x)) for x in exact]
+        for i, v in enumerate(vals):
+            if v > 0 and counts[i] == 0:
+                counts[i] = 1
+        while sum(counts) > n_ants:
+            candidates = [i for i, v in enumerate(vals) if counts[i] > (1 if v > 0 else 0)]
+            if not candidates:
+                break
+            i = min(candidates, key=lambda j: exact[j] - counts[j])
+            counts[i] -= 1
+        while sum(counts) < n_ants:
+            i = max(range(num_heads), key=lambda j: exact[j] - counts[j])
+            counts[i] += 1
+    if vals is None and any(c <= 0 for c in counts):
+        raise ValueError(
+            f"n_ants={n_ants} must allocate at least one ant to each active head; got counts={counts}"
+        )
+    if vals is not None and any(v > 0 and c <= 0 for v, c in zip(vals, counts)):
+        raise ValueError(
+            f"positive head_ant_weights must allocate at least one ant; weights={vals}, counts={counts}"
+        )
+    return counts
+
+
+def expand_head_priors_to_ants(
+    head_priors: torch.Tensor,
+    n_ants: int,
+    head_ant_weights: Optional[Any] = None,
+) -> tuple[torch.Tensor, List[int]]:
+    counts = split_ant_counts_from_weights(n_ants, int(head_priors.shape[0]), head_ant_weights)
+    ant_priors = torch.cat(
+        [head_priors[h:h + 1].expand(count, -1, -1) for h, count in enumerate(counts)],
+        dim=0,
+    ).contiguous()
+    return ant_priors, counts
+
+
+def _multi_head_enabled(args: Any) -> bool:
+    return bool(getattr(args, "multi_head", False) or getattr(args, "num_heads", 1) > 1)
+
+
+def head_router_enabled(args: Any) -> bool:
+    return (
+        _multi_head_enabled(args)
+        and getattr(args, "head_deploy", "ants") == "ants"
+        and str(getattr(args, "head_router", "static") or "static").lower() != "static"
+    )
+
+
+class HeadUtilityRouter:
+    """Lightweight EMA router for assigning ants to multi-head priors."""
+
+    def __init__(self, num_heads: int, n_ants: int, args: Any):
+        self.num_heads = int(num_heads)
+        self.n_ants = int(n_ants)
+        self.mode = str(getattr(args, "head_router", "static") or "static").lower()
+        self.alpha = float(getattr(args, "head_router_alpha", 0.25))
+        self.gamma = float(getattr(args, "head_router_gamma", getattr(args, "head_gamma", 2.0)))
+        self.min_frac = float(getattr(args, "head_router_min_frac", 0.0))
+        self.score_mode = str(getattr(args, "head_router_score_mode", getattr(args, "head_score_mode", "mean")))
+        self.topq = int(getattr(args, "head_topq", 1))
+        self.static_weights = getattr(args, "head_ant_weights", None)
+        self._utility: Optional[np.ndarray] = None
+        self._last_counts = split_ant_counts_from_weights(self.n_ants, self.num_heads, self.static_weights)
+
+    @property
+    def utility(self) -> Optional[np.ndarray]:
+        return None if self._utility is None else self._utility.copy()
+
+    @property
+    def last_counts(self) -> List[int]:
+        return [int(c) for c in self._last_counts]
+
+    def counts(self) -> List[int]:
+        if self.mode == "static" or self._utility is None:
+            self._last_counts = split_ant_counts_from_weights(self.n_ants, self.num_heads, self.static_weights)
+            return self.last_counts
+        probs = _softmax_np(self.gamma * self._utility)
+        if self.min_frac > 0:
+            min_frac = min(self.min_frac, 1.0 / max(self.num_heads, 1))
+            probs = (1.0 - min_frac * self.num_heads) * probs + min_frac
+            probs = np.maximum(probs, 0.0)
+            probs = probs / max(float(probs.sum()), 1e-12)
+        self._last_counts = _counts_from_probs(self.n_ants, probs)
+        return self.last_counts
+
+    def update(
+        self,
+        head_counts: List[int],
+        costs_after: Any,
+        incumbent_before: Optional[float] = None,
+        best_idx: Optional[int] = None,
+    ) -> np.ndarray:
+        head_ids = _head_ids_from_counts(head_counts, len(costs_after))
+        if head_ids is None:
+            return self.utility if self.utility is not None else np.zeros(self.num_heads, dtype=np.float64)
+
+        costs = _tensor_to_numpy_1d(costs_after).astype(np.float64)
+        scores = np.zeros(self.num_heads, dtype=np.float64)
+        for h in range(self.num_heads):
+            mask = head_ids == h
+            if not np.any(mask):
+                continue
+            h_costs = costs[mask]
+            if self.score_mode == "topq":
+                q = max(1, min(self.topq, h_costs.shape[0]))
+                base = -float(np.partition(h_costs, q - 1)[:q].mean())
+            elif self.score_mode == "best":
+                base = -float(np.min(h_costs))
+            elif self.score_mode == "improvement":
+                if incumbent_before is not None and math.isfinite(float(incumbent_before)):
+                    base = max(0.0, float(incumbent_before) - float(np.min(h_costs)))
+                else:
+                    base = -float(np.min(h_costs))
+            else:
+                base = -float(np.mean(h_costs))
+            scores[h] = base
+
+        if best_idx is not None:
+            best_head = int(head_ids[int(best_idx)])
+            scores[best_head] += float(getattr(self, "best_bonus", 0.0))
+
+        score_std = float(scores.std())
+        if score_std > 1e-12:
+            scores = (scores - float(scores.mean())) / score_std
+        else:
+            scores = scores - float(scores.mean())
+
+        if self._utility is None:
+            self._utility = scores
+        else:
+            self._utility = (1.0 - self.alpha) * self._utility + self.alpha * scores
+        return self.utility
+
+
+def _softmax_np(values: np.ndarray) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float64)
+    x = x - np.max(x)
+    e = np.exp(x)
+    return e / max(float(e.sum()), 1e-12)
+
+
+def _counts_from_probs(n_ants: int, probs: np.ndarray) -> List[int]:
+    probs = np.asarray(probs, dtype=np.float64)
+    num_heads = int(probs.shape[0])
+    if num_heads <= 0:
+        raise ValueError("num_heads must be positive")
+    if n_ants < num_heads:
+        raise ValueError(f"n_ants={n_ants} must be >= num_heads={num_heads} for adaptive routing")
+    probs = probs / max(float(probs.sum()), 1e-12)
+    exact = probs * int(n_ants)
+    counts = np.floor(exact).astype(np.int32)
+    for h in range(num_heads):
+        if counts[h] <= 0:
+            counts[h] = 1
+    while int(counts.sum()) > int(n_ants):
+        candidates = [h for h in range(num_heads) if counts[h] > 1]
+        if not candidates:
+            break
+        h = min(candidates, key=lambda i: exact[i] - counts[i])
+        counts[h] -= 1
+    while int(counts.sum()) < int(n_ants):
+        h = max(range(num_heads), key=lambda i: exact[i] - counts[i])
+        counts[h] += 1
+    return [int(c) for c in counts.tolist()]
+
+
+def make_head_router(args: Any, num_heads: int, n_ants: int) -> Optional[HeadUtilityRouter]:
+    if not head_router_enabled(args):
+        return None
+    return HeadUtilityRouter(num_heads, n_ants, args)
+
+
+def head_counts_for_router(
+    args: Any,
+    num_heads: int,
+    n_ants: int,
+    router: Optional[HeadUtilityRouter] = None,
+) -> List[int]:
+    if router is not None:
+        return router.counts()
+    return split_ant_counts_from_weights(n_ants, num_heads, getattr(args, "head_ant_weights", None))
+
+
+def update_head_router(
+    router: Optional[HeadUtilityRouter],
+    head_counts: List[int],
+    costs_after: Any,
+    incumbent_before: Optional[float] = None,
+    best_idx: Optional[int] = None,
+) -> Optional[np.ndarray]:
+    if router is None:
+        return None
+    return router.update(head_counts, costs_after, incumbent_before=incumbent_before, best_idx=best_idx)
+
+
+def head_router_metrics(
+    router: Optional[HeadUtilityRouter],
+    head_counts: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    if router is None:
+        return {}
+    out: Dict[str, Any] = {}
+    counts = head_counts if head_counts is not None else router.last_counts
+    if counts:
+        counts_np = np.asarray(counts, dtype=np.float64)
+        probs = counts_np / max(float(counts_np.sum()), 1e-12)
+        out["head_router_entropy"] = float(-(probs * np.log(probs + 1e-12)).sum())
+        out["head_router_min_ants"] = float(counts_np.min())
+        out["head_router_max_ants"] = float(counts_np.max())
+        out["head_router_counts"] = [int(c) for c in counts]
+    utility = router.utility
+    if utility is not None:
+        out["head_router_utility"] = [float(x) for x in utility.tolist()]
+        out["head_router_utility_spread"] = float(np.std(utility))
+    return out
+
+
+def _head_input_transform_mode(args: Any) -> str:
+    return str(getattr(args, "head_input_transform", "none") or "none").lower()
+
+
+def _transform_coords_for_head(coords: Any, head_idx: int, mode: str) -> Any:
+    if mode in {"none", "identity"}:
+        return coords
+    if mode != "d4":
+        raise ValueError(f"Unsupported head_input_transform: {mode}")
+
+    variant = int(head_idx) % 8
+    if torch.is_tensor(coords):
+        c = coords.clone()
+        center = (c.amin(dim=0, keepdim=True) + c.amax(dim=0, keepdim=True)) * 0.5
+        rel = c - center
+        x, y = rel[..., 0], rel[..., 1]
+        if variant == 0:
+            out = torch.stack((x, y), dim=-1)
+        elif variant == 1:
+            out = torch.stack((-x, y), dim=-1)
+        elif variant == 2:
+            out = torch.stack((x, -y), dim=-1)
+        elif variant == 3:
+            out = torch.stack((-x, -y), dim=-1)
+        elif variant == 4:
+            out = torch.stack((y, x), dim=-1)
+        elif variant == 5:
+            out = torch.stack((-y, x), dim=-1)
+        elif variant == 6:
+            out = torch.stack((y, -x), dim=-1)
+        else:
+            out = torch.stack((-y, -x), dim=-1)
+        return out + center
+
+    arr = np.array(coords, copy=True)
+    center = (arr.min(axis=0, keepdims=True) + arr.max(axis=0, keepdims=True)) * 0.5
+    rel = arr - center
+    x, y = rel[..., 0], rel[..., 1]
+    if variant == 0:
+        out = np.stack((x, y), axis=-1)
+    elif variant == 1:
+        out = np.stack((-x, y), axis=-1)
+    elif variant == 2:
+        out = np.stack((x, -y), axis=-1)
+    elif variant == 3:
+        out = np.stack((-x, -y), axis=-1)
+    elif variant == 4:
+        out = np.stack((y, x), axis=-1)
+    elif variant == 5:
+        out = np.stack((-y, x), axis=-1)
+    elif variant == 6:
+        out = np.stack((y, -x), axis=-1)
+    else:
+        out = np.stack((-y, -x), axis=-1)
+    return out + center
+
+
+def _multi_head_priors_from_transformed_inputs(
+    model: Any,
+    aco: Any,
+    build_fn: Any,
+    problem: str,
+    coords: Any,
+    demand: Optional[Any],
+    args: Any,
+    dynamic: bool,
+    ablation_pheromone: bool,
+    ablation_incumbent: bool,
+) -> torch.Tensor:
+    mode = _head_input_transform_mode(args)
+    if mode in {"none", "identity"}:
+        raise ValueError("Transformed-input helper requires a non-identity transform mode")
+
+    num_heads = int(getattr(args, "num_heads", 1))
+    outputs = []
+    for head_idx in range(num_heads):
+        transformed_coords = _transform_coords_for_head(coords, head_idx, mode)
+        if problem == "tsp":
+            pyg_data = build_fn(
+                aco,
+                transformed_coords,
+                args.device,
+                dynamic=dynamic,
+                ablation_pheromone=ablation_pheromone,
+                ablation_incumbent=ablation_incumbent,
+                edge_feature_set=getattr(args, "edge_feature_set", "full"),
+            )
+        else:
+            pyg_data = build_fn(
+                aco,
+                transformed_coords,
+                demand,
+                args.device,
+                dynamic=dynamic,
+                ablation_pheromone=ablation_pheromone,
+                ablation_incumbent=ablation_incumbent,
+                edge_feature_set=getattr(args, "edge_feature_set", "full"),
+            )
+        prior_output = model(pyg_data)
+        if prior_output.dim() != 2:
+            raise ValueError(
+                f"Expected multi-head output for transformed head inference, got {tuple(prior_output.shape)}"
+            )
+        outputs.append(prior_output[:, head_idx])
+    return torch.stack(outputs, dim=0).contiguous().view(num_heads, aco.n, aco.k)
 
 
 
@@ -198,17 +557,29 @@ class Logger:
         epoch: int,
         train_cost: float,
         val_best: float,
-        gap: float
+        gap: float,
+        gpu_memory_gb: Optional[float] = None,
+        peak_memory_gb: Optional[float] = None,
+        best_saved: bool = False,
     ):
         """Print epoch summary to console."""
-        self.info(
-            f"Epoch {epoch}: TrainCost={train_cost:.4f} "
-            f"ValBest={val_best:.4f} Gap={gap:.2f}%"
-        )
+        parts = [
+            f"Epoch {epoch}",
+            f"TrainCost={train_cost:.4f}",
+            f"ValBest={val_best:.4f}",
+            f"Gap={gap:.2f}%",
+        ]
+        if gpu_memory_gb is not None:
+            parts.append(f"GPU={gpu_memory_gb:.2f}GB")
+        if peak_memory_gb is not None:
+            parts.append(f"Peak={peak_memory_gb:.2f}GB")
+        if best_saved:
+            parts.append("best↑")
+        self.info(" | ".join(parts))
     
     def log_model_saved(self, path: Path, epoch: int, val_cost: float, gap: float):
         """Log model save event."""
-        self.info(
+        self.debug(
             f"Saved new best model to {path} "
             f"(Epoch {epoch}, Val Cost: {val_cost:.4f}, Gap: {gap:.2f}%)"
         )
@@ -303,10 +674,20 @@ def gen_distance_matrix(coords):
 def generate_tsp_instance(n):
     return np.random.rand(n, 2).astype(np.float32)
 
-def build_pyg_data_tsp(aco, coords, device, ablation_pheromone=False, ablation_incumbent=False, dynamic: bool=True):
+def build_pyg_data_tsp(
+    aco,
+    coords,
+    device,
+    ablation_pheromone=False,
+    ablation_incumbent=False,
+    edge_feature_set: str = "full",
+    dynamic: bool=True,
+):
     """
     Build PyG Data for TSP using 2D node features (coords).
-    Edge features (6): dist_norm, tau_cv, log_tau_rel, is_source_succ, is_source_pred, is_new_edge
+    Edge features:
+      full: dist_norm, tau_cv, log_tau_rel, is_source_succ, is_source_pred, is_new_edge
+      compact3: dist_norm, log_tau_rel, is_in_incumbent
     """
     if isinstance(coords, np.ndarray):
         coords = torch.from_numpy(coords)
@@ -349,6 +730,7 @@ def build_pyg_data_tsp(aco, coords, device, ablation_pheromone=False, ablation_i
         duv = (pos[src] - pos[dst]).abs()
         undirected_adj = (duv == 1) | (duv == (n - 1))
         is_new_edge = (~undirected_adj).to(torch.float32).view(E, 1)
+        is_in_incumbent = undirected_adj.to(torch.float32).view(E, 1)
 
     else:
         log_tau_rel = torch.zeros((E, 1), device=device, dtype=torch.float32)
@@ -356,12 +738,18 @@ def build_pyg_data_tsp(aco, coords, device, ablation_pheromone=False, ablation_i
         is_source_succ = torch.zeros((E, 1), device=device, dtype=torch.float32)
         is_source_pred = torch.zeros((E, 1), device=device, dtype=torch.float32)
         is_new_edge = torch.zeros((E, 1), device=device, dtype=torch.float32)
+        is_in_incumbent = torch.zeros((E, 1), device=device, dtype=torch.float32)
 
-    features = [dist_norm]
-    if not ablation_pheromone:
-        features.extend([tau_cv, log_tau_rel])
-    if not ablation_incumbent:
-        features.extend([is_source_succ, is_source_pred, is_new_edge])
+    if edge_feature_set == "compact3":
+        features = [dist_norm, log_tau_rel, is_in_incumbent]
+    elif edge_feature_set == "full":
+        features = [dist_norm]
+        if not ablation_pheromone:
+            features.extend([tau_cv, log_tau_rel])
+        if not ablation_incumbent:
+            features.extend([is_source_succ, is_source_pred, is_new_edge])
+    else:
+        raise ValueError(f"Unknown edge_feature_set: {edge_feature_set}")
 
     edge_attr = torch.cat(features, dim=1)
     return Data(x=coords, edge_index=edge_index, edge_attr=edge_attr)
@@ -394,17 +782,30 @@ def gen_cvrp_instance(n, device, capacity=None):
     coords = torch.rand(size=(n + 1, 2), device=device)
     
     # Demands for n customers (depot has 0 demand)
-    demands = torch.randint(low=DEMAND_LOW, high=DEMAND_HIGH + 1, size=(n,), device=device)
+    # Keep CVRP generation independent from other problem constants defined
+    # later in this module (for example BPP uses much larger item demands).
+    demands = torch.randint(low=1, high=10, size=(n,), device=device)
     demands_normalized = demands.float() / capacity
     all_demands = torch.cat((torch.zeros((1,), device=device), demands_normalized))
     
     # Return coords (n+1, 2), demands (n+1,) normalized, capacity_norm=1.0
     return coords, all_demands, 1.0
 
-def build_pyg_data_cvrp(aco, coords, demand, device, ablation_pheromone=False, ablation_incumbent=False, dynamic: bool=True):
+def build_pyg_data_cvrp(
+    aco,
+    coords,
+    demand,
+    device,
+    ablation_pheromone=False,
+    ablation_incumbent=False,
+    edge_feature_set: str = "full",
+    dynamic: bool=True,
+):
     """
     Build PyG Data for CVRP using 4D node features (coords, demand, depot_flag).
-    Edge features (6): dist_norm, tau_cv, log_tau_rel, is_source_succ, is_source_pred, is_new_edge
+    Edge features:
+      full: dist_norm, tau_cv, log_tau_rel, is_source_succ, is_source_pred, is_new_edge
+      compact3: dist_norm, log_tau_rel, is_in_incumbent
     
     Note: CVRP source_route is variable-length with depot (0) appearing multiple times:
         [0, x1, x2, 0, x3, x4, x5, 0, ...]
@@ -522,19 +923,319 @@ def build_pyg_data_cvrp(aco, coords, demand, device, ablation_pheromone=False, a
     is_new_edge = (~is_in_route).to(torch.float32).view(E, 1)
     is_in_route_feat = is_in_route.to(torch.float32).view(E, 1)
 
-    features = [dist_norm]
-    if not ablation_pheromone:
-        features.extend([tau_cv, log_tau_rel])
-    if not ablation_incumbent:
-        features.extend([is_source_succ, is_source_pred, is_new_edge])
+    if edge_feature_set == "compact3":
+        features = [dist_norm, log_tau_rel, is_in_route_feat]
+    elif edge_feature_set == "full":
+        features = [dist_norm]
+        if not ablation_pheromone:
+            features.extend([tau_cv, log_tau_rel])
+        if not ablation_incumbent:
+            features.extend([is_source_succ, is_source_pred, is_new_edge])
+    else:
+        raise ValueError(f"Unknown edge_feature_set: {edge_feature_set}")
 
     edge_attr = torch.cat(features, dim=1)
 
-    # Node features: (demand)
-    # demand_t is (N,)
-    x = demand_t.unsqueeze(1)
+    # Node features: (x_coord, y_coord, demand, depot_flag)
+    depot_flag = torch.zeros((coords_t.size(0), 1), device=device, dtype=torch.float32)
+    depot_flag[0, 0] = 1.0
+    x = torch.cat([coords_t, demand_t.unsqueeze(1), depot_flag], dim=1)
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+def _augment_edge_attr_with_dynamic_features(
+    base_edge_attr: Tensor,
+    aco: Any,
+    dynamic: bool,
+    device: str,
+) -> Tensor:
+    """Append normalized pheromone and incumbent channels to dense edge attributes."""
+    base_edge_attr = base_edge_attr.to(device=device, dtype=torch.float32)
+    edge_count = base_edge_attr.size(0)
+    n_nodes = int(round(edge_count ** 0.5))
+
+    if dynamic:
+        # 1. Pheromone feature (log-relative normalization)
+        tau = aco.pheromone.to(device=device, dtype=torch.float32)
+        tau_mean = tau.mean(dim=1, keepdim=True).clamp_min(1e-12)
+        tau_rel = (tau / tau_mean).clamp_min(1e-12)
+        pheromone_feat = torch.log(tau_rel).clamp(-5.0, 5.0).reshape(edge_count, 1)
+
+        # 2. Incumbent feature (is_source_succ)
+        sp = getattr(aco, 'shortest_path', None)
+        if sp is not None and sp.numel() > 1:
+            is_source_succ = torch.zeros((n_nodes, n_nodes), device=device)
+            u_indices = sp[:-1]
+            v_indices = sp[1:]
+            # Ensure indices are within bounds (handles dummy nodes etc.)
+            mask = (u_indices < n_nodes) & (v_indices < n_nodes)
+            is_source_succ[u_indices[mask], v_indices[mask]] = 1.0
+            incumbent_feat = is_source_succ.reshape(edge_count, 1)
+        else:
+            incumbent_feat = torch.zeros((edge_count, 1), device=device)
+
+        return torch.cat((base_edge_attr, pheromone_feat, incumbent_feat), dim=1)
+    else:
+        # Static mode: just return the base edge attribute (1 channel)
+        return base_edge_attr
+
+
+# =============================================================================
+# Extended Problem Utilities (BPP, MKP, OP)
+# =============================================================================
+
+# ----------------- BPP (Bin Packing Problem) -----------------
+
+DEMAND_LOW = 20
+DEMAND_HIGH = 100
+CAPACITY = 150
+
+def gen_bpp_instance(n: int, device: torch.device) -> Tensor:
+    """
+    Generate a BPP instance.
+
+    Args:
+        n: Number of items
+        device: Device to create tensors on
+
+    Returns:
+        demand: Tensor of shape (n+1,) with demand values (first element is 0 for depot)
+    """
+    demands = torch.randint(low=DEMAND_LOW, high=DEMAND_HIGH + 1, size=(n,), device=device)
+    all_demands = torch.cat((torch.zeros((1,), device=device), demands))
+    return all_demands  # (n+1)
+
+def build_pyg_data_bpp(
+    demand: Tensor,
+    aco: Any,
+    device: str = 'cpu',
+    dynamic: bool = True,
+) -> Data:
+    """
+    Build PyG data for BPP.
+
+    Args:
+        demand: Demand tensor of shape (n+1,)
+        aco: ACO instance
+        device: Device to create tensors on
+        dynamic: Whether to include dynamic features
+
+    Returns:
+        pyg_data: PyG Data instance
+    """
+    demand = demand.to(device=device, dtype=torch.float32)
+    n = demand.size(0)
+    nodes = torch.arange(n, device=device)
+    u = nodes.repeat(n)
+    v = torch.repeat_interleave(nodes, n)
+    edge_index = torch.stack((u, v))
+    base_edge_attr = torch.ones((edge_index.size(1), 1), device=device)
+    edge_attr = _augment_edge_attr_with_dynamic_features(base_edge_attr, aco, dynamic, device)
+    x = demand.unsqueeze(1)  # (n+1, 1)
+    pyg_data = Data(x=x, edge_attr=edge_attr, edge_index=edge_index)
+    return pyg_data
+
+def load_bpp_test_dataset(problem_size: int, device: torch.device):
+    """
+    Load BPP test dataset.
+    """
+    dataset_path = DATA_DIR / f"bpp_{problem_size}.pt"
+    if not dataset_path.exists():
+        # Generate on the fly if not exists
+        instances = [gen_bpp_instance(problem_size, device) for _ in range(100)]
+        return instances
+    return torch.load(dataset_path, map_location=device)
+
+
+# ----------------- MKP (Multi-dimensional Knapsack Problem) -----------------
+
+def gen_mkp_instance(n: int, m: int, device: torch.device) -> tuple[Tensor, Tensor]:
+    """
+    Generate an MKP instance.
+
+    Args:
+        n: Number of items
+        m: Number of dimensions (constraints)
+        device: Device to create tensors on
+
+    Returns:
+        prize: Prize tensor of shape (n,)
+        weight: Weight tensor of shape (n, m)
+    """
+    prize = torch.rand(n, device=device)
+    weight = torch.rand(n, m, device=device)
+    return prize, weight
+
+def build_pyg_data_mkp(
+    prize: Tensor,
+    weight: Tensor,
+    aco: Any,
+    device: str = 'cpu',
+    dynamic: bool = True,
+) -> Data:
+    """
+    Build PyG data for MKP.
+
+    Args:
+        prize: Prize tensor of shape (n,)
+        weight: Weight tensor of shape (n, m)
+        aco: ACO instance
+        device: Device to create tensors on
+        dynamic: Whether to include dynamic features
+
+    Returns:
+        pyg_data: PyG Data instance
+    """
+    prize = prize.to(device=device, dtype=torch.float32)
+    weight = weight.to(device=device, dtype=torch.float32)
+    n = prize.size(0)
+    m = weight.size(1)
+
+    # x: prize and weights for each item, plus a dummy node
+    x = torch.zeros((n + 1, m + 1), device=device)
+    x[:n, 0] = prize
+    x[:n, 1:] = weight
+
+    n_total = n + 1
+    nodes = torch.arange(n_total, device=device)
+    u = nodes.repeat(n_total)
+    v = torch.repeat_interleave(nodes, n_total)
+    edge_index = torch.stack((u, v))
+
+    # Base edge attribute: 1 for edges from items to other items, 0 for depot
+    base_edge_attr = torch.ones((edge_index.size(1), 1), device=device)
+    edge_attr = _augment_edge_attr_with_dynamic_features(base_edge_attr, aco, dynamic, device)
+
+    pyg_data = Data(x=x, edge_attr=edge_attr, edge_index=edge_index)
+    return pyg_data
+
+def load_mkp_test_dataset(problem_size: int, m: int, device: torch.device):
+    """Load MKP test dataset."""
+    dataset_path = DATA_DIR / f"mkp_{problem_size}_{m}.pt"
+    if not dataset_path.exists():
+        instances = [gen_mkp_instance(problem_size, m, device) for _ in range(100)]
+        return instances
+    return torch.load(dataset_path, map_location=device)
+
+
+# ----------------- OP (Orienteering Problem) -----------------
+
+def gen_op_instance(n: int, device: torch.device) -> tuple[Tensor, Tensor]:
+    """
+    Generate an OP instance.
+
+    Args:
+        n: Number of items (including depot)
+        device: Device to create tensors on
+
+    Returns:
+        coords: Coordinates of nodes shape (n, 2)
+        prizes: Prize of nodes shape (n,)
+    """
+    coords = torch.rand(n, 2, device=device)
+    prizes = torch.rand(n, device=device)
+    prizes[0] = 0.0  # Depot prize is 0
+    return coords, prizes
+
+def build_pyg_data_op(
+    distances: Tensor,
+    prizes: Tensor,
+    aco: Any,
+    device: str = 'cpu',
+    dynamic: bool = True,
+) -> Data:
+    """
+    Build PyG data for OP.
+
+    Args:
+        distances: Distance matrix of shape (n, n)
+        prizes: Prize tensor of shape (n,)
+        aco: ACO instance
+        device: Device to create tensors on
+        dynamic: Whether to include dynamic features
+
+    Returns:
+        pyg_data: PyG Data instance
+    """
+    distances = distances.to(device=device, dtype=torch.float32)
+    prizes = prizes.to(device=device, dtype=torch.float32)
+    n = prizes.size(0)
+    n_total = n + 1  # Including dummy node
+
+    # x: prize and distance to depot
+    x = torch.zeros((n_total, 2), device=device)
+    x[:n, 0] = prizes
+    x[:n, 1] = distances[0, :]
+
+    nodes = torch.arange(n_total, device=device)
+    u = nodes.repeat(n_total)
+    v = torch.repeat_interleave(nodes, n_total)
+    edge_index = torch.stack((u, v))
+
+    # Base edge attribute: 1/distance
+    dist_flat = torch.zeros((n_total * n_total, 1), device=device)
+    dist_flat[:n*n, 0] = 1.0 / (distances.reshape(-1) + 1e-10)
+
+    edge_attr = _augment_edge_attr_with_dynamic_features(
+        dist_flat,
+        aco=aco,
+        dynamic=dynamic,
+        device=device,
+    )
+
+    pyg_data = Data(x=x, edge_attr=edge_attr, edge_index=edge_index)
+    return pyg_data
+
+def build_pyg_data_op_dense(
+    distances: Tensor,
+    prizes: Tensor,
+    aco: Any,
+    device: str = 'cpu',
+    dynamic: bool = True,
+) -> Data:
+    """Compatibility alias for the dense OP graph builder."""
+    return build_pyg_data_op(
+        distances,
+        prizes,
+        aco=aco,
+        device=device,
+        dynamic=dynamic,
+    )
+
+def load_op_test_dataset(problem_size: int, device: torch.device):
+    """Load OP test dataset."""
+    dataset_path = DATA_DIR / f"op_{problem_size}.pt"
+    if not dataset_path.exists():
+        instances = []
+        for _ in range(100):
+            coords = gen_op_instance(problem_size, device)
+            distances = gen_op_distance_matrix(coords)
+            prizes = gen_op_prizes(coords)
+            instances.append((distances, prizes))
+        return instances
+    return torch.load(dataset_path, map_location=device)
+
+def gen_op_distance_matrix(coords_or_instance: Any) -> Tensor:
+    """Build an OP distance matrix from coordinates or a generated instance tuple."""
+    if isinstance(coords_or_instance, tuple):
+        coords = coords_or_instance[0]
+    else:
+        coords = coords_or_instance
+    return torch.cdist(coords, coords)
+
+def gen_op_prizes(coords_or_instance: Any) -> Tensor:
+    """Return OP prizes from a generated instance tuple or derive them from coordinates."""
+    if isinstance(coords_or_instance, tuple):
+        _, prizes = coords_or_instance
+        return prizes
+
+    coords = torch.as_tensor(coords_or_instance, dtype=torch.float32)
+    prizes = coords.norm(dim=1)
+    if prizes.numel() > 0:
+        prizes = prizes.clone()
+        prizes[0] = 0.0
+    return prizes
 
 
 # ----------------- Shared/Dataset -----------------
@@ -791,31 +1492,30 @@ def load_tsp_txt_dataset(path):
                 
                 data_list.append((coords, cost, tour, name))
                 
-            elif line.startswith("['"):
-                # TSPlib Format: ['name', 'cost', flattened_coords...]
-                # We can use ast.literal_eval or string manipulation. 
-                # Given the format is simple string repr of list, manual parsing might be faster/safer if standard.
-                # implementation in sil_test.py used string replace. Let's do similar for robustness.
-                
-                # Clean up list syntax
-                content = line.replace('[', '').replace(']', '').replace("'", "")
-                parts = content.split(',')
-                parts = [p.strip() for p in parts]
-                
-                parts = [p.strip() for p in parts]
-                
-                name = parts[0]
-                cost = float(parts[1])
-                coords_flat = [float(x) for x in parts[2:]]
-                
+            elif line.startswith("['") or line.startswith('["'):
+                # Keyworded STAR/TSPLIB format:
+                # ['name', <id>, 'cost', <opt>, 'edge_weight_type', ..., 'customer', x1, y1, ..., 'end']
+                # Older compact format is also accepted: ['name', 'cost', flattened_coords...].
+                content = line.replace('[', '').replace(']', '').replace("'", "").replace('"', "")
+                parts = [p.strip() for p in content.split(',')]
+
+                if 'customer' in parts and 'cost' in parts:
+                    name = parts[parts.index('name') + 1] if 'name' in parts else f"Instance_{line_idx}"
+                    cost = float(parts[parts.index('cost') + 1])
+                    customer_idx = parts.index('customer')
+                    end_idx = parts.index('end') if 'end' in parts else len(parts)
+                    coords_flat = [float(x) for x in parts[customer_idx + 1:end_idx]]
+                else:
+                    name = parts[0]
+                    cost = float(parts[1])
+                    coords_flat = [float(x) for x in parts[2:]]
+
                 num_nodes = len(coords_flat) // 2
                 coords = torch.tensor(coords_flat).view(num_nodes, 2)
-                
+
                 # Tour is not explicitly in this line, usually.
-                # If we need tour verification, we can't do it comfortably without generating it.
-                # But we have the optimal cost provided.
-                tour = None 
-                
+                tour = None
+
                 data_list.append((coords, cost, tour, name))
 
             elif line.startswith("["):
@@ -1232,6 +1932,108 @@ def calc_interaction_metrics(tau: torch.Tensor, prior: torch.Tensor, k: int = 5)
         "suppression": suppression_rate
     }
 
+
+def _head_ids_from_counts(counts: Optional[List[int]], n_ants: int) -> Optional[np.ndarray]:
+    if counts is None:
+        return None
+    ids: List[int] = []
+    for head_idx, count in enumerate(counts):
+        ids.extend([head_idx] * int(count))
+    if len(ids) != int(n_ants):
+        return None
+    return np.asarray(ids, dtype=np.int32)
+
+
+def _tensor_to_numpy_1d(values: Any) -> np.ndarray:
+    if torch.is_tensor(values):
+        return values.detach().cpu().float().numpy().reshape(-1)
+    return np.asarray(values, dtype=np.float64).reshape(-1)
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        return float("nan")
+    return v if math.isfinite(v) else float("nan")
+
+
+def _append_head_contribution_metrics(
+    metrics_log: Dict[str, List[Any]],
+    head_counts: Optional[List[int]],
+    costs_after: Any,
+    costs_before: Any,
+    best_idx: int,
+    improved: bool,
+) -> None:
+    head_ids = _head_ids_from_counts(head_counts, len(costs_after))
+    if head_ids is None:
+        return
+
+    after = _tensor_to_numpy_1d(costs_after)
+    before = _tensor_to_numpy_1d(costs_before)
+    n_heads = int(len(head_counts))
+    best_head = int(head_ids[int(best_idx)])
+    metrics_log["head_best"].append(best_head)
+    if improved:
+        metrics_log["head_improvement"].append(best_head)
+
+    mean_after, best_after, mean_before, best_before = [], [], [], []
+    for h in range(n_heads):
+        mask = head_ids == h
+        if not np.any(mask):
+            mean_after.append(None)
+            best_after.append(None)
+            mean_before.append(None)
+            best_before.append(None)
+            continue
+        after_h = after[mask]
+        before_h = before[mask] if before.shape[0] == after.shape[0] else after_h
+        mean_after.append(_safe_float(np.mean(after_h)))
+        best_after.append(_safe_float(np.min(after_h)))
+        mean_before.append(_safe_float(np.mean(before_h)))
+        best_before.append(_safe_float(np.min(before_h)))
+    metrics_log["head_mean_after"].append(mean_after)
+    metrics_log["head_best_after"].append(best_after)
+    metrics_log["head_mean_before"].append(mean_before)
+    metrics_log["head_best_before"].append(best_before)
+    metrics_log["head_counts"].append([int(c) for c in head_counts])
+
+
+def _append_head_similarity_metrics(
+    metrics_log: Dict[str, List[Any]],
+    head_priors: torch.Tensor,
+    tau: Optional[torch.Tensor] = None,
+    top_k: int = 5,
+) -> None:
+    if head_priors is None or not torch.is_tensor(head_priors) or head_priors.dim() != 3:
+        return
+    heads = head_priors.detach().float().cpu()
+    n_heads = int(heads.shape[0])
+    if n_heads < 2:
+        return
+
+    flat = heads.reshape(n_heads, -1)
+    centered = flat - flat.mean(dim=1, keepdim=True)
+    denom = centered.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    normed = centered / denom
+    corr = normed @ normed.t()
+
+    pair_corr, pair_top_overlap = [], []
+    for a in range(n_heads):
+        for b in range(a + 1, n_heads):
+            pair_corr.append(float(corr[a, b].item()))
+            pair_top_overlap.append(top_overlap_frac(heads[a], heads[b]))
+    metrics_log["head_logit_corr"].append(float(np.mean(pair_corr)))
+    metrics_log["head_topk_overlap"].append(float(np.mean(pair_top_overlap)))
+
+    if tau is not None:
+        tau_cpu = tau.detach().float().cpu()
+        per_head = [calc_interaction_metrics(tau_cpu, heads[h], k=top_k) for h in range(n_heads)]
+        metrics_log["head_enhance"].append([m["enhance"] for m in per_head])
+        metrics_log["head_rebellion"].append([m["rebellion"] for m in per_head])
+        metrics_log["head_suppression"].append([m["suppression"] for m in per_head])
+
 def generate_and_save_dataset(problem, n_node, n_instances, save_path, baseline_solver='lkh', 
                                baseline_runs=1, time_limit=300.0, device='cpu', capacity_override=None):
     """
@@ -1267,7 +2069,11 @@ def generate_and_save_dataset(problem, n_node, n_instances, save_path, baseline_
             # Compute baseline
             if baseline_solver != 'none':
                 from baselines import solve_with_lkh
-                cost, tour = solve_with_lkh(coords_np, runs=baseline_runs, time_limit=time_limit)
+                baseline_result = solve_with_lkh(coords_np, runs=baseline_runs, time_limit=time_limit)
+                if isinstance(baseline_result, tuple):
+                    cost, tour = baseline_result
+                else:
+                    cost, tour = baseline_result, None
             else:
                 cost, tour = 0.0, list(range(n_node))
                 
@@ -1501,9 +2307,17 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
     best_seen = float("inf")
     avg_last = None
     t_neural_total = 0.0
+    head_router = make_head_router(args, int(getattr(args, "num_heads", 1)), n_ants)
     priors, pher_before = [], []
     metrics_log = {k: [] for k in ["cost", "l2", "kl", "turnover", "flip", "corr", "ov", "row_match", "survival",
-                                   "enhance", "rebellion", "suppression", "prior_mean", "prior_std"]}
+                                   "enhance", "rebellion", "suppression", "prior_mean", "prior_std",
+                                   "head_best", "head_improvement", "head_mean_after", "head_best_after",
+                                   "head_mean_before", "head_best_before", "head_counts",
+                                   "head_logit_corr", "head_topk_overlap", "head_enhance",
+                                   "head_rebellion", "head_suppression",
+                                   "head_router_entropy", "head_router_min_ants",
+                                   "head_router_max_ants", "head_router_utility_spread",
+                                   "head_router_counts", "head_router_utility"]}
     metrics_log["snapshots"] = []
 
     collect_iter_stats = bool(getattr(args, "iter_log", False) or getattr(args, "iter_print", False))
@@ -1548,6 +2362,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
             do_metrics = collect_metrics and (metrics_every_step or t == args.H - 1)
             
             prior_mat = None
+            prior_head_counts = None
             if do_metrics:
                 pher_before.append(aco.pheromone_sparse.detach().cpu().clone())
 
@@ -1558,21 +2373,60 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     use_model = False
                 
                 if use_model:
-                    if problem == 'tsp':
-                        pyg_data = build_fn(aco, norm_coords, args.device, dynamic=dynamic, 
-                                          ablation_pheromone=ablation_pheromone, ablation_incumbent=ablation_incumbent)
-                    else:
-                        pyg_data = build_fn(aco, norm_coords, demand, args.device, dynamic=dynamic,
-                                          ablation_pheromone=ablation_pheromone, ablation_incumbent=ablation_incumbent)
-                    
                     t_neural_start = time.time()
-                    heu_vec = model(pyg_data).view(-1)
+                    if (
+                        _head_input_transform_mode(args) not in {"none", "identity"}
+                        and getattr(args, "head_deploy", "ants") == "ants"
+                        and int(getattr(args, "num_heads", 1)) > 1
+                    ):
+                        prior_mat = _multi_head_priors_from_transformed_inputs(
+                            model,
+                            aco,
+                            build_fn,
+                            problem,
+                            norm_coords,
+                            demand if problem != "tsp" else None,
+                            args,
+                            dynamic,
+                            ablation_pheromone,
+                            ablation_incumbent,
+                        )
+                        prior_for_metrics = prior_mat.mean(dim=0)
+                        prior_head_counts = head_counts_for_router(
+                            args, int(prior_mat.shape[0]), n_ants, head_router
+                        )
+                    else:
+                        if problem == 'tsp':
+                            pyg_data = build_fn(aco, norm_coords, args.device, dynamic=dynamic,
+                                              ablation_pheromone=ablation_pheromone,
+                                              ablation_incumbent=ablation_incumbent,
+                                              edge_feature_set=getattr(args, "edge_feature_set", "full"))
+                        else:
+                            pyg_data = build_fn(aco, norm_coords, demand, args.device, dynamic=dynamic,
+                                              ablation_pheromone=ablation_pheromone,
+                                              ablation_incumbent=ablation_incumbent,
+                                              edge_feature_set=getattr(args, "edge_feature_set", "full"))
+                        prior_output = model(pyg_data)
+
+                        if prior_output.dim() == 2 and getattr(args, "head_deploy", "ants") == "ants":
+                            prior_mat = dynaco_net.output_to_multi_sparse_priors(prior_output, aco.n, aco.k)
+                            prior_for_metrics = prior_mat.mean(dim=0)
+                            prior_head_counts = head_counts_for_router(
+                                args, int(prior_mat.shape[0]), n_ants, head_router
+                            )
+                        else:
+                            prior_mat = dynaco_net.output_to_sparse_prior(
+                                prior_output,
+                                aco.n,
+                                aco.k,
+                                deploy=getattr(args, "head_deploy", "head"),
+                                head_index=getattr(args, "head_index", 0),
+                            )
+                            prior_for_metrics = prior_mat
                     t_neural_total += time.time() - t_neural_start
                     
-                    prior_mat = heu_vec.view(aco.n, aco.k)
-                    
                     if do_metrics:
-                        priors.append(prior_mat.detach().cpu().clone())
+                        priors.append(prior_for_metrics.detach().cpu().clone())
 
             for mini_t in range(args.mini_H):
                 if runtime_limit is not None and (time.time() - t_start_total_infer) >= runtime_limit:
@@ -1591,13 +2445,30 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                 # Sample
                 return_decoded = verify_requested and not verify_final_only
                 
-                prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior
-
                 sample_require_prob = do_metrics or collect_stage_metrics
 
-                if problem == 'tsp':
+                if (
+                    problem in ('tsp', 'cvrp')
+                    and current_prior is not None
+                    and torch.is_tensor(current_prior)
+                    and current_prior.dim() == 3
+                    and hasattr(aco, "sample_mixed_priors")
+                ):
+                    prior_head_counts = head_counts_for_router(
+                        args, int(current_prior.shape[0]), n_ants, head_router
+                    )
+                    incumbent_before = best_seen
+                    costs_t, flats, _, _, traces, costs_raw, _, new_edges, survival = aco.sample_mixed_priors(
+                        current_prior,
+                        require_prob=sample_require_prob,
+                        parallel_traced=True,
+                        head_counts=prior_head_counts,
+                    )
+                elif problem == 'tsp':
+                    prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior
                     costs_t, flats, _, _, traces, costs_raw, _, _, survival = aco.sample(require_prob=sample_require_prob, prior=prior_arg, parallel_traced=True)
                 else:
+                    prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior
                     costs_t, routes, decoded, _, traces, costs_raw, _, _, survival = aco.sample(require_prob=sample_require_prob, prior=prior_arg, return_decoded=return_decoded, parallel_traced=True)
                     flats = routes
 
@@ -1619,10 +2490,40 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                 avg_last = float(costs_t.mean().item())
                 best_idx = int(costs_t.argmin().item())
                 best_cost = float(costs_t[best_idx].item())
-                if best_cost <= best_seen:
+                improved_best = best_cost <= best_seen
+                if improved_best:
                     best_seen = best_cost
                     if verify_final_only and problem == 'cvrp':
                         best_final_route = np.asarray(flats[best_idx], dtype=np.int32).copy()
+                if (
+                    current_prior is not None
+                    and torch.is_tensor(current_prior)
+                    and current_prior.dim() == 3
+                    and prior_head_counts is not None
+                ):
+                    update_head_router(
+                        head_router,
+                        prior_head_counts,
+                        costs_t,
+                        incumbent_before=incumbent_before,
+                        best_idx=best_idx,
+                    )
+                    router_metrics = head_router_metrics(head_router, prior_head_counts)
+                    for key, value in router_metrics.items():
+                        if isinstance(value, list):
+                            metrics_log.setdefault(key, []).append(value)
+                        else:
+                            metrics_log.setdefault(key, []).append(float(value))
+
+                if do_metrics and prior_head_counts is not None:
+                    _append_head_contribution_metrics(
+                        metrics_log,
+                        prior_head_counts,
+                        costs_t,
+                        raw_costs,
+                        best_idx,
+                        improved_best,
+                    )
                 
                 if problem == 'tsp':
                     aco._update_pheromone_from_flat(flats[best_idx], best_cost)
@@ -1701,6 +2602,8 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     metrics_log["enhance"].append(inter["enhance"])
                     metrics_log["rebellion"].append(inter["rebellion"])
                     metrics_log["suppression"].append(inter["suppression"])
+                    if prior_mat is not None and torch.is_tensor(prior_mat) and prior_mat.dim() == 3:
+                        _append_head_similarity_metrics(metrics_log, prior_mat, tau=tau, top_k=5)
                 else:
                     for k in ["corr", "ov", "row_match", "enhance", "rebellion", "suppression", "prior_mean", "prior_std"]:
                         metrics_log[k].append(0.0)
@@ -1852,3 +2755,45 @@ def save_pure_mfaco_cache(args, dataset, result):
             json.dump(result, f, indent=2)
     except Exception as e:
         print(f"Warning: Failed to save cache: {e}")
+
+
+# ----------------- Extended Problem Utils (BPP, MKP, OP) -----------------
+# These functions were originally in utils_extended.py but are now unified here.
+
+
+def get_problem_data(problem: str, n: int, device: str, k_sparse: int = 32, m: int = 5):
+    """Generate or load problem data in the format expected by MFACO classes."""
+    if problem == 'bpp':
+        demand = gen_bpp_instance(n, torch.device(device))
+        return {'demand': demand}
+    elif problem == 'mkp':
+        prize, weight = gen_mkp_instance(n, m, torch.device(device))
+        return {'prize': prize, 'weight': weight}
+    elif problem == 'op':
+        coords, prizes = gen_op_instance(n, torch.device(device))
+        # Calculate distance matrix
+        distances = torch.cdist(coords, coords)
+        return {'distances': distances, 'prizes': prizes}
+    else:
+        raise ValueError(f"Unknown problem: {problem}")
+
+
+# ----------------- Extended Problem Utils (BPP, MKP, OP) -----------------
+# These functions were originally in utils_extended.py but are now unified here.
+
+
+def get_problem_data(problem: str, n: int, device: str, k_sparse: int = 32, m: int = 5):
+    """Generate or load problem data in the format expected by MFACO classes."""
+    if problem == 'bpp':
+        demand = gen_bpp_instance(n, torch.device(device))
+        return {'demand': demand}
+    elif problem == 'mkp':
+        prize, weight = gen_mkp_instance(n, m, torch.device(device))
+        return {'prize': prize, 'weight': weight}
+    elif problem == 'op':
+        coords, prizes = gen_op_instance(n, torch.device(device))
+        # Calculate distance matrix
+        distances = torch.cdist(coords, coords)
+        return {'distances': distances, 'prizes': prizes}
+    else:
+        raise ValueError(f"Unknown problem: {problem}")

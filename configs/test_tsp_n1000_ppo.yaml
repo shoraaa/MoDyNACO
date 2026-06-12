@@ -1,0 +1,26 @@
+# DyNACO Configuration: TSP-1000 with PPO (TEST)
+problem: tsp
+n_node: 1000
+k_sparse: 32
+n_ants: 100
+H: 10
+mini_H: 100
+epochs: 2
+algo: ppo
+rho: 0.1
+lr: 0.000005
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+
+# Experiment metadata
+experiment_name: test_tsp_n1000_ppo
+description: "TEST: TSP-1K with PPO, 2 epochs for pipeline validation"
+author: "DyNACO Team"
+
+# W&B
+use_wandb: false

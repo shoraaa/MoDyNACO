@@ -1,0 +1,91 @@
+{
+  "checkpoint": "pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_ha85-5-5-5_anchor1_anchored_best.pt",
+  "dataset": "../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/CVRPlib_survey_instances_converted.txt",
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 77.29616202418588,
+      "avg_ant_before_ls": 79.17993115229173,
+      "avg_incumbent_after_aco": 76.79168669905228,
+      "final_ant_after_ls": 76.9558594270186,
+      "final_ant_before_ls": 78.58722313967618,
+      "final_incumbent_after_aco": 76.36396638696844,
+      "gap_pct": 2.9018088989676514,
+      "gap_std_pct": 2.531753483587542,
+      "guidance_diagnostics": {
+        "enhance": 0.1548028879815882,
+        "head_best_after": [
+          76.79605334651254,
+          77.2967010992397,
+          77.29967867306796,
+          77.2959478158344
+        ],
+        "head_best_before": [
+          77.01655385021729,
+          79.18904623476375,
+          79.18378662098104,
+          79.183513931994
+        ],
+        "head_best_fraction": [
+          0.9900363636363636,
+          0.003490909090909091,
+          0.003172727272727273,
+          0.0033
+        ],
+        "head_enhance": [
+          0.1547440544854511,
+          0.1548091623661193,
+          0.15485080735249954,
+          0.15481703710149636
+        ],
+        "head_improvement_fraction": [
+          0.9918178993521065,
+          0.002911492916901619,
+          0.0025547487255026067,
+          0.002715859005489257
+        ],
+        "head_logit_corr": 1.000000504634597,
+        "head_mean_after": [
+          77.29612238477209,
+          77.2967010992397,
+          77.29967867306796,
+          77.2959478158344
+        ],
+        "head_mean_before": [
+          79.1797604785475,
+          79.18904623476375,
+          79.18378662098104,
+          79.183513931994
+        ],
+        "head_rebellion": [
+          0.1580176503583789,
+          0.15798112709752538,
+          0.15798012072389775,
+          0.15798297615891152
+        ],
+        "head_suppression": [
+          0.3158665680953047,
+          0.3157333332435651,
+          0.3156607050313191,
+          0.31572508936578575
+        ],
+        "head_topk_overlap": 0.9993255707726912,
+        "num_heads": 4,
+        "rebellion": 0.1579845488850366,
+        "suppression": 0.3157497358796271
+      },
+      "mean_cost": 76.36396638696844,
+      "mean_guidance": 4.360069890706376,
+      "mean_neural_time_s": 0.09325512539256703,
+      "mean_time_s": 4.051415061950683,
+      "pheromone_correlation": -0.040091190172736824,
+      "std_cost": 65.25738244409425,
+      "std_neural_time_s": 0.1592928389611117,
+      "std_time_s": 7.983020445356116,
+      "total_neural_time_s": 10.258063793182373,
+      "total_time_s": 445.6556568145752
+    }
+  },
+  "n_node": 1000,
+  "problem": "cvrp",
+  "seed": 1234
+}
