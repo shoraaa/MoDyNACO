@@ -23,6 +23,7 @@ val_size: 69
 baseline: none
 
 multi_head: true
+head_training: polynet
 num_heads: 4
 head_zdim: 16
 head_gamma: 2.0

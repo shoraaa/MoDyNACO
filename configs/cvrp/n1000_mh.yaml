@@ -1,5 +1,5 @@
-# DyNACO Configuration: TSP-1000 with PPO
-problem: tsp
+# DyNACO Configuration: CVRP-1000 with PPO
+problem: cvrp
 n_node: 1000
 k_sparse: 32
 n_ants: 32
@@ -18,10 +18,6 @@ no_logit_net: false
 no_dynamic_feats: false
 edge_feature_set: compact3
 
-val_dataset: data/TSP/data/test_set/STAR_TSP_lt1000.txt
-val_size: 69
-baseline: none
-
 multi_head: true
 num_heads: 4
 head_zdim: 16
@@ -32,9 +28,12 @@ head_diversity_coef: 0.01
 head_deploy: ants
 head_index: 0
 
+val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
+baseline: none
+
 # Experiment metadata
-experiment_name: tsp_n1000_3f
-description: "Baseline TSP-1K with PPO, 3 dynamic features"
+experiment_name: cvrp_n1000_3f
+description: "Baseline CVRP-1K with PPO, 3 dynamic features"
 author: "DyNACO Team"
 
 # W&B
