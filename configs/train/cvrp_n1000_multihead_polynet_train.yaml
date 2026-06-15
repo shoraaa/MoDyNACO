@@ -1,20 +1,20 @@
-problem: tsp
-n_node: 1000
+problem: cvrp
+n_node: 500
 k_sparse: 32
 algo: ppo
 alg: faco
 
 n_ants: 100
-H: 10
-mini_H: 100
+H: 2
+mini_H: 20
 epochs: 10
-steps_per_epoch: 32
+steps_per_epoch: 8
 ppo_epochs: 4
 ppo_clip: 0.1
 ppo_lr: 5.0e-6
 lr: null
 
-rho: 0.1
+rho: 0.5
 min_new_edges: 12
 alpha: 1.0
 beta: 1.0
@@ -25,23 +25,28 @@ warmup: true
 train_warmup: false
 warmup_ratio: 0.5
 
+seed: 1234
+grad_checkpointing: false
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+edge_feature_set: compact3
+
 multi_head: true
 num_heads: 4
 head_zdim: 16
+head_training: polynet
 head_gamma: 2.0
 head_score_mode: mean
 head_topq: 1
-head_diversity_coef: 0.0001
+head_diversity_coef: 0.0
+head_complement_coef: 0.0
 head_deploy: ants
-head_ant_weights: "85,5,5,5"
 head_index: 0
-init_single_head_checkpoint: pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt
-head_anchor_checkpoint: pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_best.pt
-head_anchor_coef: 1.0
-run_tag: anchored
 
-val_dataset: data/TSP/data/test_set/STAR_TSP_lt1000.txt
-val_size: 69
+val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
+val_size: 16
 baseline: none
 baseline_runs: 1
 baseline_time_limit: 0.5
@@ -50,3 +55,4 @@ device: cuda:0
 seed: 1234
 no_wandb: true
 save_dir: pretrained
+run_tag: polynet

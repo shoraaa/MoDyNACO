@@ -3,7 +3,7 @@
 Training wrapper with YAML config support.
 
 Usage:
-    python scripts/train.py --config configs/tsp_n1000_ppo.yaml
+    python scripts/train.py --config configs/train/tsp_n1000_ppo.yaml
 """
 
 import argparse

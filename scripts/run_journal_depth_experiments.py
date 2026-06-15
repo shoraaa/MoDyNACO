@@ -115,7 +115,7 @@ def allocation_runs() -> list[RunSpec]:
         RunSpec(
             name="tsp_full_single",
             stage="allocation",
-            config="configs/tsp_n1000_original_full_eval.yaml",
+            config="configs/eval/tsp_n1000_original_full_eval.yaml",
             checkpoint=TSP_SINGLE_CKPT,
             summary_name="tsp_full_single_summary.json",
             notes="Matched single-head baseline for full TSPLIB.",
@@ -123,7 +123,7 @@ def allocation_runs() -> list[RunSpec]:
         RunSpec(
             name="cvrp_full_single",
             stage="allocation",
-            config="configs/cvrp_n1000_original_cvrlib_eval.yaml",
+            config="configs/eval/cvrp_n1000_original_cvrlib_eval.yaml",
             checkpoint=CVRP_SINGLE_CKPT,
             summary_name="cvrp_full_single_summary.json",
             notes="Matched single-head baseline for full CVRPLIB.",
@@ -135,7 +135,7 @@ def allocation_runs() -> list[RunSpec]:
             RunSpec(
                 name=f"tsp_full_mh_{s}",
                 stage="allocation",
-                config="configs/tsp_n1000_multihead_anchor_full_eval.yaml",
+                config="configs/eval/tsp_n1000_multihead_anchor_full_eval.yaml",
                 checkpoint=TSP_MH_CKPT,
                 head_weights=w,
                 summary_name=f"tsp_full_mh_ha{s}_summary.json",
@@ -146,7 +146,7 @@ def allocation_runs() -> list[RunSpec]:
             RunSpec(
                 name=f"cvrp_full_mh_{s}",
                 stage="allocation",
-                config="configs/cvrp_n1000_multihead_anchor_cvrlib_eval.yaml",
+                config="configs/eval/cvrp_n1000_multihead_anchor_cvrlib_eval.yaml",
                 checkpoint=CVRP_MH_CKPT,
                 head_weights=w,
                 summary_name=f"cvrp_full_mh_ha{s}_summary.json",
@@ -161,7 +161,7 @@ def train_size_runs() -> list[RunSpec]:
         RunSpec(
             name="cvrp_lt1000_n500_single",
             stage="train_size",
-            config="configs/cvrp_n500_original_cvrlib_lt1000_eval.yaml",
+            config="configs/eval/cvrp_n500_original_cvrlib_lt1000_eval.yaml",
             checkpoint="pretrained/cvrp/n500/cvrp_n500_k32_ants100_H2_miniH20_rho0.5_mne12_ppo_lr5e-06_best.pt",
             summary_name="cvrp_lt1000_n500_single_summary.json",
             notes="CVRP n=500 train-size split, <1K.",
@@ -169,7 +169,7 @@ def train_size_runs() -> list[RunSpec]:
         RunSpec(
             name="cvrp_lt1000_n500_mh",
             stage="train_size",
-            config="configs/cvrp_n500_multihead_cvrlib_lt1000_eval.yaml",
+            config="configs/eval/cvrp_n500_multihead_cvrlib_lt1000_eval.yaml",
             checkpoint="pretrained/cvrp/n500/cvrp_n500_k32_ants100_H2_miniH20_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_best.pt",
             summary_name="cvrp_lt1000_n500_mh_summary.json",
             notes="CVRP n=500 multi-head train-size split, <1K.",
@@ -177,7 +177,7 @@ def train_size_runs() -> list[RunSpec]:
         RunSpec(
             name="cvrp_ge1000_n500_single",
             stage="train_size",
-            config="configs/cvrp_n500_original_cvrlib_ge1000_eval.yaml",
+            config="configs/eval/cvrp_n500_original_cvrlib_ge1000_eval.yaml",
             checkpoint="pretrained/cvrp/n500/cvrp_n500_k32_ants100_H2_miniH20_rho0.5_mne12_ppo_lr5e-06_best.pt",
             summary_name="cvrp_ge1000_n500_single_summary.json",
             notes="CVRP n=500 train-size split, >=1K.",
@@ -185,7 +185,7 @@ def train_size_runs() -> list[RunSpec]:
         RunSpec(
             name="cvrp_ge1000_n500_mh",
             stage="train_size",
-            config="configs/cvrp_n500_multihead_cvrlib_ge1000_eval.yaml",
+            config="configs/eval/cvrp_n500_multihead_cvrlib_ge1000_eval.yaml",
             checkpoint="pretrained/cvrp/n500/cvrp_n500_k32_ants100_H2_miniH20_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_best.pt",
             summary_name="cvrp_ge1000_n500_mh_summary.json",
             notes="CVRP n=500 multi-head train-size split, >=1K.",

@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from tqdm import tqdm
 import sys
-from typing import Optional, Dict, List, Any, Tuple, Union
+from typing import Optional, Dict, List, Any, Tuple, Union, NamedTuple
 import gc
 import yaml
 
@@ -621,6 +621,11 @@ def _model_to_multi_priors(
 
 
 def _head_competition_weights(head_costs: torch.Tensor, args: argparse.Namespace) -> torch.Tensor:
+    cost_score = _head_cost_scores(head_costs, args)
+    return torch.softmax(-float(getattr(args, "head_gamma", 2.0)) * cost_score.detach(), dim=0)
+
+
+def _head_cost_scores(head_costs: torch.Tensor, args: argparse.Namespace) -> torch.Tensor:
     mode = getattr(args, "head_score_mode", "mean")
     if isinstance(head_costs, (list, tuple)):
         if mode == "mean":
@@ -633,7 +638,7 @@ def _head_competition_weights(head_costs: torch.Tensor, args: argparse.Namespace
             cost_score = torch.stack(scores)
         else:
             raise ValueError(f"Unsupported head_score_mode: {mode}")
-        return torch.softmax(-float(getattr(args, "head_gamma", 2.0)) * cost_score.detach(), dim=0)
+        return cost_score
     if mode == "mean":
         cost_score = head_costs.mean(dim=1)
     elif mode == "topq":
@@ -641,7 +646,11 @@ def _head_competition_weights(head_costs: torch.Tensor, args: argparse.Namespace
         cost_score = head_costs.topk(q, largest=False, dim=1).values.mean(dim=1)
     else:
         raise ValueError(f"Unsupported head_score_mode: {mode}")
-    return torch.softmax(-float(getattr(args, "head_gamma", 2.0)) * cost_score.detach(), dim=0)
+    return cost_score
+
+
+def _head_training_mode(args: argparse.Namespace) -> str:
+    return str(getattr(args, "head_training", "weighted") or "weighted").lower()
 
 
 def _split_ant_counts(n_ants: int, num_heads: int) -> List[int]:
@@ -735,6 +744,194 @@ def _expand_head_priors_with_counts(
 
 def _split_ant_vector_by_heads(values: torch.Tensor, counts: List[int]) -> List[torch.Tensor]:
     return list(torch.split(values, counts, dim=0))
+
+
+class MultiHeadRollout(NamedTuple):
+    tau_nk: torch.Tensor
+    traces: Any
+    head_counts: List[int]
+    flats: Any
+    costs_all: torch.Tensor
+    costs_by_head: List[torch.Tensor]
+    logp_old_by_head: List[torch.Tensor]
+    ndec_by_head: List[torch.Tensor]
+    best_idx: int
+    best_cost: float
+    new_edges: Any
+    survival: Any
+
+
+def _ppo_clipped_loss(
+    logp_new: torch.Tensor,
+    logp_old: torch.Tensor,
+    costs: torch.Tensor,
+    args: argparse.Namespace,
+    baseline: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ratio = torch.exp(logp_new - logp_old)
+    log_ratio = logp_new - logp_old
+    approx_kl = (log_ratio.pow(2) * 0.5).mean()
+    clipped = (ratio > 1 + args.ppo_clip) | (ratio < 1 - args.ppo_clip)
+    clip_frac = clipped.float().mean()
+
+    if baseline is None:
+        baseline = costs.mean()
+    adv = (baseline - costs).detach()
+    if not args.no_adv_norm:
+        adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
+
+    surr1 = ratio * adv
+    surr2 = torch.clamp(ratio, 1 - args.ppo_clip, 1 + args.ppo_clip) * adv
+    return -torch.mean(torch.min(surr1, surr2)), approx_kl, clip_frac
+
+
+def _collect_multi_head_rollout(
+    aco: Any,
+    current_prior: torch.Tensor,
+    eta_nk: torch.Tensor,
+    args: argparse.Namespace,
+    head_router: Any,
+) -> MultiHeadRollout:
+    tau_nk = aco.tau_nk_torch().detach()
+    head_counts = utils.head_counts_for_router(
+        args, int(current_prior.shape[0]), args.n_ants, head_router
+    )
+    ant_priors = _expand_head_priors_with_counts(current_prior, head_counts)
+    res = aco.sample_mixed_priors(
+        current_prior,
+        require_prob=True,
+        parallel_traced=args.parallel_traced,
+        head_counts=head_counts,
+    )
+    costs, flats, _, _, traces, _, _, new_edges, survival = res
+    costs_all = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+
+    with torch.no_grad():
+        tau_ant = tau_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+        eta_ant = eta_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+        log_prob_old = log_prob_sparse_from_tau_eta_prior(
+            tau_ant, eta_ant, ant_priors,
+            alpha=args.alpha, beta=args.beta, eps=EPS
+        )
+        logp_old_all, ndec_all = replay_logp_from_cpp_batch_trace_ant_priors(
+            traces, log_prob_old
+        )
+        ndec_f = ndec_all.to(torch.float32).clamp_min(1.0)
+        logp_old_all = (logp_old_all / ndec_f).detach()
+
+    best_idx = int(costs_all.argmin().item())
+    return MultiHeadRollout(
+        tau_nk=tau_nk,
+        traces=traces,
+        head_counts=head_counts,
+        flats=flats,
+        costs_all=costs_all,
+        costs_by_head=[x.detach() for x in _split_ant_vector_by_heads(costs_all, head_counts)],
+        logp_old_by_head=[x.detach() for x in _split_ant_vector_by_heads(logp_old_all, head_counts)],
+        ndec_by_head=[x.detach() for x in _split_ant_vector_by_heads(ndec_all, head_counts)],
+        best_idx=best_idx,
+        best_cost=float(costs_all[best_idx].item()),
+        new_edges=new_edges,
+        survival=survival,
+    )
+
+
+def _record_multi_head_rollout_metrics(
+    metrics: MetricsCollector,
+    rollout: MultiHeadRollout,
+    args: argparse.Namespace,
+    head_router: Any,
+    incumbent_before: float,
+) -> None:
+    weights = _head_competition_weights(rollout.costs_by_head, args)
+    metrics.add("head_weight_entropy", float(-(weights * (weights + EPS).log()).sum().item()))
+    metrics.add("head_cost_spread", float(torch.stack([c.mean() for c in rollout.costs_by_head]).std(unbiased=False).item()))
+    metrics.add("head_ants_min", float(min(rollout.head_counts)))
+    metrics.add("head_ants_max", float(max(rollout.head_counts)))
+    if rollout.new_edges is not None:
+        metrics.add("new_edges", np.asarray(rollout.new_edges, dtype=np.float32).mean())
+    if rollout.survival is not None:
+        metrics.add("survival", np.asarray(rollout.survival, dtype=np.float32).mean())
+    metrics.add("ndec", float(torch.cat([x.float() for x in rollout.ndec_by_head]).mean().item()))
+    entropy = float(torch.cat([
+        (-lp / nd.float().clamp_min(1.0))
+        for lp, nd in zip(rollout.logp_old_by_head, rollout.ndec_by_head)
+    ]).mean().item())
+    metrics.add("entropy", entropy)
+
+    head_utility = utils.update_head_router(
+        head_router,
+        rollout.head_counts,
+        rollout.costs_all,
+        incumbent_before=incumbent_before,
+        best_idx=rollout.best_idx,
+    )
+    router_metrics = utils.head_router_metrics(head_router, rollout.head_counts)
+    for key, value in router_metrics.items():
+        if not isinstance(value, list):
+            metrics.add(key, float(value))
+    if head_utility is not None:
+        for h, value in enumerate(head_utility):
+            metrics.add(f"head_utility_{h}", float(value))
+
+
+def _multi_head_ppo_loss(
+    current_prior: torch.Tensor,
+    tau_nk: torch.Tensor,
+    eta_nk: torch.Tensor,
+    traces: Any,
+    head_counts: List[int],
+    costs_by_head: List[torch.Tensor],
+    logp_old_by_head: List[torch.Tensor],
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ant_priors = _expand_head_priors_with_counts(current_prior, head_counts)
+    tau_ant = tau_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+    eta_ant = eta_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
+    log_prob_new = log_prob_sparse_from_tau_eta_prior(
+        tau_ant, eta_ant, ant_priors,
+        alpha=args.alpha, beta=args.beta, eps=EPS
+    )
+    logp_new_all, ndec_new_all = replay_logp_from_cpp_batch_trace_ant_priors(
+        traces, log_prob_new
+    )
+    ndec_f_all = ndec_new_all.to(torch.float32).clamp_min(1.0)
+    logp_new_heads = _split_ant_vector_by_heads(logp_new_all / ndec_f_all, head_counts)
+
+    head_losses = []
+    head_kls = []
+    head_clip_fracs = []
+    head_scores = _head_cost_scores(costs_by_head, args)
+
+    if _head_training_mode(args) == "polynet":
+        selected = int(torch.argmin(head_scores.detach()).item())
+        loss, approx_kl, clip_frac = _ppo_clipped_loss(
+            logp_new_heads[selected],
+            logp_old_by_head[selected],
+            costs_by_head[selected],
+            args,
+            baseline=head_scores.mean(),
+        )
+        return loss, approx_kl, clip_frac
+
+    for h, logp_new in enumerate(logp_new_heads):
+        loss, approx_kl, clip_frac = _ppo_clipped_loss(
+            logp_new,
+            logp_old_by_head[h],
+            costs_by_head[h],
+            args,
+        )
+        head_losses.append(loss)
+        head_kls.append(approx_kl)
+        head_clip_fracs.append(clip_frac)
+
+    head_loss_t = torch.stack(head_losses)
+    weights = torch.softmax(-float(getattr(args, "head_gamma", 2.0)) * head_scores.detach(), dim=0)
+    return (
+        (weights * head_loss_t).sum(),
+        torch.stack(head_kls).mean(),
+        torch.stack(head_clip_fracs).mean(),
+    )
 
 
 def _multi_head_diversity_loss(priors: torch.Tensor) -> torch.Tensor:
@@ -1194,80 +1391,29 @@ def train_instance_ppo(
                 current_prior = prior_old * factor
 
             if _multi_head_enabled(args) and current_prior is not None:
-                tau_nk = aco.tau_nk_torch().detach()
-                head_counts = utils.head_counts_for_router(
-                    args, int(current_prior.shape[0]), args.n_ants, head_router
-                )
-                ant_priors = _expand_head_priors_with_counts(current_prior, head_counts)
                 incumbent_before = best_seen
-                res = aco.sample_mixed_priors(
-                    current_prior,
-                    require_prob=True,
-                    parallel_traced=args.parallel_traced,
-                    head_counts=head_counts,
+                rollout = _collect_multi_head_rollout(
+                    aco, current_prior, eta_nk, args, head_router
                 )
-                costs, flats, _, _, traces, costs_raw, flats_raw, new_edges, survival = res
-                costs_all = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
-                costs_t = [x.detach() for x in _split_ant_vector_by_heads(costs_all, head_counts)]
-                costs_raw_t = costs_t
+                costs_raw_t = rollout.costs_by_head
 
-                with torch.no_grad():
-                    tau_ant = tau_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
-                    eta_ant = eta_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
-                    log_prob_old = log_prob_sparse_from_tau_eta_prior(
-                        tau_ant, eta_ant, ant_priors,
-                        alpha=args.alpha, beta=args.beta, eps=EPS
-                    )
-                    logp_old_all, ndec_all = replay_logp_from_cpp_batch_trace_ant_priors(
-                        traces, log_prob_old
-                    )
-                    ndec_f = ndec_all.to(torch.float32).clamp_min(1.0)
-                    logp_old_all = (logp_old_all / ndec_f).detach()
-                head_logp_old = [x.detach() for x in _split_ant_vector_by_heads(logp_old_all, head_counts)]
-                head_ndec = [x.detach() for x in _split_ant_vector_by_heads(ndec_all, head_counts)]
+                tau_list.append(rollout.tau_nk)
+                traces_list.append((rollout.traces, rollout.head_counts))
+                flats_list.append(rollout.flats)
+                costs_list.append(rollout.costs_by_head)
+                logp_old_list.append(rollout.logp_old_by_head)
+                ndec_list.append(rollout.ndec_by_head)
 
-                tau_list.append(tau_nk)
-                traces_list.append((traces, head_counts))
-                flats_list.append(flats)
-                costs_list.append(costs_t)
-                logp_old_list.append(head_logp_old)
-                ndec_list.append(head_ndec)
-
-                weights = _head_competition_weights(costs_t, args)
-                metrics.add("head_weight_entropy", float(-(weights * (weights + EPS).log()).sum().item()))
-                metrics.add("head_cost_spread", float(torch.stack([c.mean() for c in costs_t]).std(unbiased=False).item()))
-                metrics.add("head_ants_min", float(min(head_counts)))
-                metrics.add("head_ants_max", float(max(head_counts)))
-                if new_edges is not None:
-                    metrics.add("new_edges", np.asarray(new_edges, dtype=np.float32).mean())
-                if survival is not None:
-                    metrics.add("survival", np.asarray(survival, dtype=np.float32).mean())
-                metrics.add("ndec", float(torch.cat([x.float() for x in head_ndec]).mean().item()))
-                entropy = float(torch.cat([(-lp / nd.float().clamp_min(1.0)) for lp, nd in zip(head_logp_old, head_ndec)]).mean().item())
-                metrics.add("entropy", entropy)
-
-                best_idx = int(costs_all.argmin().item())
-                best_cost_iter = float(costs_all[best_idx].item())
+                _record_multi_head_rollout_metrics(
+                    metrics, rollout, args, head_router, incumbent_before
+                )
+                best_idx = rollout.best_idx
+                best_cost_iter = rollout.best_cost
                 best_seen = min(best_seen, best_cost_iter)
-                head_utility = utils.update_head_router(
-                    head_router,
-                    head_counts,
-                    costs_all,
-                    incumbent_before=incumbent_before,
-                    best_idx=best_idx,
-                )
-                router_metrics = utils.head_router_metrics(head_router, head_counts)
-                for key, value in router_metrics.items():
-                    if isinstance(value, list):
-                        continue
-                    metrics.add(key, float(value))
-                if head_utility is not None:
-                    for h, value in enumerate(head_utility):
-                        metrics.add(f"head_utility_{h}", float(value))
                 if not args.train_deepaco:
                     with torch.no_grad():
-                        aco.update_pheromone(flats[best_idx], best_cost_iter)
-                avg_cost_last = float(torch.cat(costs_t).mean().item())
+                        aco.update_pheromone(rollout.flats[best_idx], best_cost_iter)
+                avg_cost_last = float(torch.cat(rollout.costs_by_head).mean().item())
                 continue
 
             # Sample from ACO
@@ -1376,43 +1522,19 @@ def train_instance_ppo(
 
                 if _multi_head_enabled(args):
                     traces_obj, head_counts = traces
-                    ant_priors = _expand_head_priors_with_counts(current_prior, head_counts)
-                    tau_ant = tau_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
-                    eta_ant = eta_nk.unsqueeze(0).expand(args.n_ants, -1, -1)
-                    log_prob_new = log_prob_sparse_from_tau_eta_prior(
-                        tau_ant, eta_ant, ant_priors,
-                        alpha=args.alpha, beta=args.beta, eps=EPS
+                    loss, approx_kl, clip_frac = _multi_head_ppo_loss(
+                        current_prior,
+                        tau_nk,
+                        eta_nk,
+                        traces_obj,
+                        head_counts,
+                        costs_t,
+                        logp_old,
+                        args,
                     )
-                    logp_new_all, ndec_new_all = replay_logp_from_cpp_batch_trace_ant_priors(
-                        traces_obj, log_prob_new
-                    )
-                    ndec_f_all = ndec_new_all.to(torch.float32).clamp_min(1.0)
-                    logp_new_all = logp_new_all / ndec_f_all
-                    logp_new_heads = _split_ant_vector_by_heads(logp_new_all, head_counts)
-                    head_losses = []
-                    head_kls = []
-                    head_clip_fracs = []
-                    for h in range(current_prior.shape[0]):
-                        logp_new = logp_new_heads[h]
-                        ratio = torch.exp(logp_new - logp_old[h])
-                        log_ratio = logp_new - logp_old[h]
-                        head_kls.append((log_ratio.pow(2) * 0.5).mean())
-                        clipped = (ratio > 1 + args.ppo_clip) | (ratio < 1 - args.ppo_clip)
-                        head_clip_fracs.append(clipped.float().mean())
-                        baseline = costs_t[h].mean()
-                        adv = (baseline - costs_t[h]).detach()
-                        if not args.no_adv_norm:
-                            adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
-                        surr1 = ratio * adv
-                        surr2 = torch.clamp(ratio, 1 - args.ppo_clip, 1 + args.ppo_clip) * adv
-                        head_losses.append(-torch.mean(torch.min(surr1, surr2)))
-
-                    head_loss_t = torch.stack(head_losses)
-                    weights = _head_competition_weights(costs_t, args)
-                    loss = (weights * head_loss_t).sum()
                     all_losses.append(loss)
-                    all_param_kl.append(torch.stack(head_kls).mean().detach().item())
-                    all_clip_frac.append(torch.stack(head_clip_fracs).mean().detach().item())
+                    all_param_kl.append(approx_kl.detach().item())
+                    all_clip_frac.append(clip_frac.detach().item())
                     total_loss_val_epoch += loss.item()
                     continue
                 
@@ -1462,17 +1584,18 @@ def train_instance_ppo(
                 prior_new_base.backward(prior_new.grad)
             else:
                 total_loss = torch.stack(all_losses).mean()
-                if _multi_head_enabled(args) and getattr(args, "head_diversity_coef", 0.0) > 0:
+                weighted_heads = _head_training_mode(args) == "weighted"
+                if weighted_heads and _multi_head_enabled(args) and getattr(args, "head_diversity_coef", 0.0) > 0:
                     diversity = _multi_head_diversity_loss(prior_new_base)
                     total_loss = total_loss - float(args.head_diversity_coef) * diversity
                     metrics.add("head_diversity", diversity.detach().item())
-                if _multi_head_enabled(args) and float(getattr(args, "head_complement_coef", 0.0) or 0.0) > 0:
+                if weighted_heads and _multi_head_enabled(args) and float(getattr(args, "head_complement_coef", 0.0) or 0.0) > 0:
                     complement = _head_complementarity_reward(prior_new_base)
                     total_loss = total_loss - float(args.head_complement_coef) * complement
                     metrics.add("head_complement", complement.detach().item())
                 teacher = getattr(args, "_head_anchor_teacher", None)
                 anchor_coef = float(getattr(args, "head_anchor_coef", 0.0) or 0.0)
-                if _multi_head_enabled(args) and teacher is not None and anchor_coef > 0:
+                if weighted_heads and _multi_head_enabled(args) and teacher is not None and anchor_coef > 0:
                     with torch.no_grad():
                         teacher_prior = net.output_to_sparse_prior(
                             teacher(pyg_data),
@@ -1889,12 +2012,7 @@ def validation(
     sum_gap = 0.0
     n_val = len(val_dataset)
     
-    if args.problem == 'tsp':
-        iterable = val_dataset
-    else:
-        iterable = torch.utils.data.DataLoader(
-            val_dataset, batch_size=1, shuffle=False
-        )
+    iterable = val_dataset
     
     agg_metrics: Dict[str, List[float]] = {}
     
@@ -1951,8 +2069,15 @@ def _preprocess_val_item(item: Any, problem: str) -> Any:
     if problem == 'cvrp':
         if isinstance(item, (tuple, list)):
             item = [item[0], item[1], item[2]]
-        
-        item = [x[0] if torch.is_tensor(x) else x for x in item]
+
+        def _unbatch_if_needed(x: Any) -> Any:
+            if not torch.is_tensor(x):
+                return x
+            if x.dim() >= 2 and x.shape[0] == 1:
+                return x[0]
+            return x
+
+        item = [_unbatch_if_needed(x) for x in item]
         if torch.is_tensor(item[0]):
             item[0] = item[0].numpy()
         if torch.is_tensor(item[1]):
@@ -2414,6 +2539,8 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Latent code width for each multi-head decoder head")
     parser.add_argument("--head_decoder_type", choices=["film", "separate"], default="film",
                         help="Multi-head decoder implementation: FiLM-conditioned shared decoder or separate decoders")
+    parser.add_argument("--head_training", choices=["weighted", "polynet"], default="weighted",
+                        help="Multi-head training objective: weighted PPO over all heads or PolyNet best-head update")
     parser.add_argument("--head_gamma", type=float, default=2.0,
                         help="Softmax strength for head competition during training")
     parser.add_argument("--head_score_mode", choices=["mean", "topq"], default="mean",
@@ -2595,6 +2722,8 @@ def build_model_name(args: argparse.Namespace) -> str:
         name += f"_{args.edge_feature_set}"
     if _multi_head_enabled(args):
         name += f"_mh{args.num_heads}_hg{args.head_gamma:g}_hd{args.head_deploy}"
+        if _head_training_mode(args) != "weighted":
+            name += f"_htrain{_head_training_mode(args)}"
         if str(getattr(args, "head_decoder_type", "film") or "film").lower() != "film":
             name += f"_hdec{getattr(args, 'head_decoder_type')}"
         if getattr(args, "head_ant_weights", None):

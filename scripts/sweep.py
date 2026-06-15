@@ -3,7 +3,7 @@
 Hyperparameter sweep runner.
 
 Usage:
-    python scripts/sweep.py --config configs/tsp_n1000_ppo.yaml --params "lr:0.0001,0.0005;rho:0.1,0.5"
+    python scripts/sweep.py --config configs/train/tsp_n1000_ppo.yaml --params "lr:0.0001,0.0005;rho:0.1,0.5"
 """
 
 import argparse

@@ -62,10 +62,10 @@ The DyNACO repository includes a complete experiment management pipeline. See [P
 
 ```bash
 # 1. Configure experiment via YAML
-# See configs/test_tsp_n100_ppo.yaml for an example
+# See configs/smoke/test_tsp_n100_ppo.yaml for an example
 
 # 2. Train
-make train CONFIG=configs/my_experiment.yaml
+make train CONFIG=configs/train/tsp_n1000_ppo.yaml
 
 # 3. Evaluate
 make eval EXP=experiments/{experiment_name}_timestamp
