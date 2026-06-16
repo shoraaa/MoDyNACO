@@ -23,7 +23,7 @@ val_size: 69
 baseline: none
 
 # Experiment metadata
-experiment_name: tsp_n1000_3f
+experiment_name: tsp_n1000
 description: "Baseline TSP-1K with PPO, 3 dynamic features"
 author: "DyNACO Team"
 

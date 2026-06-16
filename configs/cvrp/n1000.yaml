@@ -16,9 +16,10 @@ ablation_pheromone_features: false
 ablation_incumbent_features: false
 no_logit_net: false
 no_dynamic_feats: false
-edge_feature_set: compact3
+# edge_feature_set: compact3
 
 val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
+val_size: 128
 baseline: none
 
 # Experiment metadata

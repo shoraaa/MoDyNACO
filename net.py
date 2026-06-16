@@ -351,25 +351,141 @@ class Net(nn.Module):
             param.requires_grad = False
 
 
+# class MultiHeadNet(Net):
+#     """DyNACO edge-prior model with K cheap head-conditioned decoders."""
+
+#     def __init__(
+#         self,
+#         *args,
+#         num_heads: int = 4,
+#         head_zdim: int = 16,
+#         logit_net: bool = False,
+#         **kwargs
+#     ):
+#         self.num_heads = num_heads
+#         self.head_zdim = head_zdim
+#         super().__init__(*args, logit_net=logit_net, **kwargs)
+#         # self.head_codes = nn.Parameter(torch.randn(num_heads, head_zdim) * 0.02)
+#         codes = torch.randn(num_heads, head_zdim)
+#         codes = F.normalize(codes, dim=-1)
+#         self.register_buffer("head_codes", codes)
+#         self.par_net_heu = ParNetCondFiLM(
+#             num_heads=num_heads,
+#             zdim=head_zdim,
+#             logit_net=logit_net,
+#         )
+
+#     def forward(self, pyg):
+#         pyg = move_pyg_to_module_device(self, pyg)
+#         x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
+#         emb = self.emb_net(x, edge_index, edge_attr)
+#         return self.par_net_heu(emb, self.head_codes)
+
+class ParNetCondLowRank(nn.Module):
+    """
+    Memory-efficient head-conditioned residual decoder.
+
+    Input:
+        emb: (E, units)
+        head_codes: (H, zdim)
+
+    Output:
+        logits: (E, H)
+    """
+
+    def __init__(
+        self,
+        units=32,
+        num_heads=4,
+        zdim=16,
+        rank=16,
+        act_fn='silu',
+        logit_net=True,
+        zero_init=True,
+    ):
+        super().__init__()
+        self.units = units
+        self.num_heads = num_heads
+        self.zdim = zdim
+        self.rank = rank
+        self.act_fn = getattr(F, act_fn)
+        self.sigmoid_output = not logit_net
+
+        # Normal DyNACO base decoder.
+        self.base = ParNet(depth=3, units=units, preds=1, act_fn=act_fn, logit_net=True)
+
+        # Low-rank residual adapter.
+        self.edge_proj = nn.Sequential(
+            nn.Linear(units, units),
+            nn.SiLU(),
+            nn.Linear(units, rank),
+        )
+        self.head_proj = nn.Linear(zdim, rank, bias=False)
+        self.head_bias = nn.Linear(zdim, 1, bias=False)
+
+        if zero_init:
+            nn.init.zeros_(self.edge_proj[-1].weight)
+            nn.init.zeros_(self.edge_proj[-1].bias)
+            nn.init.zeros_(self.head_bias.weight)
+
+    def forward(self, emb, head_codes):
+        # base: (E,)
+        base = self.base(emb)
+
+        # edge_factor: (E, rank)
+        edge_factor = self.edge_proj(emb)
+
+        # head_factor: (H, rank)
+        head_factor = self.head_proj(head_codes)
+
+        # delta: (E, H)
+        delta = edge_factor @ head_factor.t()
+
+        # head-specific bias: (H,)
+        bias = self.head_bias(head_codes).squeeze(-1)
+
+        out = base[:, None] + delta + bias[None, :]
+
+        if self.sigmoid_output:
+            out = torch.sigmoid(out)
+
+        return out
+
 class MultiHeadNet(Net):
-    """DyNACO edge-prior model with K cheap head-conditioned decoders."""
+    """DyNACO edge-prior model with cheap PolyNet-style conditional residual heads."""
 
     def __init__(
         self,
         *args,
         num_heads: int = 4,
         head_zdim: int = 16,
-        logit_net: bool = False,
+        rank: int = 16,
+        logit_net: bool = True,
+        fixed_head_codes: bool = True,
         **kwargs
     ):
         self.num_heads = num_heads
         self.head_zdim = head_zdim
-        super().__init__(*args, logit_net=logit_net, **kwargs)
-        self.head_codes = nn.Parameter(torch.randn(num_heads, head_zdim) * 0.02)
-        self.par_net_heu = ParNetCondFiLM(
+        self.rank = rank
+        super().__init__(*args, logit_net=True, **kwargs)
+
+        if fixed_head_codes:
+            codes = torch.randn(num_heads, head_zdim)
+            codes = F.normalize(codes, dim=-1)
+            self.register_buffer("head_codes", codes)
+        else:
+            codes = torch.randn(num_heads, head_zdim) * 0.02
+            self.head_codes = nn.Parameter(codes)
+
+        units = self.emb_net.units
+
+        self.par_net_heu = ParNetCondLowRank(
+            units=units,
             num_heads=num_heads,
             zdim=head_zdim,
+            rank=rank,
             logit_net=logit_net,
+            zero_init=True,
         )
 
     def forward(self, pyg):
@@ -379,6 +495,31 @@ class MultiHeadNet(Net):
         return self.par_net_heu(emb, self.head_codes)
 
 
+def lowrank_head_adapter_is_dead(model: nn.Module, atol: float = 1e-12) -> bool:
+    """Return True for old low-rank head adapters with both bilinear factors zero."""
+    decoder = getattr(model, "par_net_heu", None)
+    if not isinstance(decoder, ParNetCondLowRank):
+        return False
+    edge_last = decoder.edge_proj[-1]
+    return (
+        torch.allclose(edge_last.weight, torch.zeros_like(edge_last.weight), atol=atol)
+        and torch.allclose(edge_last.bias, torch.zeros_like(edge_last.bias), atol=atol)
+        and torch.allclose(decoder.head_proj.weight, torch.zeros_like(decoder.head_proj.weight), atol=atol)
+    )
+
+
+def repair_dead_lowrank_head_adapter(model: nn.Module) -> bool:
+    """Reinitialize the head factor for resumable old checkpoints.
+
+    The edge-side residual stays zero, so the resumed model initially preserves
+    the base decoder output, but gradients can now flow into the head adapter.
+    """
+    if not lowrank_head_adapter_is_dead(model):
+        return False
+    decoder = model.par_net_heu
+    nn.init.xavier_uniform_(decoder.head_proj.weight)
+    return True
+
 class MultiDecoderNet(Net):
     """DyNACO edge-prior model with K separate decoder modules over one encoder."""
 
@@ -387,7 +528,7 @@ class MultiDecoderNet(Net):
         *args,
         num_heads: int = 4,
         head_zdim: int = 16,
-        logit_net: bool = False,
+        logit_net: bool = True,
         **kwargs
     ):
         self.num_heads = num_heads

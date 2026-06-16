@@ -950,6 +950,32 @@ def _multi_head_diversity_loss(priors: torch.Tensor) -> torch.Tensor:
     return torch.stack(losses).mean()
 
 
+def _multi_head_js_diversity_metrics(priors: torch.Tensor) -> Dict[str, float]:
+    if priors is None or not torch.is_tensor(priors) or priors.dim() != 3 or priors.shape[0] <= 1:
+        return {}
+
+    probs = torch.softmax(priors.detach().float(), dim=-1).clamp_min(EPS)
+    mean_prob = probs.mean(dim=0).clamp_min(EPS)
+    entropy = -(probs * torch.log2(probs)).sum(dim=-1)
+    mean_entropy = -(mean_prob * torch.log2(mean_prob)).sum(dim=-1)
+    jensen_to_mean = (mean_entropy - entropy.mean(dim=0)).mean()
+
+    pair_jsd = []
+    for i in range(probs.shape[0]):
+        for j in range(i + 1, probs.shape[0]):
+            m = (0.5 * (probs[i] + probs[j])).clamp_min(EPS)
+            js = 0.5 * (
+                (probs[i] * (torch.log2(probs[i]) - torch.log2(m))).sum(dim=-1)
+                + (probs[j] * (torch.log2(probs[j]) - torch.log2(m))).sum(dim=-1)
+            )
+            pair_jsd.append(js.mean())
+
+    return {
+        "head_pairwise_jsd_bits": float(torch.stack(pair_jsd).mean().detach().item()) if pair_jsd else 0.0,
+        "head_jensen_to_mean_bits": float(jensen_to_mean.detach().item()),
+    }
+
+
 def _head_complementarity_reward(priors: torch.Tensor, top_frac: float = 0.1) -> torch.Tensor:
     if priors.dim() != 3 or priors.shape[0] <= 1:
         return priors.new_tensor(0.0)
@@ -1358,6 +1384,8 @@ def train_instance_ppo(
                         problem=args.problem,
                         dynamic=not args.no_dynamic_feats,
                     )
+                    if getattr(args, "log_best_head", False):
+                        metrics.add_dict(_multi_head_js_diversity_metrics(prior_old))
                     prior_old_for_metrics = prior_old.mean(dim=0)
                 else:
                     prior_old = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
@@ -1493,6 +1521,9 @@ def train_instance_ppo(
                     problem=args.problem,
                     dynamic=not args.no_dynamic_feats,
                 )
+                if getattr(args, "log_best_head", False):
+                    for key, value in _multi_head_js_diversity_metrics(prior_new_base).items():
+                        metrics.add(f"update_{key}", value)
             else:
                 prior_new_base = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
             t_neural_total += time.time() - t0
@@ -2553,6 +2584,8 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="How to deploy K heads: mixed ant groups or one fixed head")
     parser.add_argument("--head_index", type=int, default=0,
                         help="Head index used when --head_deploy=head")
+    parser.add_argument("--log_best_head", "--log-best-head", dest="log_best_head", action="store_true",
+                        help="Log expensive multi-head diagnostics, including JS diversity, to WandB")
     parser.add_argument("--head_ant_weights", type=str, default=None,
                         help="Comma-separated ant allocation weights/counts for mixed-head deployment, e.g. 50,20,15,15")
     parser.add_argument("--head_router", choices=["static", "ema"], default="static",
@@ -3199,6 +3232,11 @@ def main(argv: Optional[List[str]] = None):
             # Load model state
             net_model.load_state_dict(state_dict)
             print("Loaded model state")
+            if net.repair_dead_lowrank_head_adapter(net_model):
+                print(
+                    "Reinitialized dead low-rank head adapter from old checkpoint; "
+                    "head-specific residuals can now train."
+                )
             
             # Load optimizer state
             if "optimizer_state_dict" in checkpoint:

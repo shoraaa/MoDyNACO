@@ -2005,6 +2005,7 @@ def _append_head_similarity_metrics(
     head_priors: torch.Tensor,
     tau: Optional[torch.Tensor] = None,
     top_k: int = 5,
+    collect_jsd: bool = False,
 ) -> None:
     if head_priors is None or not torch.is_tensor(head_priors) or head_priors.dim() != 3:
         return
@@ -2026,6 +2027,25 @@ def _append_head_similarity_metrics(
             pair_top_overlap.append(top_overlap_frac(heads[a], heads[b]))
     metrics_log["head_logit_corr"].append(float(np.mean(pair_corr)))
     metrics_log["head_topk_overlap"].append(float(np.mean(pair_top_overlap)))
+
+    if collect_jsd:
+        probs = torch.softmax(heads, dim=-1).clamp_min(EPS)
+        mean_prob = probs.mean(dim=0).clamp_min(EPS)
+        entropy = -(probs * torch.log2(probs)).sum(dim=-1)
+        mean_entropy = -(mean_prob * torch.log2(mean_prob)).sum(dim=-1)
+        metrics_log["head_jsd_to_mean"].append(float((mean_entropy - entropy.mean(dim=0)).mean().item()))
+
+        pair_jsd = []
+        for a in range(n_heads):
+            for b in range(a + 1, n_heads):
+                m = (0.5 * (probs[a] + probs[b])).clamp_min(EPS)
+                js = 0.5 * (
+                    (probs[a] * (torch.log2(probs[a]) - torch.log2(m))).sum(dim=-1)
+                    + (probs[b] * (torch.log2(probs[b]) - torch.log2(m))).sum(dim=-1)
+                )
+                pair_jsd.append(js.mean())
+        if pair_jsd:
+            metrics_log["head_pairwise_jsd"].append(float(torch.stack(pair_jsd).mean().item()))
 
     if tau is not None:
         tau_cpu = tau.detach().float().cpu()
@@ -2315,6 +2335,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                                    "head_mean_before", "head_best_before", "head_counts",
                                    "head_logit_corr", "head_topk_overlap", "head_enhance",
                                    "head_rebellion", "head_suppression",
+                                   "head_pairwise_jsd", "head_jsd_to_mean",
                                    "head_router_entropy", "head_router_min_ants",
                                    "head_router_max_ants", "head_router_utility_spread",
                                    "head_router_counts", "head_router_utility"]}
@@ -2603,7 +2624,13 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     metrics_log["rebellion"].append(inter["rebellion"])
                     metrics_log["suppression"].append(inter["suppression"])
                     if prior_mat is not None and torch.is_tensor(prior_mat) and prior_mat.dim() == 3:
-                        _append_head_similarity_metrics(metrics_log, prior_mat, tau=tau, top_k=5)
+                        _append_head_similarity_metrics(
+                            metrics_log,
+                            prior_mat,
+                            tau=tau,
+                            top_k=5,
+                            collect_jsd=bool(getattr(args, "log_best_head", False)),
+                        )
                 else:
                     for k in ["corr", "ov", "row_match", "enhance", "rebellion", "suppression", "prior_mean", "prior_std"]:
                         metrics_log[k].append(0.0)

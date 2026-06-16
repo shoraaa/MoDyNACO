@@ -694,6 +694,8 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--stage_metrics", action="store_true", help="Collect pre-LS and post-update stage metrics during evaluation")
     parser.add_argument("--collect_guidance_metrics", action="store_true",
                         help="Collect mean guidance and pheromone correlation metrics for executed neural methods")
+    parser.add_argument("--log_best_head", "--log-best-head", dest="log_best_head", action="store_true",
+                        help="For multi-head evaluation, log best-head attribution, per-iteration head-win distribution, and head-output diversity when available")
     parser.add_argument("--summary_json", type=str, default=None, help="Optional path to write structured evaluation summary JSON")
     parser.add_argument("--verbose_config", "--verbose-config", dest="verbose_config", action="store_true",
                         help="Print the full flattened config table instead of the compact grouped console summary")
@@ -1139,6 +1141,11 @@ def main(argv: Optional[List[str]] = None):
             **model_kwargs,
         ).to(args.device)
         model.load_state_dict(state_dict)
+        if net.lowrank_head_adapter_is_dead(model):
+            print(
+                "Warning: checkpoint has a dead low-rank head adapter; "
+                "all heads emit the same edge prior, so pairJSD/J2M will be zero."
+            )
         model.eval()
 
     # Eval
@@ -1222,6 +1229,12 @@ def main(argv: Optional[List[str]] = None):
         results[f"{prefix}_mean_guidance"] = []
         results[f"{prefix}_pheromone_correlation"] = []
         results[f"{prefix}_metrics_payload"] = []
+        # Per-instance winning decoder head. For multi-head runs this should be
+        # the head that produced the best solution over the whole rollout, not
+        # merely the head selected at the final iteration.
+        results[f"{prefix}_best_head"] = []
+        results[f"{prefix}_best_head_event"] = []
+        results[f"{prefix}_best_head_trace"] = []
 
     iterable = val_list
     if args.problem == 'cvrp' and hasattr(val_list, 'tensors'):
@@ -1272,6 +1285,11 @@ def main(argv: Optional[List[str]] = None):
                     "mean_before_ls",
                     "mean_after_ls",
                     "incumbent_after_aco",
+                    "best_head",
+                    "best_head_value",
+                    "head_best_after",
+                    "head_best_before",
+                    "head_counts",
                 ],
             )
             iter_csv_writer.writeheader()
@@ -1326,6 +1344,572 @@ def main(argv: Optional[List[str]] = None):
         results[f"{prefix}_mean_guidance"].append(_safe_metric_mean(prior_mean))
         results[f"{prefix}_pheromone_correlation"].append(_safe_metric_mean(corr))
 
+    def _as_int_or_none(value):
+        if value is None:
+            return None
+        try:
+            if torch.is_tensor(value):
+                value = value.detach().cpu().item()
+            if isinstance(value, np.generic):
+                value = value.item()
+            value = int(value)
+        except Exception:
+            return None
+        return value
+
+    def _last_valid_head(values):
+        if values is None:
+            return None
+        if isinstance(values, dict):
+            for key in ["head", "best_head", "head_id", "index"]:
+                head = _as_int_or_none(values.get(key))
+                if head is not None:
+                    return head
+            return None
+        if torch.is_tensor(values):
+            values = values.detach().cpu().flatten().tolist()
+        if isinstance(values, np.ndarray):
+            values = values.reshape(-1).tolist()
+        if not isinstance(values, (list, tuple)):
+            return _as_int_or_none(values)
+        for value in reversed(values):
+            head = _last_valid_head(value) if isinstance(value, (list, tuple, dict, np.ndarray)) or torch.is_tensor(value) else _as_int_or_none(value)
+            if head is not None:
+                return head
+        return None
+
+    def _metric_row_to_float_list(row):
+        """Normalize one recorded metric row into a plain Python float list."""
+        if row is None:
+            return None
+        if torch.is_tensor(row):
+            row = row.detach().cpu().flatten().tolist()
+        if isinstance(row, np.ndarray):
+            row = row.reshape(-1).tolist()
+        if not isinstance(row, (list, tuple)):
+            return None
+
+        vals = []
+        for value in row:
+            try:
+                if torch.is_tensor(value):
+                    value = value.detach().cpu().item()
+                if isinstance(value, np.generic):
+                    value = value.item()
+                value = float(value)
+            except Exception:
+                value = float("nan")
+            vals.append(value)
+        return vals
+
+    def _metric_row_to_int_list(row):
+        """Normalize one recorded metric row into a plain Python int list."""
+        if row is None:
+            return None
+        if torch.is_tensor(row):
+            row = row.detach().cpu().flatten().tolist()
+        if isinstance(row, np.ndarray):
+            row = row.reshape(-1).tolist()
+        if not isinstance(row, (list, tuple)):
+            return None
+
+        vals = []
+        for value in row:
+            ivalue = _as_int_or_none(value)
+            vals.append(ivalue)
+        return vals
+
+    def _best_head_trace_from_metric_payload(metric_payload, iter_stats=None, prefer_key="head_best_after"):
+        """Return per-recorded-step winning head events.
+
+        Multi-head sampling can evaluate head groups at every recorded ACO step.
+        Therefore the correct attribution trace is one winner per recorded step,
+        computed from per-head best values such as head_best_after[t][head].
+        """
+        metric_payload = metric_payload or {}
+        iter_stats = iter_stats or []
+        trace = []
+        keys = [prefer_key]
+        for fallback in ["head_best_after", "head_best_before"]:
+            if fallback not in keys:
+                keys.append(fallback)
+
+        for key in keys:
+            rows = metric_payload.get(key, []) or []
+            if not rows:
+                continue
+            for step_idx, row in enumerate(rows):
+                vals = _metric_row_to_float_list(row)
+                if not vals:
+                    continue
+                best_head = None
+                best_value = None
+                for head_idx, value in enumerate(vals):
+                    if not np.isfinite(value):
+                        continue
+                    if best_value is None or value < best_value:
+                        best_value = float(value)
+                        best_head = int(head_idx)
+                if best_head is None:
+                    continue
+
+                iter_value = None
+                if step_idx < len(iter_stats):
+                    iter_value = iter_stats[step_idx].get("iter")
+                trace.append({
+                    "step_index": int(step_idx),
+                    "iter": _as_int_or_none(iter_value),
+                    "head": int(best_head),
+                    "value": float(best_value),
+                    "source": key,
+                })
+            if trace:
+                return trace
+        return trace
+
+    def _best_head_event_from_metric_payload(metric_payload, iter_stats=None):
+        """Return the head that produced the best solution over all recorded iterations.
+
+        This is intentionally not a final-iteration-only statistic. It scans the
+        complete per-step head trace and returns the global best event.
+        """
+        metric_payload = metric_payload or {}
+        trace = _best_head_trace_from_metric_payload(metric_payload, iter_stats)
+        if trace:
+            return min(trace, key=lambda event: event["value"])
+
+        # Fallbacks for payloads that already carry an explicit global winner.
+        for key in ["global_best_head", "winner_head", "best_head", "final_best_head"]:
+            head = _last_valid_head(metric_payload.get(key))
+            if head is not None:
+                return {
+                    "step_index": None,
+                    "iter": None,
+                    "head": int(head),
+                    "value": None,
+                    "source": key,
+                }
+
+        for key in ["head_best", "head_improvement"]:
+            head = _last_valid_head(metric_payload.get(key))
+            if head is not None:
+                return {
+                    "step_index": None,
+                    "iter": None,
+                    "head": int(head),
+                    "value": None,
+                    "source": key,
+                }
+
+        if getattr(args, "head_deploy", None) == "head" and int(getattr(args, "num_heads", 1) or 1) > 1:
+            head = _as_int_or_none(getattr(args, "head_index", None))
+            if head is not None:
+                return {
+                    "step_index": None,
+                    "iter": None,
+                    "head": int(head),
+                    "value": None,
+                    "source": "fixed_head",
+                }
+        return None
+
+    def _best_head_from_metric_payload(metric_payload, iter_stats=None):
+        event = _best_head_event_from_metric_payload(metric_payload, iter_stats)
+        return None if event is None else event.get("head")
+
+    def _infer_num_heads_from_payload(metric_payload=None, fallback_heads=None):
+        metric_payload = metric_payload or {}
+        fallback = int(fallback_heads if fallback_heads is not None else (getattr(args, "num_heads", 0) or 0))
+        if fallback > 1:
+            return fallback
+
+        for key in [
+            "head_counts", "head_best_after", "head_best_before", "head_mean_after",
+            "head_mean_before", "head_enhance", "head_rebellion", "head_suppression",
+        ]:
+            rows = metric_payload.get(key, []) or []
+            for row in rows:
+                vals = _metric_row_to_float_list(row)
+                if vals and len(vals) > 1:
+                    return len(vals)
+
+        for key in [
+            "head_probs", "head_priors", "head_heatmaps", "head_logits",
+            "head_outputs", "head_guidance",
+        ]:
+            rows = metric_payload.get(key, []) or []
+            for row in rows:
+                mat = _metric_to_head_matrix(row, n_heads=None)
+                if mat is not None and mat.shape[0] > 1:
+                    return int(mat.shape[0])
+        return max(fallback, 0)
+
+    def _head_distribution_from_trace(trace, n_heads=None):
+        trace = trace or []
+        heads = []
+        for event in trace:
+            if not isinstance(event, dict):
+                continue
+            head = _as_int_or_none(event.get("head"))
+            if head is not None and head >= 0:
+                heads.append(head)
+        if n_heads is None or n_heads <= 0:
+            n_heads = max(heads) + 1 if heads else int(getattr(args, "num_heads", 0) or 0)
+        if not heads or n_heads <= 0:
+            return None
+        counts = [0 for _ in range(n_heads)]
+        for head in heads:
+            if 0 <= head < n_heads:
+                counts[head] += 1
+        total = int(sum(counts))
+        if total <= 0:
+            return None
+        return {
+            "counts": counts,
+            "fractions": [float(c / total) for c in counts],
+            "total": total,
+            "most_frequent_head": int(max(range(n_heads), key=lambda h: counts[h])),
+        }
+
+    def _best_head_distribution_from_metric_payload(metric_payload, iter_stats=None):
+        metric_payload = metric_payload or {}
+        trace = _best_head_trace_from_metric_payload(metric_payload, iter_stats)
+        n_heads = _infer_num_heads_from_payload(metric_payload)
+        return _head_distribution_from_trace(trace, n_heads=n_heads)
+
+    def _append_best_head(prefix, metric_payload, iter_stats=None):
+        metric_payload = metric_payload or {}
+        trace = _best_head_trace_from_metric_payload(metric_payload, iter_stats)
+        event = _best_head_event_from_metric_payload(metric_payload, iter_stats)
+        results[f"{prefix}_best_head_trace"].append(trace)
+        results[f"{prefix}_best_head_event"].append(event)
+        results[f"{prefix}_best_head"].append(None if event is None else event.get("head"))
+
+    def _metric_to_head_matrix(value, n_heads=None):
+        """Return a K x D matrix from one recorded head-output object."""
+        if value is None:
+            return None
+        try:
+            if torch.is_tensor(value):
+                value = value.detach().cpu().numpy()
+            arr = np.asarray(value, dtype=float)
+        except Exception:
+            return None
+        if arr.size == 0 or arr.ndim == 0:
+            return None
+
+        # Prefer the known head dimension. Otherwise assume the first axis is head
+        # if it looks like a small decoder-head axis.
+        if n_heads is not None and n_heads > 1:
+            if arr.shape[0] == n_heads:
+                pass
+            elif arr.ndim >= 2 and arr.shape[1] == n_heads:
+                arr = np.moveaxis(arr, 1, 0)
+            elif arr.size % n_heads == 0:
+                arr = arr.reshape(n_heads, -1)
+            else:
+                return None
+        elif arr.ndim >= 2 and 1 < arr.shape[0] <= 64:
+            n_heads = int(arr.shape[0])
+        else:
+            return None
+
+        if arr.ndim > 2:
+            arr = arr.reshape(arr.shape[0], -1)
+        if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+            return None
+        return arr
+
+    def _softmax_rows_np(mat):
+        mat = np.asarray(mat, dtype=float)
+        mat = np.where(np.isfinite(mat), mat, -np.inf)
+        row_max = np.max(mat, axis=1, keepdims=True)
+        row_max[~np.isfinite(row_max)] = 0.0
+        exp = np.exp(mat - row_max)
+        exp = np.where(np.isfinite(exp), exp, 0.0)
+        denom = exp.sum(axis=1, keepdims=True)
+        return exp / np.maximum(denom, EPS)
+
+    def _normalize_prob_rows_np(mat):
+        mat = np.asarray(mat, dtype=float)
+        mat = np.where(np.isfinite(mat), mat, 0.0)
+        mat = np.clip(mat, 0.0, None)
+        denom = mat.sum(axis=1, keepdims=True)
+        valid = denom.squeeze(-1) > EPS
+        if not np.any(valid):
+            return None
+        mat = mat[valid] / np.maximum(denom[valid], EPS)
+        return mat if mat.shape[0] >= 2 else None
+
+    def _entropy_bits_np(probs):
+        probs = np.clip(np.asarray(probs, dtype=float), EPS, 1.0)
+        return -np.sum(probs * np.log2(probs), axis=-1)
+
+    def _jsd_stats_for_head_matrix(mat, *, is_logits=False):
+        probs = _softmax_rows_np(mat) if is_logits else _normalize_prob_rows_np(mat)
+        if probs is None or probs.shape[0] < 2:
+            return None
+
+        mean_prob = probs.mean(axis=0)
+        jensen_to_mean = float(_entropy_bits_np(mean_prob) - _entropy_bits_np(probs).mean())
+        pairwise = []
+        for a in range(probs.shape[0]):
+            for b in range(a + 1, probs.shape[0]):
+                m = 0.5 * (probs[a] + probs[b])
+                kl_a = np.sum(probs[a] * (np.log2(np.clip(probs[a], EPS, 1.0)) - np.log2(np.clip(m, EPS, 1.0))))
+                kl_b = np.sum(probs[b] * (np.log2(np.clip(probs[b], EPS, 1.0)) - np.log2(np.clip(m, EPS, 1.0))))
+                pairwise.append(0.5 * (kl_a + kl_b))
+        return {
+            "pairwise_jsd_bits": float(np.mean(pairwise)) if pairwise else None,
+            "jensen_to_mean_bits": jensen_to_mean,
+        }
+
+    def _flatten_numeric_metric(value):
+        if value is None:
+            return []
+        try:
+            if torch.is_tensor(value):
+                value = value.detach().cpu().numpy()
+            arr = np.asarray(value, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            return [float(x) for x in arr.reshape(-1)]
+        except Exception:
+            if isinstance(value, (list, tuple)):
+                out = []
+                for item in value:
+                    out.extend(_flatten_numeric_metric(item))
+                return out
+            return []
+
+    def _head_output_diversity_from_metric_payload(metric_payload):
+        """Compute head-output diversity from recorded per-head priors/logits if present.
+
+        The metric is Jensen-Shannon diversity in bits. For K heads,
+        `jensen_to_mean_bits` is H(mean_h p_h) - mean_h H(p_h), and
+        `pairwise_jsd_bits` is the average pairwise JSD across heads.
+        """
+        metric_payload = metric_payload or {}
+        n_heads = _infer_num_heads_from_payload(metric_payload)
+        pairwise_values = []
+        mean_values = []
+        source_keys = set()
+
+        probability_keys = [
+            "head_probs", "head_prob", "head_priors", "head_prior",
+            "head_heatmaps", "head_heatmap", "head_guidance", "head_guidances",
+            "head_outputs", "head_output",
+        ]
+        logit_keys = ["head_logits", "head_logit", "head_raw_logits", "head_raw_logit"]
+
+        for key, is_logits in [(k, False) for k in probability_keys] + [(k, True) for k in logit_keys]:
+            rows = metric_payload.get(key, []) or []
+            if rows is None:
+                continue
+            if not isinstance(rows, (list, tuple)) or (len(rows) > 0 and not isinstance(rows[0], (list, tuple, np.ndarray)) and not torch.is_tensor(rows[0])):
+                rows = [rows]
+            for row in rows:
+                mat = _metric_to_head_matrix(row, n_heads=n_heads if n_heads > 1 else None)
+                if mat is None:
+                    continue
+                stats = _jsd_stats_for_head_matrix(mat, is_logits=is_logits)
+                if not stats:
+                    continue
+                if stats.get("pairwise_jsd_bits") is not None:
+                    pairwise_values.append(stats["pairwise_jsd_bits"])
+                if stats.get("jensen_to_mean_bits") is not None:
+                    mean_values.append(stats["jensen_to_mean_bits"])
+                source_keys.add(key)
+
+        # Accept precomputed diversity metrics if infer_instance already produced them.
+        precomputed_pairwise = []
+        precomputed_mean = []
+        for key in ["head_pairwise_jsd", "head_pairwise_js", "head_jsd_pairwise", "head_jensen_pairwise"]:
+            vals = _flatten_numeric_metric(metric_payload.get(key))
+            if vals:
+                precomputed_pairwise.extend(vals)
+                source_keys.add(key)
+        for key in ["head_jsd", "head_js_div", "head_jensen", "head_jensen_shannon", "head_jsd_to_mean"]:
+            vals = _flatten_numeric_metric(metric_payload.get(key))
+            if vals:
+                precomputed_mean.extend(vals)
+                source_keys.add(key)
+
+        if not pairwise_values and precomputed_pairwise:
+            pairwise_values = precomputed_pairwise
+        if not mean_values and precomputed_mean:
+            mean_values = precomputed_mean
+
+        if not pairwise_values and not mean_values:
+            return None
+
+        return {
+            "samples": int(max(len(pairwise_values), len(mean_values))),
+            "pairwise_jsd_bits": None if not pairwise_values else float(np.mean(pairwise_values)),
+            "jensen_to_mean_bits": None if not mean_values else float(np.mean(mean_values)),
+            "source_keys": sorted(source_keys),
+        }
+
+    def _format_head_distribution(summary):
+        if not summary:
+            return None
+        pieces = []
+        for h, count in enumerate(summary["counts"]):
+            if count:
+                pieces.append(f"h{h}={summary['fractions'][h] * 100:.1f}%")
+        return ", ".join(pieces) if pieces else None
+
+    def _head_diversity_csv_value(summary, key="pairwise_jsd_bits"):
+        if not summary or summary.get(key) is None:
+            return None
+        return float(summary[key])
+
+    def _format_jsonish(value):
+        if value is None:
+            return None
+        try:
+            return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+        except Exception:
+            return str(value)
+
+    def _iter_head_log_fields(metric_payload, step_idx):
+        """Fields appended to --iter_log so head attribution is visible per iteration."""
+        metric_payload = metric_payload or {}
+        out = {
+            "best_head": None,
+            "best_head_value": None,
+            "head_best_after": None,
+            "head_best_before": None,
+            "head_counts": None,
+        }
+
+        for key in ["head_best_after", "head_best_before"]:
+            rows = metric_payload.get(key, []) or []
+            if step_idx < len(rows):
+                vals = _metric_row_to_float_list(rows[step_idx])
+                out[key] = _format_jsonish(vals)
+                if key == "head_best_after" and vals:
+                    best_head = None
+                    best_value = None
+                    for head_idx, value in enumerate(vals):
+                        if value is None or not np.isfinite(value):
+                            continue
+                        if best_value is None or value < best_value:
+                            best_value = float(value)
+                            best_head = int(head_idx)
+                    out["best_head"] = best_head
+                    out["best_head_value"] = best_value
+
+        if out["best_head"] is None:
+            rows = metric_payload.get("head_best", []) or []
+            if step_idx < len(rows):
+                out["best_head"] = _last_valid_head(rows[step_idx])
+
+        counts_rows = metric_payload.get("head_counts", []) or []
+        if step_idx < len(counts_rows):
+            out["head_counts"] = _format_jsonish(_metric_row_to_int_list(counts_rows[step_idx]))
+        return out
+
+    def _head_event_suffix(event):
+        if event is None or event.get("head") is None:
+            return ""
+        suffix = f" [head={event['head']}"
+        if event.get("iter") is not None:
+            suffix += f"@I{event['iter']}"
+        elif event.get("step_index") is not None:
+            suffix += f"@step{event['step_index']}"
+        if event.get("value") is not None:
+            suffix += f", value={event['value']:.4f}"
+        suffix += "]"
+        return suffix
+
+    def _head_diagnostics_suffix(distribution_summary, diversity_summary):
+        """Compact per-instance head diagnostics for the console/logger line.
+
+        This reports the empirical best-head distribution over the recorded
+        iterations of the current test instance, plus Jensen diversity of the
+        head output distributions when those per-head outputs are available.
+        """
+        if not getattr(args, "log_best_head", False):
+            return ""
+
+        pieces = []
+        dist_text = _format_head_distribution(distribution_summary)
+        if dist_text:
+            pieces.append(f"dist={dist_text}")
+
+        if diversity_summary:
+            div_parts = []
+            pairwise = diversity_summary.get("pairwise_jsd_bits")
+            jensen = diversity_summary.get("jensen_to_mean_bits")
+            samples = diversity_summary.get("samples")
+            if pairwise is not None:
+                div_parts.append(f"pairJSD={float(pairwise):.6f}")
+            if jensen is not None:
+                div_parts.append(f"J2M={float(jensen):.6f}")
+            if samples:
+                div_parts.append(f"n={int(samples)}")
+            if div_parts:
+                pieces.append("div(" + ", ".join(div_parts) + ")")
+
+        return "" if not pieces else " [" + "; ".join(pieces) + "]"
+
+    def _safe_float_or_none(value):
+        if value is None:
+            return None
+        try:
+            if torch.is_tensor(value):
+                value = value.detach().cpu().item()
+            value = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(value):
+            return None
+        return value
+
+    def _shape0_or_none(value):
+        if value is None:
+            return None
+        try:
+            if torch.is_tensor(value):
+                return int(value.shape[0])
+            if hasattr(value, "shape") and len(value.shape) > 0:
+                return int(value.shape[0])
+            return int(len(value))
+        except Exception:
+            return None
+
+    def _infer_eval_instance_size(problem, solver_item, instance_name=None, default_n=None):
+        """Infer the evaluated instance size for scale-bucket reporting."""
+        size = None
+        if problem == "tsp":
+            size = _shape0_or_none(solver_item)
+        elif problem == "cvrp":
+            coords = solver_item[0] if isinstance(solver_item, (list, tuple)) and len(solver_item) > 0 else solver_item
+            size = _shape0_or_none(coords)
+
+        if size is None and instance_name:
+            # Handles names such as X-n101-k25 or TSP10000.
+            import re
+            m = re.search(r"[Nn](\d+)", str(instance_name)) or re.search(r"(\d+)", str(instance_name))
+            if m:
+                size = int(m.group(1))
+
+        if size is None and default_n is not None:
+            size = int(default_n)
+        return size
+
+    def _size_bucket_label(size):
+        if size is None:
+            return None
+        if size < 1000:
+            return "<1K"
+        if size < 10000:
+            return "[1K,10K)"
+        return ">=10K"
+
+    instance_sizes = []
+    opt_cost_by_instance = []
+
     total_instances = len(val_list)
     for i, item in enumerate(tqdm(iterable)):
         opt_cost = None
@@ -1378,6 +1962,10 @@ def main(argv: Optional[List[str]] = None):
 
             if opt_cost is not None and isinstance(opt_cost, (int, float)) and float(opt_cost) > 1e-12:
                 opt_costs_summary.append(float(opt_cost))
+
+        instance_size = _infer_eval_instance_size(args.problem, item, name, args.n_node)
+        instance_sizes.append(instance_size)
+        opt_cost_by_instance.append(_safe_float_or_none(opt_cost))
             
         # Base
         base_m = None
@@ -1420,6 +2008,11 @@ def main(argv: Optional[List[str]] = None):
                             "method": "Base",
                             "anneal": "-",
                             **st,
+                            "best_head": None,
+                            "best_head_value": None,
+                            "head_best_after": None,
+                            "head_best_before": None,
+                            "head_counts": None,
                         })
 
             
@@ -1437,6 +2030,22 @@ def main(argv: Optional[List[str]] = None):
         mix_best_na = None
         model_m = None
         mix_m = None
+        model_best_head = None
+        model_best_na_head = None
+        mix_best_head = None
+        mix_best_na_head = None
+        model_best_head_event = None
+        model_best_na_head_event = None
+        mix_best_head_event = None
+        mix_best_na_head_event = None
+        model_head_distribution = None
+        model_na_head_distribution = None
+        mix_head_distribution = None
+        mix_na_head_distribution = None
+        model_head_diversity = None
+        model_na_head_diversity = None
+        mix_head_diversity = None
+        mix_na_head_diversity = None
         if model:
               # Determine which methods to run based on problem type and flags
               # Default: Mix(anneal) for TSP, Model(anneal) for CVRP
@@ -1459,7 +2068,7 @@ def main(argv: Optional[List[str]] = None):
               
               args_anneal = _clone_args(args, no_anneal=False)
               args_noanneal = _clone_args(args, no_anneal=True)
-              collect_guidance_metrics = bool(args.visualize or args.collect_guidance_metrics)
+              collect_guidance_metrics = bool(args.visualize or args.collect_guidance_metrics or args.log_best_head)
 
               # Model (anneal ON)
               if run_model_anneal:
@@ -1485,15 +2094,21 @@ def main(argv: Optional[List[str]] = None):
                   results["model_neural_time"].append(mod_timings.get("time_neural", 0.0))
                   _append_stage_metrics("model", mod_extra.get("stage_metrics"))
                   _append_guidance_metrics("model", mod_extra.get("metrics"))
+                  model_best_head_event = _best_head_event_from_metric_payload(mod_extra.get("metrics"), model_iter_stats)
+                  model_best_head = None if model_best_head_event is None else model_best_head_event.get("head")
+                  _append_best_head("model", mod_extra.get("metrics"), model_iter_stats)
+                  model_head_distribution = _best_head_distribution_from_metric_payload(mod_extra.get("metrics"), model_iter_stats)
+                  model_head_diversity = _head_output_diversity_from_metric_payload(mod_extra.get("metrics"))
 
                   if args.iter_log and iter_csv_writer is not None and model_iter_stats is not None:
-                      for st in model_iter_stats:
+                      for step_idx, st in enumerate(model_iter_stats):
                           iter_csv_writer.writerow({
                               "idx": i,
                               "name": name,
                               "method": "Model",
                               "anneal": "on",
                               **st,
+                              **_iter_head_log_fields(mod_extra.get("metrics"), step_idx),
                           })
 
                   
@@ -1531,15 +2146,21 @@ def main(argv: Optional[List[str]] = None):
                   results["model_neural_time_no_anneal"].append(mod_na_timings.get("time_neural", 0.0))
                   _append_stage_metrics("model_no_anneal", mod_na_extra.get("stage_metrics"))
                   _append_guidance_metrics("model_no_anneal", mod_na_extra.get("metrics"))
+                  model_best_na_head_event = _best_head_event_from_metric_payload(mod_na_extra.get("metrics"), model_na_iter_stats)
+                  model_best_na_head = None if model_best_na_head_event is None else model_best_na_head_event.get("head")
+                  _append_best_head("model_no_anneal", mod_na_extra.get("metrics"), model_na_iter_stats)
+                  model_na_head_distribution = _best_head_distribution_from_metric_payload(mod_na_extra.get("metrics"), model_na_iter_stats)
+                  model_na_head_diversity = _head_output_diversity_from_metric_payload(mod_na_extra.get("metrics"))
 
                   if args.iter_log and iter_csv_writer is not None and model_na_iter_stats is not None:
-                      for st in model_na_iter_stats:
+                      for step_idx, st in enumerate(model_na_iter_stats):
                           iter_csv_writer.writerow({
                               "idx": i,
                               "name": name,
                               "method": "Model",
                               "anneal": "off",
                               **st,
+                              **_iter_head_log_fields(mod_na_extra.get("metrics"), step_idx),
                           })
                   # if args.iter_print and model_na_iter_stats is not None:
                   #     for st in model_na_iter_stats:
@@ -1582,15 +2203,21 @@ def main(argv: Optional[List[str]] = None):
                       results["mix_neural_time"].append(mix_timings.get("time_neural", 0.0))
                       _append_stage_metrics("mix", mix_extra.get("stage_metrics"))
                       _append_guidance_metrics("mix", mix_extra.get("metrics"))
+                      mix_best_head_event = _best_head_event_from_metric_payload(mix_extra.get("metrics"), mix_iter_stats)
+                      mix_best_head = None if mix_best_head_event is None else mix_best_head_event.get("head")
+                      _append_best_head("mix", mix_extra.get("metrics"), mix_iter_stats)
+                      mix_head_distribution = _best_head_distribution_from_metric_payload(mix_extra.get("metrics"), mix_iter_stats)
+                      mix_head_diversity = _head_output_diversity_from_metric_payload(mix_extra.get("metrics"))
 
                       if args.iter_log and iter_csv_writer is not None and mix_iter_stats is not None:
-                          for st in mix_iter_stats:
+                          for step_idx, st in enumerate(mix_iter_stats):
                               iter_csv_writer.writerow({
                                   "idx": i,
                                   "name": name,
                                   "method": "Mix",
                                   "anneal": "on",
                                   **st,
+                                  **_iter_head_log_fields(mix_extra.get("metrics"), step_idx),
                               })
                       # if args.iter_print and mix_iter_stats is not None:
                       #     for st in mix_iter_stats:
@@ -1610,8 +2237,8 @@ def main(argv: Optional[List[str]] = None):
                           args.k_sparse, args.n_ants, not args.no_dynamic_feats,
                           args_noanneal,
                           use_heuristic_only=False,
-                          collect_metrics=False,
-                          metrics_every_step=False,
+                          collect_metrics=collect_guidance_metrics,
+                          metrics_every_step=collect_guidance_metrics,
                           inject_step=inject_step,
                           seed=args.seed + i,
                           ablation_pheromone=args.ablation_pheromone_features,
@@ -1624,15 +2251,22 @@ def main(argv: Optional[List[str]] = None):
                       results["mix_time_no_anneal"].append(tmi1 - tmi0)
                       results["mix_neural_time_no_anneal"].append(mix_na_timings.get("time_neural", 0.0))
                       _append_stage_metrics("mix_no_anneal", mix_na_extra.get("stage_metrics"))
+                      _append_guidance_metrics("mix_no_anneal", mix_na_extra.get("metrics"))
+                      mix_best_na_head_event = _best_head_event_from_metric_payload(mix_na_extra.get("metrics"), mix_na_iter_stats)
+                      mix_best_na_head = None if mix_best_na_head_event is None else mix_best_na_head_event.get("head")
+                      _append_best_head("mix_no_anneal", mix_na_extra.get("metrics"), mix_na_iter_stats)
+                      mix_na_head_distribution = _best_head_distribution_from_metric_payload(mix_na_extra.get("metrics"), mix_na_iter_stats)
+                      mix_na_head_diversity = _head_output_diversity_from_metric_payload(mix_na_extra.get("metrics"))
 
                       if args.iter_log and iter_csv_writer is not None and mix_na_iter_stats is not None:
-                          for st in mix_na_iter_stats:
+                          for step_idx, st in enumerate(mix_na_iter_stats):
                               iter_csv_writer.writerow({
                                   "idx": i,
                                   "name": name,
                                   "method": "Mix",
                                   "anneal": "off",
                                   **st,
+                                  **_iter_head_log_fields(mix_na_extra.get("metrics"), step_idx),
                               })
                       # if args.iter_print and mix_na_iter_stats is not None:
                       #     for st in mix_na_iter_stats:
@@ -1710,24 +2344,32 @@ def main(argv: Optional[List[str]] = None):
                  elapsed_s = results["model_time"][-1] if results.get("model_time") else None
                  seg = _metric_segment("model", results["model_cost"][-1], elapsed_s)
                  if seg:
+                     seg += _head_event_suffix(model_best_head_event)
+                     seg += _head_diagnostics_suffix(model_head_distribution, model_head_diversity)
                      segments.append(seg)
 
              if results.get("model_cost_no_anneal") and len(results["model_cost_no_anneal"]) > i:
                  elapsed_s = results["model_time_no_anneal"][-1] if results.get("model_time_no_anneal") else None
                  seg = _metric_segment("model-na", results["model_cost_no_anneal"][-1], elapsed_s)
                  if seg:
+                     seg += _head_event_suffix(model_best_na_head_event)
+                     seg += _head_diagnostics_suffix(model_na_head_distribution, model_na_head_diversity)
                      segments.append(seg)
 
              if results.get("mix_cost") and len(results["mix_cost"]) > i:
                  elapsed_s = results["mix_time"][-1] if results.get("mix_time") else None
                  seg = _metric_segment("mix", results["mix_cost"][-1], elapsed_s)
                  if seg:
+                     seg += _head_event_suffix(mix_best_head_event)
+                     seg += _head_diagnostics_suffix(mix_head_distribution, mix_head_diversity)
                      segments.append(seg)
 
              if results.get("mix_cost_no_anneal") and len(results["mix_cost_no_anneal"]) > i:
                  elapsed_s = results["mix_time_no_anneal"][-1] if results.get("mix_time_no_anneal") else None
                  seg = _metric_segment("mix-na", results["mix_cost_no_anneal"][-1], elapsed_s)
                  if seg:
+                     seg += _head_event_suffix(mix_best_na_head_event)
+                     seg += _head_diagnostics_suffix(mix_na_head_distribution, mix_na_head_diversity)
                      segments.append(seg)
 
              tqdm.write(" | ".join(segments))
@@ -1738,6 +2380,8 @@ def main(argv: Optional[List[str]] = None):
             row_dict = {
                 "idx": i,
                 "name": name,
+                "size": instance_size,
+                "size_group": _size_bucket_label(instance_size),
                 "opt": (float(opt_cost) if opt_cost is not None else None),
                 "baseline": bl_i,
                 "base": (float(base_best) if base_best is not None else None),
@@ -1745,6 +2389,30 @@ def main(argv: Optional[List[str]] = None):
                 "model_no_anneal": (float(model_best_na) if model_best_na is not None else None),
                 "mix_anneal": (float(mix_best) if mix_best is not None else None),
                 "mix_no_anneal": (float(mix_best_na) if mix_best_na is not None else None),
+                "model_anneal_best_head": model_best_head,
+                "model_anneal_best_head_iter": None if model_best_head_event is None else model_best_head_event.get("iter"),
+                "model_anneal_best_head_value": None if model_best_head_event is None else model_best_head_event.get("value"),
+                "model_anneal_head_distribution": _format_jsonish(model_head_distribution),
+                "model_anneal_pairwise_jsd_bits": _head_diversity_csv_value(model_head_diversity, "pairwise_jsd_bits"),
+                "model_anneal_jensen_to_mean_bits": _head_diversity_csv_value(model_head_diversity, "jensen_to_mean_bits"),
+                "model_no_anneal_best_head": model_best_na_head,
+                "model_no_anneal_best_head_iter": None if model_best_na_head_event is None else model_best_na_head_event.get("iter"),
+                "model_no_anneal_best_head_value": None if model_best_na_head_event is None else model_best_na_head_event.get("value"),
+                "model_no_anneal_head_distribution": _format_jsonish(model_na_head_distribution),
+                "model_no_anneal_pairwise_jsd_bits": _head_diversity_csv_value(model_na_head_diversity, "pairwise_jsd_bits"),
+                "model_no_anneal_jensen_to_mean_bits": _head_diversity_csv_value(model_na_head_diversity, "jensen_to_mean_bits"),
+                "mix_anneal_best_head": mix_best_head,
+                "mix_anneal_best_head_iter": None if mix_best_head_event is None else mix_best_head_event.get("iter"),
+                "mix_anneal_best_head_value": None if mix_best_head_event is None else mix_best_head_event.get("value"),
+                "mix_anneal_head_distribution": _format_jsonish(mix_head_distribution),
+                "mix_anneal_pairwise_jsd_bits": _head_diversity_csv_value(mix_head_diversity, "pairwise_jsd_bits"),
+                "mix_anneal_jensen_to_mean_bits": _head_diversity_csv_value(mix_head_diversity, "jensen_to_mean_bits"),
+                "mix_no_anneal_best_head": mix_best_na_head,
+                "mix_no_anneal_best_head_iter": None if mix_best_na_head_event is None else mix_best_na_head_event.get("iter"),
+                "mix_no_anneal_best_head_value": None if mix_best_na_head_event is None else mix_best_na_head_event.get("value"),
+                "mix_no_anneal_head_distribution": _format_jsonish(mix_na_head_distribution),
+                "mix_no_anneal_pairwise_jsd_bits": _head_diversity_csv_value(mix_na_head_diversity, "pairwise_jsd_bits"),
+                "mix_no_anneal_jensen_to_mean_bits": _head_diversity_csv_value(mix_na_head_diversity, "jensen_to_mean_bits"),
             }
             # Add iteration metrics
             for itr in TARGET_ITERS:
@@ -1843,6 +2511,65 @@ def main(argv: Optional[List[str]] = None):
         delta_pct = ((c[ok] - b[ok]) / b[ok]) * 100.0
         beat_base_pct = float(np.mean(c[ok] < b[ok]) * 100.0)
         return float(np.mean(delta_pct)), beat_base_pct
+
+    SIZE_BUCKETS = [
+        ("<1K", lambda n: n is not None and n < 1000),
+        ("[1K,10K)", lambda n: n is not None and 1000 <= n < 10000),
+        (">=10K", lambda n: n is not None and n >= 10000),
+    ]
+
+    def _reference_array_for_grouped_gaps():
+        refs = np.array(
+            [np.nan if value is None else float(value) for value in opt_cost_by_instance],
+            dtype=float,
+        )
+        if np.isfinite(refs).any():
+            return refs, "opt"
+        if baseline_values is not None and len(baseline_values) == len(instance_sizes):
+            return np.array(baseline_values, dtype=float), "bl"
+        return None, "-"
+
+    def _grouped_gap_payload(cost_list):
+        if not cost_list or len(cost_list) != len(instance_sizes):
+            return None
+        refs, ref_label = _reference_array_for_grouped_gaps()
+        if refs is None:
+            return None
+        costs = np.array([np.nan if value is None else float(value) for value in cost_list], dtype=float)
+        payload = {"ref": ref_label, "buckets": {}}
+        for label, predicate in SIZE_BUCKETS:
+            idx = np.array([bool(predicate(size)) for size in instance_sizes], dtype=bool)
+            ok = idx & np.isfinite(costs) & np.isfinite(refs) & (refs > 1e-12)
+            vals = ((costs[ok] - refs[ok]) / refs[ok]) * 100.0
+            payload["buckets"][label] = {
+                "count": int(vals.size),
+                "mean_gap_pct": None if vals.size == 0 else float(vals.mean()),
+                "std_gap_pct": None if vals.size == 0 else float(vals.std(ddof=0)),
+            }
+        return payload
+
+    def _build_grouped_gap_rows(method_specs):
+        rows = []
+        payloads = {}
+        for method_name, cost_key in method_specs:
+            payload = _grouped_gap_payload(results.get(cost_key, []))
+            if payload is None:
+                continue
+            payloads[method_name] = payload
+            row = [method_name, payload["ref"]]
+            has_any = False
+            for label, _ in SIZE_BUCKETS:
+                bucket = payload["buckets"].get(label, {})
+                count = bucket.get("count", 0)
+                gap = bucket.get("mean_gap_pct")
+                if count > 0 and gap is not None:
+                    row.append(f"{gap:+.2f}% (n={count})")
+                    has_any = True
+                else:
+                    row.append("-")
+            if has_any:
+                rows.append(row)
+        return rows, payloads
 
     def _add_method_row(name, cost_list, time_list, gap_list=None, neural_time_list=None):
         m, s = _mean_std(cost_list)
@@ -1999,6 +2726,21 @@ def main(argv: Optional[List[str]] = None):
         _print_section("Reference costs")
         _print_table(reference_rows, headers=["Reference", "MeanCost", "StdCost", "Notes"])
 
+    grouped_gap_specs = [
+        ("Base", "base_cost"),
+        ("Model(anneal)", "model_cost"),
+        ("Model(no_anneal)", "model_cost_no_anneal"),
+        ("Mix(anneal)", "mix_cost"),
+        ("Mix(no_anneal)", "mix_cost_no_anneal"),
+    ]
+    grouped_gap_rows, grouped_gap_payloads = _build_grouped_gap_rows(grouped_gap_specs)
+    if grouped_gap_rows:
+        _print_section("Mean gap by instance size")
+        _print_table(
+            grouped_gap_rows,
+            headers=["Method", "Ref", "<1K", "[1K,10K)", ">=10K"],
+        )
+
     if checkpoint_entries:
         checkpoint_map = {}
         for entry in checkpoint_entries:
@@ -2026,6 +2768,87 @@ def main(argv: Optional[List[str]] = None):
             _print_table(checkpoint_rows, headers=checkpoint_headers)
 
     diagnostics_rows = []
+
+    def _best_head_summary(prefix):
+        events = [e for e in (results.get(f"{prefix}_best_head_event", []) or []) if isinstance(e, dict)]
+        heads = []
+        for event in events:
+            head = _as_int_or_none(event.get("head"))
+            if head is not None and head >= 0:
+                heads.append(head)
+
+        # Compatibility with older runs where only the scalar head was stored.
+        if not heads:
+            for value in results.get(f"{prefix}_best_head", []) or []:
+                head = _as_int_or_none(value)
+                if head is not None and head >= 0:
+                    heads.append(head)
+
+        n_heads = int(getattr(args, "num_heads", 0) or 0)
+        if n_heads <= 0 and heads:
+            n_heads = max(heads) + 1
+        if not heads or n_heads <= 0:
+            return None
+        counts = [0 for _ in range(n_heads)]
+        for head in heads:
+            if 0 <= head < n_heads:
+                counts[head] += 1
+        total = sum(counts)
+        if total <= 0:
+            return None
+        fractions = [count / total for count in counts]
+        best_head = int(max(range(n_heads), key=lambda h: counts[h]))
+        return {
+            "counts": counts,
+            "fractions": fractions,
+            "total": int(total),
+            "most_frequent_head": best_head,
+            "events": events,
+        }
+
+    def _best_head_iteration_distribution_summary(prefix):
+        traces = results.get(f"{prefix}_best_head_trace", []) or []
+        all_events = []
+        for trace in traces:
+            if isinstance(trace, list):
+                all_events.extend(e for e in trace if isinstance(e, dict))
+        n_heads = int(getattr(args, "num_heads", 0) or 0)
+        for payload in results.get(f"{prefix}_metrics_payload", []) or []:
+            n_heads = max(n_heads, _infer_num_heads_from_payload(payload))
+        summary = _head_distribution_from_trace(all_events, n_heads=n_heads)
+        if summary is not None:
+            summary["events"] = all_events
+        return summary
+
+    def _head_output_diversity_summary(prefix):
+        samples = []
+        for payload in results.get(f"{prefix}_metrics_payload", []) or []:
+            div = _head_output_diversity_from_metric_payload(payload)
+            if div:
+                samples.append(div)
+        if not samples:
+            return None
+        pairwise = [s["pairwise_jsd_bits"] for s in samples if s.get("pairwise_jsd_bits") is not None]
+        mean_based = [s["jensen_to_mean_bits"] for s in samples if s.get("jensen_to_mean_bits") is not None]
+        source_keys = sorted({k for s in samples for k in s.get("source_keys", [])})
+        return {
+            "instances": int(len(samples)),
+            "samples": int(sum(int(s.get("samples", 0) or 0) for s in samples)),
+            "pairwise_jsd_bits": None if not pairwise else float(np.mean(pairwise)),
+            "jensen_to_mean_bits": None if not mean_based else float(np.mean(mean_based)),
+            "source_keys": source_keys,
+        }
+
+    def _format_best_head_summary(summary):
+        if not summary:
+            return None
+        pieces = []
+        for h, count in enumerate(summary["counts"]):
+            if count:
+                pieces.append(f"h{h}={count} ({summary['fractions'][h] * 100:.1f}%)")
+        if not pieces:
+            return None
+        return ", ".join(pieces)
 
     def _add_stage_diagnostics(label, prefix, timing_breakdown=None):
         stage_summary = _stage_means(prefix)
@@ -2067,6 +2890,64 @@ def main(argv: Optional[List[str]] = None):
         _print_section("Diagnostics")
         _print_table(diagnostics_rows, headers=["Method", "Stage means", "Timing split"])
 
+    best_head_rows = []
+    for method_name, prefix in [
+        ("Model(anneal)", "model"),
+        ("Model(no_anneal)", "model_no_anneal"),
+        ("Mix(anneal)", "mix"),
+        ("Mix(no_anneal)", "mix_no_anneal"),
+    ]:
+        summary = _best_head_summary(prefix)
+        formatted = _format_best_head_summary(summary)
+        if summary and formatted:
+            best_head_rows.append([
+                method_name,
+                f"h{summary['most_frequent_head']}",
+                str(summary["total"]),
+                formatted,
+            ])
+
+    if best_head_rows:
+        _print_section("Best head by instance (global over recorded iterations)")
+        _print_table(best_head_rows, headers=["Method", "Most frequent", "Logged", "Head wins"])
+
+    head_distribution_rows = []
+    head_diversity_rows = []
+    for method_name, prefix in [
+        ("Model(anneal)", "model"),
+        ("Model(no_anneal)", "model_no_anneal"),
+        ("Mix(anneal)", "mix"),
+        ("Mix(no_anneal)", "mix_no_anneal"),
+    ]:
+        dist_summary = _best_head_iteration_distribution_summary(prefix)
+        dist_text = _format_head_distribution(dist_summary)
+        if dist_summary and dist_text:
+            head_distribution_rows.append([
+                method_name,
+                f"h{dist_summary['most_frequent_head']}",
+                str(dist_summary["total"]),
+                dist_text,
+            ])
+
+        div_summary = _head_output_diversity_summary(prefix)
+        if div_summary:
+            head_diversity_rows.append([
+                method_name,
+                str(div_summary.get("instances", 0)),
+                str(div_summary.get("samples", 0)),
+                _fmt(div_summary.get("pairwise_jsd_bits"), nd=6),
+                _fmt(div_summary.get("jensen_to_mean_bits"), nd=6),
+                ",".join(div_summary.get("source_keys", [])) or "-",
+            ])
+
+    if head_distribution_rows:
+        _print_section("Best head distribution by recorded iteration")
+        _print_table(head_distribution_rows, headers=["Method", "Most frequent", "Logged iters", "Distribution"])
+
+    if head_diversity_rows:
+        _print_section("Head output diversity")
+        _print_table(head_diversity_rows, headers=["Method", "Instances", "Samples", "Pairwise JSD(bits)", "Jensen-to-mean(bits)", "Source"])
+
     # CSV summary logging
     if summary_rows and args.log and csv_path_summary is not None:
         try:
@@ -2081,6 +2962,30 @@ def main(argv: Optional[List[str]] = None):
                 writer.writerow(["Method", "MeanCost", "StdCost", "Gap%", "StdGap%", "GapRef", "MeanTime", "TotalTime", "Best"])
                 for r in summary_rows:
                     writer.writerow(r)
+                if grouped_gap_rows:
+                    writer.writerow([])
+                    writer.writerow(["Mean gap by instance size"])
+                    writer.writerow(["Method", "Ref", "<1K", "[1K,10K)", ">=10K"])
+                    for r in grouped_gap_rows:
+                        writer.writerow(r)
+                if best_head_rows:
+                    writer.writerow([])
+                    writer.writerow(["Best head by instance"])
+                    writer.writerow(["Method", "Most frequent", "Logged", "Head wins"])
+                    for r in best_head_rows:
+                        writer.writerow(r)
+                if head_distribution_rows:
+                    writer.writerow([])
+                    writer.writerow(["Best head distribution by recorded iteration"])
+                    writer.writerow(["Method", "Most frequent", "Logged iters", "Distribution"])
+                    for r in head_distribution_rows:
+                        writer.writerow(r)
+                if head_diversity_rows:
+                    writer.writerow([])
+                    writer.writerow(["Head output diversity"])
+                    writer.writerow(["Method", "Instances", "Samples", "Pairwise JSD(bits)", "Jensen-to-mean(bits)", "Source"])
+                    for r in head_diversity_rows:
+                        writer.writerow(r)
         except Exception as e:
             print(f"Warning: failed to write CSV summary: {e}")
 
@@ -2156,6 +3061,12 @@ def main(argv: Optional[List[str]] = None):
             out["head_enhance"] = _head_vector_mean(payloads, "head_enhance", n_heads)
             out["head_rebellion"] = _head_vector_mean(payloads, "head_rebellion", n_heads)
             out["head_suppression"] = _head_vector_mean(payloads, "head_suppression", n_heads)
+        iter_dist = _best_head_iteration_distribution_summary(prefix)
+        if iter_dist is not None:
+            out["head_best_iteration_distribution"] = {k: v for k, v in iter_dist.items() if k != "events"}
+        div_summary = _head_output_diversity_summary(prefix)
+        if div_summary is not None:
+            out["head_output_diversity"] = div_summary
         return {k: v for k, v in out.items() if v is not None}
 
     def _build_method_summary(prefix, cost_key, time_key, gap_key=None, neural_time_key=None):
@@ -2193,6 +3104,9 @@ def main(argv: Optional[List[str]] = None):
         payload["mean_guidance"] = guidance_mean
         payload["pheromone_correlation"] = pher_corr_mean
         payload["guidance_diagnostics"] = _guidance_diagnostics(prefix)
+        best_head_summary = _best_head_summary(prefix)
+        if best_head_summary is not None:
+            payload["best_head"] = best_head_summary
 
         payload.update(_stage_means(prefix))
         return payload
@@ -2205,6 +3119,7 @@ def main(argv: Optional[List[str]] = None):
             "dataset": args.dataset,
             "seed": int(args.seed),
             "methods": {},
+            "grouped_mean_gap_pct": grouped_gap_payloads,
         }
         method_specs = [
             ("base", "base", "base_cost", "base_time", "base_gap", None),
@@ -2231,6 +3146,8 @@ def main(argv: Optional[List[str]] = None):
             fieldnames = [
                 "idx",
                 "name",
+                "size",
+                "size_group",
                 "opt",
                 "baseline",
                 "base",
@@ -2238,6 +3155,30 @@ def main(argv: Optional[List[str]] = None):
                 "model_no_anneal",
                 "mix_anneal",
                 "mix_no_anneal",
+                "model_anneal_best_head",
+                "model_anneal_best_head_iter",
+                "model_anneal_best_head_value",
+                "model_anneal_head_distribution",
+                "model_anneal_pairwise_jsd_bits",
+                "model_anneal_jensen_to_mean_bits",
+                "model_no_anneal_best_head",
+                "model_no_anneal_best_head_iter",
+                "model_no_anneal_best_head_value",
+                "model_no_anneal_head_distribution",
+                "model_no_anneal_pairwise_jsd_bits",
+                "model_no_anneal_jensen_to_mean_bits",
+                "mix_anneal_best_head",
+                "mix_anneal_best_head_iter",
+                "mix_anneal_best_head_value",
+                "mix_anneal_head_distribution",
+                "mix_anneal_pairwise_jsd_bits",
+                "mix_anneal_jensen_to_mean_bits",
+                "mix_no_anneal_best_head",
+                "mix_no_anneal_best_head_iter",
+                "mix_no_anneal_best_head_value",
+                "mix_no_anneal_head_distribution",
+                "mix_no_anneal_pairwise_jsd_bits",
+                "mix_no_anneal_jensen_to_mean_bits",
             ]
             for itr in TARGET_ITERS:
                 fieldnames.extend([
