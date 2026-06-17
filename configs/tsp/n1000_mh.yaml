@@ -25,12 +25,6 @@ baseline: none
 multi_head: true
 num_heads: 4
 head_zdim: 16
-head_gamma: 2.0
-head_score_mode: mean
-head_topq: 1
-head_diversity_coef: 0.01
-head_deploy: ants
-head_index: 0
 
 # Experiment metadata
 experiment_name: tsp_n1000_mh

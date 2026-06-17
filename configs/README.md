@@ -14,7 +14,6 @@ Recommended starting points:
 - CVRP training: `configs/train/cvrp_n1000_ppo.yaml`
 - TSP full evaluation: `configs/eval/tsp_n1000_original_full_eval.yaml`
 - CVRP full evaluation: `configs/eval/cvrp_n1000_original_cvrlib_eval.yaml`
-- CVRP n=500 weighted-vs-PolyNet comparison:
-  - `configs/train/cvrp_n500_multihead_weighted_compare_train.yaml`
+- CVRP n=500 PolyNet multi-head training:
   - `configs/train/cvrp_n500_multihead_polynet_train.yaml`
 - Quick smoke test: `configs/smoke/test_tsp_n100_ppo.yaml`

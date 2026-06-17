@@ -520,41 +520,10 @@ def repair_dead_lowrank_head_adapter(model: nn.Module) -> bool:
     nn.init.xavier_uniform_(decoder.head_proj.weight)
     return True
 
-class MultiDecoderNet(Net):
-    """DyNACO edge-prior model with K separate decoder modules over one encoder."""
-
-    def __init__(
-        self,
-        *args,
-        num_heads: int = 4,
-        head_zdim: int = 16,
-        logit_net: bool = True,
-        **kwargs
-    ):
-        self.num_heads = num_heads
-        self.head_zdim = head_zdim
-        super().__init__(*args, logit_net=logit_net, **kwargs)
-        self.par_net_heu = nn.ModuleList([
-            ParNet(logit_net=logit_net) for _ in range(num_heads)
-        ])
-
-    def forward(self, pyg):
-        pyg = move_pyg_to_module_device(self, pyg)
-        x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
-        emb = self.emb_net(x, edge_index, edge_attr)
-        return torch.cat([decoder(emb).view(-1, 1) for decoder in self.par_net_heu], dim=1)
-
-
-def output_to_sparse_prior(output, n: int, k: int, deploy: str = "head", head_index: int = 0):
-    """Convert single-head or multi-head edge output into one (n, k) sparse prior."""
+def output_to_sparse_prior(output, n: int, k: int):
+    """Convert a single-head edge output into one (n, k) sparse prior."""
     if output.dim() == 2:
-        if deploy == "head":
-            output = output[:, head_index]
-        else:
-            raise ValueError(
-                f"Multi-head output with deploy={deploy!r} cannot be compressed to one prior; "
-                "use output_to_multi_sparse_priors for mixed-ant deployment."
-            )
+        raise ValueError("Multi-head output should use output_to_multi_sparse_priors.")
     return output.view(-1).view(n, k)
 
 

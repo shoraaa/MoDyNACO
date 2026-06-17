@@ -29,7 +29,7 @@ import faco
 import utils
 import baselines
 
-from net import MultiDecoderNet, MultiHeadNet, Net
+from net import MultiHeadNet, Net
 from baselines import get_baseline
 
 # Import metric helpers from utils
@@ -609,26 +609,14 @@ def main(argv: Optional[List[str]] = None):
                         help="Number of prediction heads; values >1 enable multi-head model loading")
     parser.add_argument("--head_zdim", type=int, default=16,
                         help="Latent code width for each multi-head decoder head")
-    parser.add_argument("--head_decoder_type", choices=["film", "separate"], default="film",
-                        help="Multi-head decoder implementation: FiLM-conditioned shared decoder or separate decoders")
-    parser.add_argument("--head_deploy", choices=["ants", "head"], default="ants",
-                        help="How to deploy K heads: mixed ant groups or one fixed head")
-    parser.add_argument("--head_index", type=int, default=0,
-                        help="Head index used when --head_deploy=head")
     parser.add_argument("--head_ant_weights", type=str, default=None,
-                        help="Comma-separated ant allocation weights/counts for mixed-head deployment, e.g. 50,20,15,15")
+                        help="Comma-delimited ant allocation weights/counts for PolyNet ant groups, e.g. 50,20,15,15")
     parser.add_argument("--head_router", choices=["static", "ema"], default="static",
-                        help="Ant routing for mixed-head deployment; static preserves head_ant_weights")
+                        help="Ant routing for PolyNet ant groups; static preserves head_ant_weights")
     parser.add_argument("--head_router_alpha", type=float, default=0.25,
                         help="EMA update rate for adaptive head utility routing")
-    parser.add_argument("--head_router_gamma", type=float, default=2.0,
-                        help="Softmax strength for converting head utility to ant counts")
     parser.add_argument("--head_router_min_frac", type=float, default=0.0,
                         help="Minimum allocation fraction blended into each head by adaptive routing")
-    parser.add_argument("--head_router_score_mode", choices=["mean", "topq", "best", "improvement"], default="topq",
-                        help="Per-head score used by adaptive routing")
-    parser.add_argument("--head_complement_coef", type=float, default=0.0,
-                        help="Coefficient for high-priority edge complementarity reward across heads")
     parser.add_argument(
         "--head_input_transform",
         "--head-input-transform",
@@ -726,7 +714,25 @@ def main(argv: Optional[List[str]] = None):
                 for token in args_list
             )
 
+        legacy_ignored_config_keys = {
+            "head_deploy",
+            "head_index",
+            "head_decoder_type",
+            "head_training",
+            "head_gamma",
+            "head_score_mode",
+            "head_topq",
+            "head_diversity_coef",
+            "head_complement_coef",
+            "head_anchor_checkpoint",
+            "head_anchor_coef",
+            "head_router_gamma",
+            "head_router_score_mode",
+        }
+
         for key, value in yaml_config.items():
+            if key in legacy_ignored_config_keys:
+                continue
             if hasattr(args, key) and not _cli_has_flag(key):
                 setattr(args, key, value)
 
@@ -786,7 +792,11 @@ def main(argv: Optional[List[str]] = None):
             "checkpoint", "device", "dataset", "visualize", "visualize_output", 
             "timed", "verify", "baseline", "baseline_runs", "baseline_time_limit", 
             "threads", "seed", "save_dir", "wandb_project", "wandb_entity", "no_wandb", "warmup", "no_baseline",
-            "val_size"
+            "val_size",
+            "head_deploy", "head_index", "head_decoder_type", "head_training",
+            "head_gamma", "head_score_mode", "head_topq", "head_diversity_coef",
+            "head_complement_coef", "head_anchor_checkpoint", "head_anchor_coef",
+            "head_router_gamma", "head_router_score_mode",
         }
         
         # If model was not trained with annealing, ignore its min_gamma (use ours)
@@ -1118,19 +1128,11 @@ def main(argv: Optional[List[str]] = None):
                 args.num_heads = int(config.get("num_heads", args.num_heads))
             if "--head_zdim" not in sys.argv and "--head-zdim" not in sys.argv:
                 args.head_zdim = int(config.get("head_zdim", args.head_zdim))
-            if "--head_decoder_type" not in sys.argv and "--head-decoder-type" not in sys.argv:
-                args.head_decoder_type = config.get("head_decoder_type", args.head_decoder_type)
-            if "--head_deploy" not in sys.argv and "--head-deploy" not in sys.argv:
-                args.head_deploy = config.get("head_deploy", args.head_deploy)
             if "--head_ant_weights" not in sys.argv and "--head-ant-weights" not in sys.argv:
                 args.head_ant_weights = config.get("head_ant_weights", args.head_ant_weights)
             if "--head_input_transform" not in sys.argv and "--head-input-transform" not in sys.argv:
                 args.head_input_transform = config.get("head_input_transform", args.head_input_transform)
-        if multi_head:
-            decoder_type = str(getattr(args, "head_decoder_type", "film") or "film").lower()
-            model_cls = MultiDecoderNet if decoder_type == "separate" else MultiHeadNet
-        else:
-            model_cls = Net
+        model_cls = MultiHeadNet if multi_head else Net
         model_kwargs = {}
         if multi_head:
             model_kwargs.update(num_heads=args.num_heads, head_zdim=args.head_zdim)
@@ -1501,16 +1503,6 @@ def main(argv: Optional[List[str]] = None):
                     "source": key,
                 }
 
-        if getattr(args, "head_deploy", None) == "head" and int(getattr(args, "num_heads", 1) or 1) > 1:
-            head = _as_int_or_none(getattr(args, "head_index", None))
-            if head is not None:
-                return {
-                    "step_index": None,
-                    "iter": None,
-                    "head": int(head),
-                    "value": None,
-                    "source": "fixed_head",
-                }
         return None
 
     def _best_head_from_metric_payload(metric_payload, iter_stats=None):

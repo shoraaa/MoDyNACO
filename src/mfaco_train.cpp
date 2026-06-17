@@ -85,10 +85,7 @@ void MFACO_TSP::sample(bool require_prob, const float *prior,
   result.clear();
   result.costs.resize(n_ants);
   result.routes.resize(n_ants);
-  if (require_prob) {
-    result.costs_raw.resize(n_ants);
-    result.routes_raw.resize(n_ants);
-  }
+  result.costs_raw.resize(n_ants);
   result.new_edges_count.resize(n_ants);
   result.edge_survival.resize(n_ants);
 
@@ -127,6 +124,7 @@ void MFACO_TSP::sample(bool require_prob, const float *prior,
 
       std::vector<int32_t> checklist;
       checklist.reserve(n);
+      result.routes_raw.resize(n_ants);
 
       for (int32_t a = 0; a < n_ants; ++a) {
         result.routes[a].resize(n);
@@ -164,6 +162,7 @@ void MFACO_TSP::sample(bool require_prob, const float *prior,
       // Traced mode: parallelized with per-ant RNG and per-ant traces
       ensure_ant_seeds();
       std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
+      result.routes_raw.resize(n_ants);
 
 #pragma omp parallel
       {
@@ -246,6 +245,7 @@ void MFACO_TSP::sample(bool require_prob, const float *prior,
         rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
         result.costs[a] = sample_ant_fast(
             probmat.data(), start_nodes[a], result.routes[a],
+            result.costs_raw[a],
             result.new_edges_count[a], checklist, rng_local, prior);
       }
     }
@@ -263,10 +263,7 @@ void MFACO_TSP::sample_ant_priors(bool require_prob, const float *ant_priors,
   result.clear();
   result.costs.resize(n_ants);
   result.routes.resize(n_ants);
-  if (require_prob) {
-    result.costs_raw.resize(n_ants);
-    result.routes_raw.resize(n_ants);
-  }
+  result.costs_raw.resize(n_ants);
   result.new_edges_count.resize(n_ants);
   result.edge_survival.resize(n_ants);
 
@@ -299,6 +296,7 @@ void MFACO_TSP::sample_ant_priors(bool require_prob, const float *ant_priors,
       std::vector<int32_t> checklist;
       checklist.reserve(n);
       std::vector<float> probmat(n * k);
+      result.routes_raw.resize(n_ants);
 
       for (int32_t a = 0; a < n_ants; ++a) {
         const float *prior_a = ant_priors + static_cast<int64_t>(a) * prior_stride;
@@ -335,6 +333,7 @@ void MFACO_TSP::sample_ant_priors(bool require_prob, const float *ant_priors,
     } else {
       ensure_ant_seeds();
       std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
+      result.routes_raw.resize(n_ants);
 
 #pragma omp parallel
       {
@@ -420,6 +419,7 @@ void MFACO_TSP::sample_ant_priors(bool require_prob, const float *ant_priors,
         rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
         result.costs[a] = sample_ant_fast(
             probmat.data(), start_nodes[a], result.routes[a],
+            result.costs_raw[a],
             result.new_edges_count[a], checklist, rng_local, prior_a);
       }
     }
@@ -441,10 +441,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
   result.clear();
   result.costs.resize(n_ants);
   result.routes.resize(n_ants);
-  if (require_prob) {
-    result.costs_raw.resize(n_ants);
-    result.routes_raw.resize(n_ants);
-  }
+  result.costs_raw.resize(n_ants);
   result.new_edges_count.resize(n_ants);
   result.edge_survival.resize(n_ants);
 
@@ -518,6 +515,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
 
       std::vector<int32_t> checklist;
       checklist.reserve(n);
+      result.routes_raw.resize(n_ants);
 
       for (int32_t a = 0; a < n_ants; ++a) {
         int32_t hidx = ant_head[static_cast<size_t>(a)];
@@ -557,6 +555,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
     } else {
       ensure_ant_seeds();
       std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
+      result.routes_raw.resize(n_ants);
 
 #pragma omp parallel
       {
@@ -646,6 +645,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
         rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
         result.costs[a] =
             sample_ant_fast(prob_h, start_nodes[a], result.routes[a],
+                            result.costs_raw[a],
                             result.new_edges_count[a], checklist, rng_local,
                             prior_h);
       }
@@ -968,6 +968,7 @@ void MFACO_TSP::compute_probmat(const float *prior_ptr,
 
 float MFACO_TSP::sample_ant_fast(const float *probmat, int32_t start_node,
                                  std::vector<int32_t> &route_out,
+                                 float &cost_raw_out,
                                  int32_t &new_edges_out,
                                  std::vector<int32_t> &checklist,
                                  Xoshiro128Plus &rng, const float *prior) {
@@ -984,6 +985,8 @@ float MFACO_TSP::sample_ant_fast(const float *probmat, int32_t start_node,
 
   checklist.clear();
   checklist.push_back(start_node);
+  std::vector<uint8_t> in_checklist(n, 0);
+  in_checklist[start_node] = 1;
 
   int32_t new_edges = 0;
   int32_t steps = 0;
@@ -1007,19 +1010,18 @@ float MFACO_TSP::sample_ant_fast(const float *probmat, int32_t start_node,
     // Check if this creates a new edge
     if (!contains_edge(curr, chosen, positions)) {
       ++new_edges;
-      // Add endpoints to checklist
-      if (std::find(checklist.begin(), checklist.end(), curr) ==
-          checklist.end()) {
+      if (!in_checklist[curr]) {
         checklist.push_back(curr);
+        in_checklist[curr] = 1;
       }
-      if (std::find(checklist.begin(), checklist.end(), chosen) ==
-          checklist.end()) {
+      if (!in_checklist[chosen]) {
         checklist.push_back(chosen);
+        in_checklist[chosen] = 1;
       }
       int32_t chosen_pred = get_pred(chosen, route, positions);
-      if (std::find(checklist.begin(), checklist.end(), chosen_pred) ==
-          checklist.end()) {
+      if (!in_checklist[chosen_pred]) {
         checklist.push_back(chosen_pred);
+        in_checklist[chosen_pred] = 1;
       }
     }
 
@@ -1033,6 +1035,7 @@ float MFACO_TSP::sample_ant_fast(const float *probmat, int32_t start_node,
   }
 
   new_edges_out = new_edges;
+  cost_raw_out = get_route_cost(route);
 
   // Apply local search if enabled
   if (use_local_search && !checklist.empty()) {
@@ -1069,6 +1072,8 @@ float MFACO_TSP::sample_ant_traced(const float *probmat, int32_t start_node,
 
   checklist.clear();
   checklist.push_back(start_node);
+  std::vector<uint8_t> in_checklist(n, 0);
+  in_checklist[start_node] = 1;
 
   int32_t new_edges = 0;
   int32_t steps = 0;
@@ -1107,18 +1112,18 @@ float MFACO_TSP::sample_ant_traced(const float *probmat, int32_t start_node,
 
     if (is_new) {
       ++new_edges;
-      if (std::find(checklist.begin(), checklist.end(), curr) ==
-          checklist.end()) {
+      if (!in_checklist[curr]) {
         checklist.push_back(curr);
+        in_checklist[curr] = 1;
       }
-      if (std::find(checklist.begin(), checklist.end(), chosen) ==
-          checklist.end()) {
+      if (!in_checklist[chosen]) {
         checklist.push_back(chosen);
+        in_checklist[chosen] = 1;
       }
       int32_t chosen_pred = get_pred(chosen, route, positions);
-      if (std::find(checklist.begin(), checklist.end(), chosen_pred) ==
-          checklist.end()) {
+      if (!in_checklist[chosen_pred]) {
         checklist.push_back(chosen_pred);
+        in_checklist[chosen_pred] = 1;
       }
     }
 
@@ -1335,6 +1340,11 @@ float MFACO_TSP::two_opt_nn(std::vector<int32_t> &route,
   int32_t changes_count = 0;
   float total_change = 0.0f;
   size_t checklist_pos = 0;
+  std::vector<uint8_t> in_checklist(n, 0);
+  for (int32_t node : checklist) {
+    if (node >= 0 && node < n)
+      in_checklist[node] = 1;
+  }
 
   while (checklist_pos < checklist.size()) {
     if (ls_budget == LSBudget::TRUNCATED && changes_count >= ls_max_opt) {
@@ -1408,9 +1418,9 @@ float MFACO_TSP::two_opt_nn(std::vector<int32_t> &route,
       if (extend_ls) {
         for (int32_t i = 0; i < 4; ++i) {
           int32_t node = best_move[i];
-          if (std::find(checklist.begin(), checklist.end(), node) ==
-              checklist.end()) {
+          if (node >= 0 && node < n && !in_checklist[node]) {
             checklist.push_back(node);
+            in_checklist[node] = 1;
           }
         }
       }
@@ -1427,6 +1437,11 @@ float MFACO_TSP::two_opt_nn_prior(std::vector<int32_t> &route,
   int32_t changes_count = 0;
   float total_gain = 0.0f;
   size_t checklist_pos = 0;
+  std::vector<uint8_t> in_checklist(n, 0);
+  for (int32_t node : checklist) {
+    if (node >= 0 && node < n)
+      in_checklist[node] = 1;
+  }
 
   auto get_prior = [&](int32_t u, int32_t v) -> float {
     int32_t idx = find_neighbor_index(u, v);
@@ -1524,9 +1539,9 @@ float MFACO_TSP::two_opt_nn_prior(std::vector<int32_t> &route,
       if (extend_ls) {
         for (int32_t i = 0; i < 4; ++i) {
           int32_t node = best_move[i];
-          if (std::find(checklist.begin(), checklist.end(), node) ==
-              checklist.end()) {
+          if (node >= 0 && node < n && !in_checklist[node]) {
             checklist.push_back(node);
+            in_checklist[node] = 1;
           }
         }
       }
@@ -2116,9 +2131,9 @@ void MFACO_CVRP::sample(bool require_prob, const float *prior_ptr,
   // multiple 0s (e.g., 0 ... 0 ... 0).
   result.routes.resize(n_ants);
   result.decoded_routes.resize(n_ants);
+  result.costs_raw.resize(n_ants);
 
   if (require_prob) {
-    result.costs_raw.resize(n_ants);
     result.routes_raw.resize(n_ants);
     result.logps.resize(n_ants);
   }
@@ -2158,8 +2173,6 @@ void MFACO_CVRP::sample(bool require_prob, const float *prior_ptr,
       for (int32_t a = 0; a < n_ants; ++a) {
         // Trace construction into a decoded CVRP route (with depot zeros).
         result.decoded_routes[a].clear();
-        std::vector<int32_t> route_raw_unused;
-
         MFACOTrace trace;
         trace.reserve(min_new_edges * 2);
 
@@ -2169,8 +2182,8 @@ void MFACO_CVRP::sample(bool require_prob, const float *prior_ptr,
         float surv_out = 0.0f;
         (void)sample_ant_direct_traced(
             probmat.data(), start_nodes[a], result.decoded_routes[a],
-            route_raw_unused, result.costs_raw[a], mne_out, checklist, trace,
-            rng_, logp_sum, surv_out, prior_ptr);
+            result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
+            trace, rng_, logp_sum, surv_out, prior_ptr);
         result.new_edges_count[a] = mne_out;
         result.edge_survival[a] = surv_out;
         result.logps[a] = logp_sum;
@@ -2181,6 +2194,12 @@ void MFACO_CVRP::sample(bool require_prob, const float *prior_ptr,
           result.decoded_routes[a].insert(result.decoded_routes[a].begin(), 0);
         if (result.decoded_routes[a].back() != 0)
           result.decoded_routes[a].push_back(0);
+        if (!result.routes_raw[a].empty()) {
+          if (result.routes_raw[a].front() != 0)
+            result.routes_raw[a].insert(result.routes_raw[a].begin(), 0);
+          if (result.routes_raw[a].back() != 0)
+            result.routes_raw[a].push_back(0);
+        }
 
         // Store the full depot-separated route and compute true CVRP cost.
         result.routes[a] = result.decoded_routes[a];
@@ -2297,8 +2316,9 @@ void MFACO_CVRP::sample(bool require_prob, const float *prior_ptr,
         // sampler variants return only a customer permutation (no depot zeros).
         // We handle both and ensure we end with a depot-separated route.
         (void)sample_ant_direct(probmat.data(), start_nodes[a],
-                                result.routes[a], result.new_edges_count[a],
-                                checklist, rng_local, prior_ptr);
+                                result.routes[a], result.costs_raw[a],
+                                result.new_edges_count[a], checklist,
+                                rng_local, prior_ptr);
 
         // Ensure canonical start/end depot.
         if (result.routes[a].empty() || result.routes[a].front() != 0)
@@ -2342,8 +2362,8 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
   result.costs.resize(n_ants);
   result.routes.resize(n_ants);
   result.decoded_routes.resize(n_ants);
+  result.costs_raw.resize(n_ants);
   if (require_prob) {
-    result.costs_raw.resize(n_ants);
     result.routes_raw.resize(n_ants);
     result.logps.resize(n_ants);
   }
@@ -2427,7 +2447,6 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         const float *prob_h =
             probmats.data() + static_cast<int64_t>(hidx) * prior_stride;
         result.decoded_routes[a].clear();
-        std::vector<int32_t> route_raw_unused;
         MFACOTrace trace;
         trace.reserve(min_new_edges * 2);
 
@@ -2435,9 +2454,9 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         int32_t mne_out = 0;
         float surv_out = 0.0f;
         (void)sample_ant_direct_traced(
-            prob_h, start_nodes[a], result.decoded_routes[a], route_raw_unused,
-            result.costs_raw[a], mne_out, checklist, trace, rng_, logp_sum,
-            surv_out, prior_h);
+            prob_h, start_nodes[a], result.decoded_routes[a],
+            result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
+            trace, rng_, logp_sum, surv_out, prior_h);
         result.new_edges_count[a] = mne_out;
         result.edge_survival[a] = surv_out;
         result.logps[a] = logp_sum;
@@ -2447,6 +2466,12 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
           result.decoded_routes[a].insert(result.decoded_routes[a].begin(), 0);
         if (result.decoded_routes[a].back() != 0)
           result.decoded_routes[a].push_back(0);
+        if (!result.routes_raw[a].empty()) {
+          if (result.routes_raw[a].front() != 0)
+            result.routes_raw[a].insert(result.routes_raw[a].begin(), 0);
+          if (result.routes_raw[a].back() != 0)
+            result.routes_raw[a].push_back(0);
+        }
         result.routes[a] = result.decoded_routes[a];
         result.costs[a] = route_cost_euclid(result.routes[a]);
 
@@ -2563,6 +2588,7 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         Xoshiro128Plus rng_local;
         rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
         (void)sample_ant_direct(prob_h, start_nodes[a], result.routes[a],
+                                result.costs_raw[a],
                                 result.new_edges_count[a], checklist,
                                 rng_local, prior_h);
 
@@ -4235,6 +4261,7 @@ namespace mfaco {
 
 float MFACO_CVRP::sample_ant_direct(const float *probmat, int32_t start_node,
                                     std::vector<int32_t> &route_out,
+                                    float &cost_raw_out,
                                     int32_t &new_edges_out,
                                     std::vector<int32_t> &checklist,
                                     Xoshiro128Plus &rng, const float *prior) {
@@ -4647,6 +4674,11 @@ float MFACO_CVRP::sample_ant_direct(const float *probmat, int32_t start_node,
   }
   if (!route_out.empty())
     route_out.push_back(0);
+
+  cost_raw_out = 0.0f;
+  for (size_t i = 0; i + 1 < route_out.size(); ++i) {
+    cost_raw_out += dist(route_out[i], route_out[i + 1]);
+  }
 
   // 6. Apply Local Search
   if (use_local_search && !checklist.empty()) {

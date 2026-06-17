@@ -72,15 +72,43 @@ class TrainRegressionTests(unittest.TestCase):
         self.assertGreater(approx_kl.item(), 0.0)
         self.assertAlmostEqual(clip_frac.item(), 0.5)
 
-    def test_multi_head_ppo_loss_applies_head_competition_weights(self):
+    def test_multi_head_jensen_diversity_is_zero_for_identical_heads(self):
+        priors = torch.tensor(
+            [
+                [[2.0, -2.0], [0.5, -0.5]],
+                [[2.0, -2.0], [0.5, -0.5]],
+            ]
+        )
+
+        diversity = train._multi_head_jensen_diversity(priors)
+
+        self.assertAlmostEqual(diversity.item(), 0.0, places=6)
+
+    def test_loss_js_rewards_diverse_polynet_heads(self):
+        args = Namespace(loss_js=0.5)
+        priors = torch.tensor(
+            [
+                [[4.0, -4.0], [-4.0, 4.0]],
+                [[-4.0, 4.0], [4.0, -4.0]],
+            ],
+            requires_grad=True,
+        )
+
+        diversity = train._multi_head_jensen_diversity(priors)
+        loss_term = train._multi_head_js_loss_term(priors, args)
+
+        self.assertGreater(diversity.item(), 0.0)
+        self.assertLess(loss_term.item(), 0.0)
+        loss_term.backward()
+        self.assertIsNotNone(priors.grad)
+
+    def test_multi_head_ppo_loss_uses_polynet_best_mean_head(self):
         args = Namespace(
             n_ants=4,
             alpha=1.0,
             beta=1.0,
             ppo_clip=0.2,
             no_adv_norm=True,
-            head_score_mode="mean",
-            head_gamma=2.0,
         )
         current_prior = torch.zeros(2, 1, 2, requires_grad=True)
         tau_nk = torch.ones(1, 2)
@@ -96,9 +124,9 @@ class TrainRegressionTests(unittest.TestCase):
 
         with mock.patch.object(
             train,
-            "replay_logp_from_cpp_batch_trace_ant_priors",
-            return_value=(torch.zeros(4), torch.ones(4)),
-        ):
+            "replay_logp_from_cpp_batch_trace_ant_slice",
+            return_value=(torch.zeros(2), torch.ones(2)),
+        ) as replay_mock:
             loss, approx_kl, clip_frac = train._multi_head_ppo_loss(
                 current_prior,
                 tau_nk,
@@ -110,6 +138,8 @@ class TrainRegressionTests(unittest.TestCase):
                 args=args,
             )
 
+        replay_mock.assert_called_once()
+        self.assertEqual(replay_mock.call_args.args[2:], (0, 2))
         self.assertTrue(torch.isfinite(loss))
         self.assertAlmostEqual(approx_kl.item(), 0.0)
         self.assertAlmostEqual(clip_frac.item(), 0.0)
@@ -121,9 +151,6 @@ class TrainRegressionTests(unittest.TestCase):
             beta=1.0,
             ppo_clip=0.2,
             no_adv_norm=True,
-            head_score_mode="mean",
-            head_gamma=2.0,
-            head_training="polynet",
         )
         current_prior = torch.zeros(2, 1, 2, requires_grad=True)
         tau_nk = torch.ones(1, 2)
@@ -140,8 +167,8 @@ class TrainRegressionTests(unittest.TestCase):
 
         with mock.patch.object(
             train,
-            "replay_logp_from_cpp_batch_trace_ant_priors",
-            return_value=(replayed_logp, torch.ones(4)),
+            "replay_logp_from_cpp_batch_trace_ant_slice",
+            return_value=(replayed_logp[:2], torch.ones(2)),
         ):
             loss, approx_kl, clip_frac = train._multi_head_ppo_loss(
                 current_prior,
@@ -152,6 +179,7 @@ class TrainRegressionTests(unittest.TestCase):
                 costs_by_head=costs_by_head,
                 logp_old_by_head=logp_old_by_head,
                 args=args,
+                selected_head=0,
             )
 
         expected, expected_kl, expected_clip = train._ppo_clipped_loss(

@@ -16,9 +16,7 @@ min_gamma: 0.0
 multi_head: true
 num_heads: 4
 head_zdim: 16
-head_deploy: ants
 head_ant_weights: "50,20,15,15"
-head_index: 0
 
 checkpoint: pretrained/tsp/n1000/tsp_n1000_k32_ants100_H10_miniH100_rho0.1_mne12_ppo_lr5e-06_mh4_hg2_hdants_ha50-20-15-15_best.pt
 dataset: ../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/TSP_survey_converted.txt

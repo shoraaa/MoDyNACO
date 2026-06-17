@@ -1,4 +1,4 @@
-# DyNACO Configuration: TSP-1000, 3 edge features, routed multi-expert heads
+# DyNACO Configuration: TSP-1000, 3 edge features, routed PolyNet heads
 problem: tsp
 n_node: 1000
 k_sparse: 32
@@ -38,22 +38,12 @@ grad_checkpointing: false
 multi_head: true
 num_heads: 4
 head_zdim: 16
-head_decoder_type: separate
-head_gamma: 2.0
-head_score_mode: mean
-head_topq: 1
-head_diversity_coef: 0.001
-head_complement_coef: 0.001
-head_deploy: ants
 head_ant_weights: null
-head_index: 0
 
 # Adaptive ant routing
 head_router: ema
 head_router_alpha: 0.25
-head_router_gamma: 1.0
 head_router_min_frac: 0.05
-head_router_score_mode: mean
 
 val_dataset: data/TSP/data/test_set/STAR_TSP_lt1000.txt
 val_size: 69
@@ -68,5 +58,5 @@ save_dir: pretrained
 
 # Experiment metadata
 experiment_name: tsp_n1000_3f_multiexpert
-description: "TSP-1K PPO with compact3 edge features, routed multi-expert heads, and separate decoders"
+description: "TSP-1K PPO with compact3 edge features, routed PolyNet heads"
 author: "DyNACO Team"

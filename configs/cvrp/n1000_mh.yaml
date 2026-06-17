@@ -21,12 +21,6 @@ edge_feature_set: compact3
 multi_head: true
 num_heads: 4
 head_zdim: 16
-head_gamma: 2.0
-head_score_mode: mean
-head_topq: 1
-head_diversity_coef: 0.01
-head_deploy: ants
-head_index: 0
 
 val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
 baseline: none

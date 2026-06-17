@@ -108,7 +108,6 @@ def _multi_head_enabled(args: Any) -> bool:
 def head_router_enabled(args: Any) -> bool:
     return (
         _multi_head_enabled(args)
-        and getattr(args, "head_deploy", "ants") == "ants"
         and str(getattr(args, "head_router", "static") or "static").lower() != "static"
     )
 
@@ -121,10 +120,10 @@ class HeadUtilityRouter:
         self.n_ants = int(n_ants)
         self.mode = str(getattr(args, "head_router", "static") or "static").lower()
         self.alpha = float(getattr(args, "head_router_alpha", 0.25))
-        self.gamma = float(getattr(args, "head_router_gamma", getattr(args, "head_gamma", 2.0)))
+        self.gamma = 1.0
         self.min_frac = float(getattr(args, "head_router_min_frac", 0.0))
-        self.score_mode = str(getattr(args, "head_router_score_mode", getattr(args, "head_score_mode", "mean")))
-        self.topq = int(getattr(args, "head_topq", 1))
+        self.score_mode = "topq"
+        self.topq = 1
         self.static_weights = getattr(args, "head_ant_weights", None)
         self._utility: Optional[np.ndarray] = None
         self._last_counts = split_ant_counts_from_weights(self.n_ants, self.num_heads, self.static_weights)
@@ -2397,7 +2396,6 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     t_neural_start = time.time()
                     if (
                         _head_input_transform_mode(args) not in {"none", "identity"}
-                        and getattr(args, "head_deploy", "ants") == "ants"
                         and int(getattr(args, "num_heads", 1)) > 1
                     ):
                         prior_mat = _multi_head_priors_from_transformed_inputs(
@@ -2429,20 +2427,14 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                                               edge_feature_set=getattr(args, "edge_feature_set", "full"))
                         prior_output = model(pyg_data)
 
-                        if prior_output.dim() == 2 and getattr(args, "head_deploy", "ants") == "ants":
+                        if prior_output.dim() == 2:
                             prior_mat = dynaco_net.output_to_multi_sparse_priors(prior_output, aco.n, aco.k)
                             prior_for_metrics = prior_mat.mean(dim=0)
                             prior_head_counts = head_counts_for_router(
                                 args, int(prior_mat.shape[0]), n_ants, head_router
                             )
                         else:
-                            prior_mat = dynaco_net.output_to_sparse_prior(
-                                prior_output,
-                                aco.n,
-                                aco.k,
-                                deploy=getattr(args, "head_deploy", "head"),
-                                head_index=getattr(args, "head_index", 0),
-                            )
+                            prior_mat = dynaco_net.output_to_sparse_prior(prior_output, aco.n, aco.k)
                             prior_for_metrics = prior_mat
                     t_neural_total += time.time() - t_neural_start
                     

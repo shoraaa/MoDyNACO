@@ -182,9 +182,9 @@ struct SampleResult {
       routes;                   // (n_ants, n) - each route without repetition
   MFACOTraceBatch traces;       // only populated if require_prob=true
   std::vector<float> logps;     // (n_ants,) log probability of sample
-  std::vector<float> costs_raw; // (n_ants,) cost before LS (TSP only)
+  std::vector<float> costs_raw; // (n_ants,) cost before LS
   std::vector<std::vector<int32_t>>
-      routes_raw; // (n_ants, n) - each route before LS (TSP only)
+      routes_raw; // (n_ants, n) - each route before LS
   std::vector<int32_t> new_edges_count; // (n_ants,)
   std::vector<float>
       edge_survival; // (n_ants,) ratio of sampled edges surviving in final tour
@@ -387,6 +387,7 @@ private:
 
   float sample_ant_fast(const float *probmat, // (n, k) precomputed weights
                         int32_t start_node, std::vector<int32_t> &route_out,
+                        float &cost_raw_out,
                         int32_t &new_edges_out, std::vector<int32_t> &checklist,
                         Xoshiro128Plus &rng, const float *prior);
 
@@ -663,6 +664,7 @@ private:
 
   float sample_ant_direct(const float *probmat, int32_t start_node,
                           std::vector<int32_t> &route_out,
+                          float &cost_raw_out,
                           int32_t &new_edges_out,
                           std::vector<int32_t> &checklist, Xoshiro128Plus &rng,
                           const float *prior);

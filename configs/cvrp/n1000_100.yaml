@@ -20,12 +20,12 @@ no_dynamic_feats: false
 edge_feature_set: compact3
 
 val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
-val_size: 16
+val_size: 128
 baseline: none
 
-multi_head: true
-num_heads: 8
-head_zdim: 128
+# multi_head: true
+# num_heads: 8
+# head_zdim: 128
 
 # Experiment metadata
 experiment_name: cvrp_n1000_lr_100

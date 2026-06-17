@@ -23,7 +23,6 @@ val_size: 128
 baseline: none
 
 multi_head: true
-head_training: polynet
 num_heads: 8
 head_zdim: 128
 

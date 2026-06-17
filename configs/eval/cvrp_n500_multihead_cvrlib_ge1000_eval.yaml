@@ -16,8 +16,6 @@ min_gamma: 0.0
 multi_head: true
 num_heads: 4
 head_zdim: 16
-head_deploy: ants
-head_index: 0
 
 checkpoint: pretrained/cvrp/n500/cvrp_n500_k32_ants100_H2_miniH20_rho0.5_mne12_ppo_lr5e-06_mh4_hg2_hdants_best.pt
 dataset: data/CVRP/data/test_set/STAR_CVRPlib_ge1000.txt
