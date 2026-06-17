@@ -451,15 +451,115 @@ class ParNetCondLowRank(nn.Module):
 
         return out
 
+class MultiHeadLoRALinear(nn.Module):
+    """Linear layer with one shared base weight and head-specific LoRA updates."""
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        num_heads: int = 4,
+        rank: int = 8,
+        alpha: float = 1.0,
+        bias: bool = True,
+        zero_init: bool = True,
+        freeze_base: bool = False,
+    ):
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("LoRA rank must be positive")
+        self.in_features = in_features
+        self.out_features = out_features
+        self.num_heads = num_heads
+        self.rank = rank
+        self.scaling = alpha / rank
+
+        self.base = nn.Linear(in_features, out_features, bias=bias)
+        self.lora_A = nn.Parameter(torch.empty(num_heads, rank, in_features))
+        self.lora_B = nn.Parameter(torch.empty(num_heads, out_features, rank))
+
+        nn.init.normal_(self.lora_A, std=0.02)
+        if zero_init:
+            nn.init.zeros_(self.lora_B)
+        else:
+            nn.init.normal_(self.lora_B, std=0.02)
+
+        if freeze_base:
+            for param in self.base.parameters():
+                param.requires_grad = False
+
+    def forward(self, x):
+        # x: (E, d), out: (E, H, out_features)
+        base = self.base(x)
+        low = torch.einsum("ed,hrd->ehr", x, self.lora_A)
+        delta = torch.einsum("ehr,hor->eho", low, self.lora_B)
+        return base.unsqueeze(1) + self.scaling * delta
+
+
+class ParNetCondLoRA(nn.Module):
+    """
+    Multi-head LoRA-MLP edge decoder.
+
+    The MLP trunk is shared. The final linear layer is W_h = W_0 + B_h A_h,
+    giving each head a small trainable low-rank adapter while preserving the
+    existing multi-head output contract: (E, H).
+    """
+
+    def __init__(
+        self,
+        depth: int = 3,
+        units: int = 32,
+        num_heads: int = 4,
+        rank: int = 8,
+        alpha: float = 1.0,
+        act_fn: str = 'silu',
+        logit_net: bool = True,
+        zero_init: bool = True,
+        freeze_base: bool = False,
+    ):
+        super().__init__()
+        if depth < 2:
+            raise ValueError("ParNetCondLoRA requires depth >= 2")
+        self.units = units
+        self.num_heads = num_heads
+        self.rank = rank
+        self.act_fn = getattr(F, act_fn)
+        self.sigmoid_output = not logit_net
+        self.hidden = nn.ModuleList([
+            nn.Linear(units, units) for _ in range(depth - 1)
+        ])
+        self.out = MultiHeadLoRALinear(
+            in_features=units,
+            out_features=1,
+            num_heads=num_heads,
+            rank=rank,
+            alpha=alpha,
+            bias=True,
+            zero_init=zero_init,
+            freeze_base=freeze_base,
+        )
+
+    def forward(self, emb):
+        x = emb
+        for layer in self.hidden:
+            x = self.act_fn(layer(x))
+        out = self.out(x).squeeze(-1)
+        if self.sigmoid_output:
+            out = torch.sigmoid(out)
+        return out
+
 class MultiHeadNet(Net):
-    """DyNACO edge-prior model with cheap PolyNet-style conditional residual heads."""
+    """DyNACO edge-prior model with a shared trunk and multi-head LoRA decoder."""
 
     def __init__(
         self,
         *args,
         num_heads: int = 4,
         head_zdim: int = 16,
-        rank: int = 16,
+        rank: int = 8,
+        lora_alpha: float = 1.0,
+        freeze_lora_base: bool = False,
+        head_decoder_type: str = "lora",
         logit_net: bool = True,
         fixed_head_codes: bool = True,
         **kwargs
@@ -467,32 +567,49 @@ class MultiHeadNet(Net):
         self.num_heads = num_heads
         self.head_zdim = head_zdim
         self.rank = rank
+        self.head_decoder_type = str(head_decoder_type or "lora").lower()
+        if self.head_decoder_type in {"head_code", "head-code", "residual"}:
+            self.head_decoder_type = "lowrank"
+        if self.head_decoder_type not in {"lora", "lowrank"}:
+            raise ValueError("head_decoder_type must be 'lora' or 'lowrank'")
         super().__init__(*args, logit_net=True, **kwargs)
-
-        if fixed_head_codes:
-            codes = torch.randn(num_heads, head_zdim)
-            codes = F.normalize(codes, dim=-1)
-            self.register_buffer("head_codes", codes)
-        else:
-            codes = torch.randn(num_heads, head_zdim) * 0.02
-            self.head_codes = nn.Parameter(codes)
 
         units = self.emb_net.units
 
-        self.par_net_heu = ParNetCondLowRank(
-            units=units,
-            num_heads=num_heads,
-            zdim=head_zdim,
-            rank=rank,
-            logit_net=logit_net,
-            zero_init=True,
-        )
+        if self.head_decoder_type == "lowrank":
+            if fixed_head_codes:
+                codes = torch.randn(num_heads, head_zdim)
+                codes = F.normalize(codes, dim=-1)
+                self.register_buffer("head_codes", codes)
+            else:
+                codes = torch.randn(num_heads, head_zdim) * 0.02
+                self.head_codes = nn.Parameter(codes)
+            self.par_net_heu = ParNetCondLowRank(
+                units=units,
+                num_heads=num_heads,
+                zdim=head_zdim,
+                rank=rank,
+                logit_net=logit_net,
+                zero_init=True,
+            )
+        else:
+            self.par_net_heu = ParNetCondLoRA(
+                units=units,
+                num_heads=num_heads,
+                rank=rank,
+                alpha=lora_alpha,
+                logit_net=logit_net,
+                zero_init=True,
+                freeze_base=freeze_lora_base,
+            )
 
     def forward(self, pyg):
         pyg = move_pyg_to_module_device(self, pyg)
         x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
         emb = self.emb_net(x, edge_index, edge_attr)
-        return self.par_net_heu(emb, self.head_codes)
+        if self.head_decoder_type == "lowrank":
+            return self.par_net_heu(emb, self.head_codes)
+        return self.par_net_heu(emb)
 
 
 def lowrank_head_adapter_is_dead(model: nn.Module, atol: float = 1e-12) -> bool:
@@ -519,6 +636,44 @@ def repair_dead_lowrank_head_adapter(model: nn.Module) -> bool:
     decoder = model.par_net_heu
     nn.init.xavier_uniform_(decoder.head_proj.weight)
     return True
+
+
+def load_multihead_state_dict(model: nn.Module, state_dict: dict):
+    """Load current LoRA checkpoints and migrate old residual-head checkpoints.
+
+    Older MultiHeadNet checkpoints stored the shared decoder as
+    par_net_heu.base.lins.{0,1,2}.  The LoRA decoder stores the same reusable
+    trunk/base weights as par_net_heu.hidden.{0,1} and par_net_heu.out.base.
+    Old head-code and residual-adapter tensors are intentionally ignored.
+    """
+    if not isinstance(model, MultiHeadNet):
+        return model.load_state_dict(state_dict)
+    if getattr(model, "head_decoder_type", "lora") == "lowrank":
+        return model.load_state_dict(state_dict)
+
+    migrated = dict(state_dict)
+    old_prefix = "par_net_heu.base.lins."
+    if (
+        f"{old_prefix}0.weight" in migrated
+        and "par_net_heu.hidden.0.weight" not in migrated
+    ):
+        mapping = {
+            f"{old_prefix}0.weight": "par_net_heu.hidden.0.weight",
+            f"{old_prefix}0.bias": "par_net_heu.hidden.0.bias",
+            f"{old_prefix}1.weight": "par_net_heu.hidden.1.weight",
+            f"{old_prefix}1.bias": "par_net_heu.hidden.1.bias",
+            f"{old_prefix}2.weight": "par_net_heu.out.base.weight",
+            f"{old_prefix}2.bias": "par_net_heu.out.base.bias",
+        }
+        for old_key, new_key in mapping.items():
+            if old_key in migrated:
+                migrated[new_key] = migrated[old_key]
+
+    is_current_lora = "par_net_heu.out.lora_A" in migrated
+    if is_current_lora:
+        return model.load_state_dict(migrated)
+
+    return model.load_state_dict(migrated, strict=False)
 
 def output_to_sparse_prior(output, n: int, k: int):
     """Convert a single-head edge output into one (n, k) sparse prior."""

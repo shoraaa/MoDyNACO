@@ -1,0 +1,130 @@
+% \section{Preliminaries}
+% \label{sec:prelim}
+
+This section introduces the routing problems considered in this paper, the standard ACO procedure, and the neural-guided ACO paradigm. We then describe the zero-shot generalization setting used for evaluation.
+
+\subsection{Routing Problems}
+\label{subsec:prelim_problem}
+
+We consider routing problems defined on a graph $\mathcal{G}=(\mathcal{V},\mathcal{E})$, where $\mathcal{V}$ denotes the set of nodes and $\mathcal{E}$ denotes the set of candidate edges. Each node $i\in\mathcal{V}$ is associated with a coordinate vector $\mathbf{x}_i\in\mathbb{R}^2$, and each edge $(i,j)\in\mathcal{E}$ has a non-negative travel cost $c_{ij}$. In Euclidean routing problems, $c_{ij}$ is typically computed from the Euclidean distance between $\mathbf{x}_i$ and $\mathbf{x}_j$, possibly followed by the rounding rule specified by the benchmark instance. A feasible solution is represented as one or more routes satisfying the problem-specific constraints, and the objective is to minimize the total travel cost.
+
+\noindent\textbf{Traveling Salesman Problem.}
+For the Traveling Salesman Problem (\TSP{}), the goal is to find a Hamiltonian cycle that visits every node exactly once and returns to the starting node. Let $\pi=(\pi_1,\pi_2,\ldots,\pi_N)$ denote a permutation of the $N=|\mathcal{V}|$ nodes. The tour length is defined as
+\begin{equation} L_{\mathrm{TSP}}(\pi) = \sum_{t=1}^{N-1} c_{\pi_t,\pi_{t+1}} + c_{\pi_N,\pi_1}. \end{equation}
+and the optimization objective is
+\begin{equation} \pi^{\mathrm{opt}} = \arg\min_{\pi} L_{\mathrm{TSP}}(\pi). \end{equation}
+The feasibility condition requires each node to appear exactly once in $\pi$.
+
+\noindent\textbf{Capacitated Vehicle Routing Problem.}
+For the Capacitated Vehicle Routing Problem (\CVRP{}), the node set is $\mathcal{V}={0,1,\ldots,N}$, where node $0$ is the depot and the remaining nodes are customers. Each customer $i\in{1,\ldots,N}$ has demand $d_i>0$, while the depot has $d_0=0$. A fleet of vehicles with identical capacity $Q$ is available. A solution consists of multiple routes
+\begin{equation}
+\mathcal{R}={r_1,r_2,\ldots,r_m},
+\end{equation}
+where each route $r_k=(0,v_{k,1},\ldots,v_{k,n_k},0)$ starts and ends at the depot. The total cost is
+\begin{equation} L_{\mathrm{CVRP}}(\mathcal{R}) = \sum_{k=1}^{m} \left( c_{0,v_{k,1}} + \sum_{t=1}^{n_k-1} c_{v_{k,t},v_{k,t+1}} + c_{v_{k,n_k},0} \right). \end{equation}
+The solution must satisfy two constraints. First, each customer is served exactly once:
+\begin{equation}
+\bigcup_{k=1}^{m}{v_{k,1},\ldots,v_{k,n_k}}
+=
+{1,\ldots,N},
+\quad
+r_k \cap r_{k'} = \emptyset
+;; \forall k\neq k',
+\end{equation}
+where the intersection is taken over customer nodes. Second, the total demand on each route cannot exceed the vehicle capacity:
+\begin{equation}
+\sum_{t=1}^{n_k} d_{v_{k,t}} \leq Q,
+\quad
+\forall k\in{1,\ldots,m}.
+\end{equation}
+The objective is to find a feasible set of routes with minimum total cost,
+\begin{equation}
+\mathcal{R}^{\star}
+=
+\arg\min_{\mathcal{R}} L_{\CVRP{}}(\mathcal{R}).
+\end{equation}
+
+\subsection{Ant Colony Optimization}
+\label{subsec:prelim_aco}
+
+Ant Colony Optimization (ACO)~\cite{ACO,maxmin} is a population-based metaheuristic inspired by the collective foraging behavior of ants. It maintains a pheromone value $\tau_{ij}^{(t)}$ for each candidate edge $(i,j)$ at iteration $t$, which records accumulated search experience, and combines it with a heuristic prior $\eta_{ij}$, which usually encodes static problem information such as inverse distance. A set of artificial ants repeatedly construct candidate solutions according to a stochastic transition rule, and the pheromone matrix is updated based on the quality of the constructed solutions.
+
+For a partial solution currently ending at node $i$, let $\mathcal{N}_i^{(a,t)}$ denote the feasible neighborhood of ant $a$ at iteration $t$. In \TSP{}, this set contains unvisited nodes. In \CVRP{}, it additionally respects the remaining vehicle capacity and depot-return conditions. The transition probability from node $i$ to node $j\in\mathcal{N}_i^{(a,t)}$ is commonly defined as
+\begin{equation}
+    \mathcal{R}^{\mathrm{opt}}
+    =
+    \arg\min_{\mathcal{R}} L_{\mathrm{CVRP}}(\mathcal{R}).
+\end{equation}
+\begin{equation}
+    p_{ij}^{(a,t)}
+    =
+    \frac{
+    \left(\tau_{ij}^{(t)}\right)^{\alpha}
+    \left(\eta_{ij}\right)^{\beta}
+    }{
+    \sum_{k\in\mathcal{N}_i^{(a,t)}}
+    \left(\tau_{ik}^{(t)}\right)^{\alpha}
+    \left(\eta_{ik}\right)^{\beta}
+    }.
+    \label{eq:aco_transition}
+\end{equation}
+where $\alpha$ and $\beta$ control the relative importance of pheromone information and heuristic information. After all ants construct their solutions, pheromone evaporation and deposition are applied. A standard update can be written as
+\begin{equation}
+\tau_{ij}^{(t+1)}
+=
+(1-\rho)\tau_{ij}^{(t)}
++
+\Delta\tau_{ij}^{(t)},
+\label{eq:aco_update}
+\end{equation}
+where $\rho\in(0,1)$ is the evaporation rate and $\Delta\tau_{ij}^{(t)}$ is the amount of pheromone deposited on edge $(i,j)$ according to the constructed solutions. For example, in elitist or max-min variants~\cite{maxmin}, pheromone may be reinforced only along the best solution of the current iteration or the best solution found so far, while being clipped to a predefined range to prevent excessive concentration.
+
+The key feature of ACO is the interaction between exploration and exploitation. At the early stage, pheromones are usually close to uniform, and the search relies more heavily on heuristic priors and stochastic sampling. As the search proceeds, high-quality edges receive more pheromone, causing ants to concentrate around promising regions. This feedback mechanism makes ACO naturally adaptive, but it can also lead to stagnation when pheromones become overly concentrated around suboptimal structures.
+
+\subsection{Neural-Guided ACO}
+\label{subsec:prelim_neural_aco}
+
+Neural-guided ACO replaces part of the handcrafted transition rule with learned information. Existing methods typically train a neural network $f_{\theta}$ to predict an edge-level score or heatmap from the input graph:
+\begin{equation}
+H = f_{\theta}(\mathcal{G}),
+\quad
+H_{ij}\in\mathbb{R},
+\quad
+(i,j)\in\mathcal{E}.
+\end{equation}
+The predicted heatmap can be used as a learned heuristic prior, a pheromone initialization, or an additional multiplicative factor in the transition rule. A generic neural-guided transition probability can be written as
+\begin{equation} p_{ij}^{(a,t)} = \frac{ \left(\tau_{ij}^{(t)}\right)^{\alpha} \left(\eta_{ij}\right)^{\beta} \left(h_{ij}\right)^{\gamma} }{ \sum_{k\in\mathcal{N}_i^{(a,t)}} \left(\tau_{ik}^{(t)}\right)^{\alpha} \left(\eta_{ik}\right)^{\beta} \left(h_{ik}\right)^{\gamma} }. \label{eq:neural_aco_transition} \end{equation}
+where $h_{ij}$ is derived from $H_{ij}$ after normalization or activation, and $\gamma$ controls the strength of the neural guidance. This form covers a broad class of neural ACO methods, including those that learn heuristic measures, initialize pheromone-related matrices, or provide edge-level priors for ant sampling~\cite{deepaco,gfacs,gtgaco,heataco}.
+
+Although this paradigm provides a simple interface between neural models and ACO, most existing methods generate $H$ only once before the search starts:
+\begin{equation}
+H = f_{\theta}(\mathcal{G}).
+\label{eq:static_guidance}
+\end{equation}
+The heatmap is therefore static during inference, while the ACO state is dynamic. In particular, the pheromone matrix $\tau^{(t)}$, the incumbent solution $s_{\mathrm{inc}}^{(t)}$, and the distribution of sampled solutions all change over iterations. Thus, a static heatmap cannot explicitly condition on whether the search is still exploratory, already concentrated around a promising region, or beginning to stagnate. This discrepancy motivates dynamic neural guidance, where the neural signal is conditioned not only on the instance but also on the current search state:
+\begin{equation}
+H^{(t)} =
+\pi_{\theta}
+\left(
+\mathcal{G},
+\tau^{(t)},
+s_{\mathrm{inc}}^{(t)}
+\right).
+\label{eq:dynamic_guidance}
+\end{equation}
+In this form, the neural policy can adjust its guidance as the search progresses, allowing the learned component to interact with the internal dynamics of ACO rather than providing a one-shot prior.
+
+\subsection{Zero-Shot Generalization Setting}
+\label{subsec:prelim_generalization}
+
+A central requirement for neural routing solvers is the ability to generalize beyond the distribution on which they are trained. We follow the zero-shot in-problem generalization setting, where a model is trained on a source distribution $\mathcal{D}_{\mathrm{train}}$ for a fixed problem type, and then directly evaluated on one or more target distributions $\mathcal{D}_{\mathrm{test}}$ without retraining, fine-tuning, or instance-specific adaptation. The source and target distributions may differ in instance scale, node distribution, benchmark origin, or other structural properties, while sharing the same underlying problem definition.
+
+Formally, let $\theta$ denote the learned parameters obtained by training on instances sampled from $\mathcal{D}_{\mathrm{train}}$. The same parameter set $\theta$ is then used for all test instances:
+\begin{equation} \theta = \arg\max_{\theta} \mathbb{E}_{\mathcal{G}\sim\mathcal{D}_{\mathrm{train}}} \left[ J(\theta;\mathcal{G}) \right], \qquad \mathcal{G}_{\mathrm{test}} \sim \mathcal{D}_{\mathrm{test}}. \end{equation}
+where $J(\theta;\mathcal{G})$ denotes the training objective. No additional optimization of $\theta$ is performed on $\mathcal{G}_{\mathrm{test}}$. This setting differs from multi-model in-distribution evaluation, where separate models may be trained and tested on matched scales or distributions.
+
+Following common practice in routing benchmarks, solution quality is measured by the optimality gap with respect to the best-known solution (BKS):
+\begin{equation} \mathrm{Gap}(\%) = \frac{ L(\hat{s}) - L(s_{\mathrm{BKS}}) }{ L(s_{\mathrm{BKS}}) } \cdot 100. \label{eq:gap} \end{equation}
+where $\hat{s}$ is the solution returned by the solver, and $s_{\mathrm{BKS}}$ is the best-known solution. In addition to effectiveness, runtime and reliability are also important under zero-shot evaluation. Runtime measures the computational cost required to produce the solution, while reliability measures whether a solver can successfully handle all instances within the specified scope without out-of-memory errors, timeouts, or severe performance breakdowns.
+
+In this paper, the same trained policy is evaluated across benchmark instances with different scales and distributions. This setting directly tests whether the learned guidance captures search rules that remain useful beyond the synthetic training distribution.

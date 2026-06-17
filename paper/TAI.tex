@@ -1,0 +1,377 @@
+\documentclass[journal]{IEEEtai}
+
+\usepackage{amsmath,amssymb,mathtools,amsthm}
+\usepackage{bm}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{subfigure}
+\usepackage[caption=false,font=footnotesize]{subfig}
+\usepackage[colorlinks,urlcolor=blue,linkcolor=blue,citecolor=blue]{hyperref}
+
+% Custom macros
+\DeclareMathOperator*{\argmin}{arg\,min}
+\newcommand{\TSP}{\textsc{TSP}}
+\newcommand{\CVRP}{\textsc{CVRP}}
+\newcommand{\ACO}{\textsc{ACO}}
+\newcommand{\DyNACO}{\textsc{DyNACO}}
+\newcommand{\DyNACS}{\textsc{DyNACS}}
+\newcommand{\MMAS}{\textsc{MMAS}}
+\newcommand{\VRP}{\textsc{VRP}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+
+% Populate these fields after acceptance, when supplied by IEEE.
+%% \jvol{XX}
+%% \jnum{XX}
+%% \paper{XXXXXXX}
+%% \pubyear{2026}
+%% \publisheddate{Month 00, 2026}
+%% \currentdate{Month 00, 2026}
+%% \doiinfo{TAI.2026.XXXXXXX}
+
+\begin{document}
+
+\title{Generalizable Dynamic Neural Ant Colony Search for Large-Scale Routing Problems}
+
+\author{Dat Thanh Tran, Van Khu Vu, and Yining Ma
+\thanks{Manuscript received Month 00, 2026; revised Month 00, 2026.}
+\thanks{Dat Thanh Tran is with the Center for AI Research, VinUniversity, Hanoi, Vietnam (e-mail: dat.tt3@vinuni.edu.vn).}
+\thanks{Van Khu Vu is with the College of Engineering and Computer Science, VinUniversity, Hanoi, Vietnam (e-mail: khu.vv@vinuni.edu.vn).}
+\thanks{Yining Ma is with the Laboratory for Information and Decision Systems, Massachusetts Institute of Technology, Cambridge, MA 02139 USA (e-mail: yiningma@mit.edu).}
+\thanks{Corresponding author: Yining Ma.}}
+
+\markboth{IEEE Transactions on Artificial Intelligence, Vol. 00, No. 0, Month 2026}%
+{Tran \MakeLowercase{\textit{et al.}}: Dynamic Neural Ant Colony Search for Large-Scale Routing}
+
+\maketitle
+
+\begin{abstract}
+Neural-guided Ant Colony Optimization (ACO) suffers from a search-dynamics mismatch: policies are typically trained to generate static priors, such as heatmaps, yet deployed to guide iterative, long-horizon search processes whose pheromone distributions and incumbent solutions evolve over time. This mismatch limits not only search adaptivity, but also zero-shot generalization, since a fixed neural prior learned from one training distribution may become unreliable on benchmark instances with different scales and structures. We first present \DyNACO{}, a search-dynamics-aligned neural ACO model that periodically observes the pheromone distribution and incumbent solution, and updates edge-level guidance throughout the search trajectory. Building on \DyNACO{}, we introduce \DyNACS{} (Dynamic Neural Ant Colony Search), which addresses the search-behavior mismatch of single-prior neural ACO through trajectory-diverse guidance. \DyNACS{} parameterizes dynamic guidance as a mixture of behavior-conditioned trajectory distributions, allowing different ant groups to express complementary search behaviors within one shared pheromone process. To make the framework tractable at scale, we pair the policy with a perturbation-based ACO backend and a scope-restricted refinement mechanism that jointly ensure efficiency, local convergence, and stable credit assignment. Under a generalization-focused protocol, a single model trained only on 1K-node instances achieves $1.98\%$ average gap on \TSP{} and $2.80\%$ on \CVRP{} across benchmark datasets, outperforming all state-of-the-art neural baselines under matched evaluation. On \TSP{}, \DyNACS{} scales to 100,000-node instances and often reduces total runtime compared with the unguided solver; on \CVRP{}, it consistently improves the unguided baseline with less than $1\%$ neural overhead. These results show that neural guidance can generalize beyond synthetic training distributions when it adapts to the dynamics and useful-diversity requirements of iterative population-based search.
+\end{abstract}
+
+
+\begin{IEEEImpStatement}
+Large-scale routing problems arise in logistics, transportation, and network design, where practical instances often differ substantially from the synthetic distributions used to train neural solvers. \DyNACS{} shows how a compact neural policy can improve an established ant colony optimizer without replacing its reliable search machinery. By building on \DyNACO{} and adapting guidance to the evolving pheromone distribution and incumbent solution, the method remains effective across benchmark instances with different scales and structures, using a single model trained only on 1K-node problems. Its trajectory-diverse guidance further improves robustness by maintaining complementary search behaviors, while the perturbation-based backend and scope-restricted refinement make training and inference feasible at scales where dense neural solvers are impractical. The framework scales to 100,000-node \TSP{} instances, achieves strong zero-shot performance on both \TSP{} and \CVRP{}, and introduces negligible neural overhead for capacitated vehicle routing. Beyond routing, this work demonstrates a general principle for learning-guided optimization: neural components should interact with the internal dynamics of iterative solvers, rather than provide one-shot predictions detached from the search process.
+\end{IEEEImpStatement}
+
+
+\begin{IEEEkeywords}
+Ant colony optimization, combinatorial optimization, learning-guided optimization, neural combinatorial optimization, reinforcement learning.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\input{sections/1.introduction}
+
+% ======================================================================
+% 2. Related Work
+% ======================================================================
+\section{Related Work}
+\label{sec:related_work}
+\input{sections/2.related_work}
+
+% ======================================================================
+% 2.5. Preliminaries
+% ======================================================================
+\section{Preliminaries}
+\label{sec:prelim}
+\input{sections/2.5.preliminaries}
+
+% ======================================================================
+% 3. Dynamic Neural ACO
+% ======================================================================
+\section{Dynamic Neural ACO}
+\label{sec:method}
+\input{sections/3.methodology}
+
+% ======================================================================
+% 5. Experiments
+% ======================================================================
+\section{Experiments}
+\label{sec:experiments}
+\input{sections/4.experiments}
+
+% ======================================================================
+% 6. Analysis
+% ======================================================================
+\section{Analysis}
+\label{sec:analysis_main}
+
+\subsection{Complexity Analysis}
+\label{sec:complexity}
+
+The computational cost separates into sparse neural inference and perturbation-based ACO operations. The GNN encoder runs once per outer step on the $K$-NN graph, giving $\mathcal{O}(H L n K d)$ neural cost for $H$ guidance updates, $L$ layers, $n$ nodes, $K$ candidates, and hidden dimension $d$. During ACO search, each of the $m$ ants performs at most $M$ stochastic interventions and SRR scans only the affected candidate neighborhoods, giving $\mathcal{O}(T m M K)$ sampling and local-projection cost over $T=H S$ inner iterations. The learned state and replay buffers are also sparse, requiring $\mathcal{O}(nK)$ memory for pheromone snapshots and edge features rather than $\mathcal{O}(n^2)$ dense heatmaps. The trajectory-diverse extension reuses the same encoder and adds only lightweight behavior-conditioned maps. This complexity profile explains why \DyNACS{} can keep the neural component active during large-scale search instead of using it only as an initialization heuristic.
+
+\subsection{Sensitivity and Scalability Summary}
+\label{sec:sensitivity_summary}
+
+The method is stable under moderate changes to its search granularity and sparse-neighborhood parameters. Increasing the candidate-graph size $K$ improves solution quality with the expected near-linear runtime trade-off, while perturbation length $M$ has a problem-dependent optimum because overly long interventions can disrupt the incumbent basin and increase refinement work. Varying the outer guidance updates $H$ and inner ACO steps $S$ while keeping the total iteration budget fixed produces small differences, supporting the fixed-duration semi-MDP abstraction. Appendix~\ref{app:setup} reports the detailed hyperparameter and sensitivity tables.
+
+
+\subsection{Scalability of Other Neural Baselines}
+\label{sec:related_scalability}
+
+End-to-end constructive policies~\cite{attentionmodel,pomo,bq,lehd, invit, sigd} are typically trained on small-scale instances ($N{=}50$ or $100$) and rely on quadratic attention complexity $O(N^2)$ in the encoder.
+When applied to large-scale instances ($N{\geq}1{,}000$), these models suffer from out-of-distribution degradation, as the learned representations do not transfer across scales, compounded by memory exhaustion from the $O(N^2)$ encoder.
+The ``OOM'' entries in Table~\ref{tab:exp_proposed} reflect this inherent limitation.
+Prior neural-ACO methods have the same dense bottleneck in a different form: they materialize heatmap or pheromone-prior matrices in $\mathbb{R}^{N\times N}$ and are typically evaluated only up to $N{\leq}1000$, so scaling the full ACO loop induces an $O(N^2 m T)$ memory/computation burden across ants and iterations.
+
+\smallskip\noindent\textbf{Decomposition attempts.}
+Recent methods address this through divide-and-conquer (GLOP~\cite{glop}, H-TSP~\cite{htsp}) or hierarchical construction (SIL~\cite{sil}, LEHD~\cite{lehd}).
+However, decomposition methods depend on global context embeddings that degrade at extreme scales, and hierarchical methods incur prohibitive runtimes (SIL PRC$_{1000}$: 42h at TSP-100K).
+
+\smallskip\noindent\textbf{Training efficiency.}
+\DyNACS{} operates on fixed-size $K$-NN neighborhoods ($K{=}32$), so the GNN processes each neighborhood identically regardless of $N$.
+GPU memory is proportional to $n \cdot K$, not $n^2$, and per-ant sampling cost is $O(M \cdot K)$, independent of problem size.
+At \TSP{}-100K, \DyNACS{} training completed in roughly 4 hours, while LEHD \cite{lehd} for example required 2.7 days.
+
+% ======================================================================
+% Conclusion
+% ======================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+This work introduces \DyNACS{}, a dynamic neural ant colony search framework built in two layers. The first layer, \DyNACO{}, formalizes the neural-ACO interaction as a semi-MDP and uses a lightweight meta-policy to inject dynamic guidance throughout the search trajectory. The second layer extends this dynamic policy into trajectory-diverse guidance, maintaining complementary behavior-conditioned trajectory distributions within one shared pheromone process. Together with scope-restricted refinement, these mechanisms preserve stable policy-reward credit assignment while scaling to 100K-node instances. Extensive results demonstrate state-of-the-art performance among neural methods on TSP and CVRP across all evaluated scales, with up to 59\% relative gap reduction over the unguided ACO baseline (TSP-10K, I$_{10000}$), and a 23--33\% runtime reduction on TSP\@. Trained only on uniform synthetic 1K instances, \DyNACS{} generalizes zero-shot to real-world benchmarks, surpassing all neural baselines on both TSPLIB and CVRPlib and outperforming the classical solver HGS on CVRPlib.
+
+One limitation is that the search-dynamics abstraction granularity $(H,S)$ and the $K$-NN candidate graph require problem-specific configuration, and models are currently trained at a fixed scale.
+Future work includes: (1)~adaptive candidate selection to address the fixed-$K$ reachability constraint; (2)~adaptive search-dynamics abstraction, e.g., changing the macro-action duration $S$ based on stagnation while preserving the semi-MDP abstraction; (3)~curriculum or multi-scale training for improved cross-scale generalization, which must handle feature-scale discrepancies and possible gradient conflicts across instance sizes and may require meta-learning or scale-normalized attention designs; and (4)~extending dynamic neural guidance to other combinatorial domains and meta-heuristic families.
+
+% ======================================================================
+% Appendix
+% ======================================================================
+\appendix
+\section{Details of Algorithms and Hyperparameters}
+\label{app:setup}
+
+This appendix collects implementation details that support the method sections: the routing backend instantiations, the local optimality property of SRR, and the default hyperparameters and sensitivity tables used in the experiments.
+
+\subsection{Routing Backend Instantiation}
+\label{app:backend}
+
+The perturbation and local-projection interface requires feasibility handling and refinement to remain local to the sampled intervention region, so each ant can receive a post-refinement reward without running full-scale local search. For \TSP{}, we follow~\cite{faco}: ants perform at most $M$ relocation steps starting from the incumbent $b$, with node selection governed by the shaped kernel $p^\theta$. Each ant touches at most $\mathcal{O}(M \cdot K)$ edges, where $M \ll N$ and $K{=}32$, independent of problem size.
+
+\subsection{CVRP Feasibility Interface}
+\label{app:cvrp}
+
+For \CVRP{}, the perturbation backend must preserve route capacity while still allowing local changes around the policy-selected intervention. We maintain an explicit multi-route structure using linked lists, where each route $r$ tracks its current load $L_r$. Transitions to node $j$ are masked if $\mathrm{Load}+d_j>Q$. Same-route reordering is always feasible because it preserves load; cross-route insertion is feasible only if $L_{r_u}+d_v\le Q$; and depot targets trigger route splits and are always feasible. The new-edge counter tracks cross-route edges specifically, ensuring sufficient inter-route perturbation for effective local search. The policy follows the DeepACO feature convention for static node inputs, including demand/capacity features, while dynamic edge-state features are derived from pheromone and incumbent information.
+
+The CVRP local projection phase applies four capacity-preserving operators restricted to the checklist of perturbed nodes: intra-route 2-opt, inter-route relocate, inter-route swap, and 2-opt* cross-route segment exchange. Each operator only evaluates moves involving checklist nodes and $K$-nearest candidate neighbors, and all moves must preserve route capacity. We use don't-look-bit optimization so that nodes are deactivated when no improving move is found and reactivated only when a neighbor participates in an accepted move.
+
+\subsection{SRR Local Optimality}
+\label{app:credit}
+
+Let $\mathcal{B}^*$ be a 2-opt optimal incumbent. A policy perturbation replaces edges $E_{\mathrm{rem}}$ with $E_{\mathrm{add}}$, yielding $\mathcal{B}'$. Since only the neighborhood of $E_{\mathrm{add}}$ can become suboptimal, SRR initializes a checklist with the endpoints of the added edges and propagates improving moves outward until no checked node admits improvement. If SRR terminates with an empty checklist, the resulting tour $\mathcal{B}''$ is 2-opt optimal under the candidate-graph move set.
+
+\begin{proof}
+Let $\mathcal{C}$ be the set of edges modified by the perturbation or SRR\@. All edges outside $\mathcal{C}$ are unchanged from the 2-opt optimal incumbent $\mathcal{B}^*$, so no improving 2-opt move can use only those edges. SRR starts from all perturbed endpoints and reactivates affected nodes after each accepted move; hence an empty checklist certifies that no candidate-graph 2-opt move involving any edge in $\mathcal{C}$ is improving. Cross-boundary moves also involve an edge in $\mathcal{C}$ and are therefore covered. Thus no improving candidate-graph 2-opt move remains in $\mathcal{B}''$.
+\end{proof}
+
+\subsection{Hyperparameters}
+\label{app:repro}
+
+\begin{table}[t]
+\centering
+\caption{Default hyperparameters for \DyNACS{}.}
+\label{tab:hyperparams}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}llc@{}}
+\toprule
+Category & Parameter & Value \\
+\midrule
+\multirow{4}{*}{ACO Backend}
+    & Ants $m$ & 100 \\
+    & Outer steps $H$ & 10 \\
+    & Inner steps $S$ & 100 \\
+    & New-edge steps $M$ & 12 \\
+\midrule
+\multirow{3}{*}{Pheromone}
+    & Evaporation $\rho$ (TSP / CVRP) & 0.1 / 0.5 \\
+    & $\tau_{\max}$ & 1.0 \\
+    & $\tau_{\min}$ & $1/K$ \\
+\midrule
+\multirow{2}{*}{Graph}
+    & $K$-NN candidates & 32 \\
+    & Backup neighbors & 64 \\
+\midrule
+\multirow{5}{*}{PPO Training}
+    & Learning rate & $5 \times 10^{-6}$ \\
+    & PPO clip $\epsilon$ & 0.1 \\
+    & PPO epochs $K_{\text{PPO}}$ & 4 \\
+    & Optimizer & AdamW + cosine \\
+    & Guidance weight $\gamma$ (train) & 1.0 \\
+\midrule
+\multirow{3}{*}{Architecture}
+    & GNN layers $L$ & 12 \\
+    & Hidden dimension $d$ & 32 \\
+    & MLP decoder layers & 3 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+We use a 12-layer GNN encoder~\cite{deepaco} with residual connections and batch normalization; the decoder is a 3-layer MLP projecting edge embeddings to scalar log-priors. With the three-channel edge representation, the policy has 67,265 parameters, compared with 67,201 parameters for the corresponding static-input variant. The parameter count is constant across problem scales because the architecture operates on local $K$-NN neighborhoods.
+
+\subsection{State-Aware Edge Features}
+\label{app:features}
+
+For static node features, we follow~\cite{deepaco}, using node coordinates for \TSP{} and demand/capacity for \CVRP{}. The dynamic edge features are recomputed at every outer step from the current pheromone field and incumbent solution. With stabilized pheromone bounds $\tau_{\max}=1$ and $\tau_{\min}=1/K$, the representation has three edge channels and $\mathcal{O}(nK)$ size for fixed $K$.
+
+\begin{table}[t]
+\centering
+\caption{Dynamic edge features used by the state-aware policy.}
+\label{tab:state-features}
+\small
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.95}
+\begin{tabular*}{\columnwidth}{@{}c@{\extracolsep{\fill}}p{0.39\columnwidth}p{0.42\columnwidth}@{}}
+\toprule
+Feature & Definition & Meaning \\
+\midrule
+$f_1$ & $d_{ij}/\bar d_i$ & Scale-normalized distance. \\
+$f_2$ & $\log(\tau_{ij}/\bar\tau_i)$ & Edge pheromone relative to other candidates of $i$. \\
+$f_3$ & $\mathbf{1}[j\notin\{\mathrm{succ}_b(i),\mathrm{pred}_b(i)\}]$ & Edge that introduces new tour structure. \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\subsection{Detailed Sensitivity and Memory Tables}
+\label{extended_ablation}
+
+Table~\ref{tab:ablation-mmas-app} examines pheromone bound strategies. Standard \MMAS{} couples bounds to solution cost, creating non-stationary dynamics. Our stabilized variant ($\tau_{\max}{=}1$, $\tau_{\min}{=}1/K$) yields scale-invariant state representations and reduced training variance.
+
+\begin{table}[t]
+\centering
+\caption{Environment stabilization. We report results without inference strategies.}
+\label{tab:ablation-mmas-app}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcc@{}}
+\toprule
+Bound Strategy & Obj. & Gap (\%)\\
+\midrule
+ACO (Standard \MMAS{}) & 51.8318 & 1.68  \\
+ACO (Stabilized) & 52.0747 & 2.16 \\
+\DyNACO{} (Standard \MMAS{}) & 51.7022 & 1.43 \\
+\DyNACO{} (Stabilized) & 51.6795 & 1.38 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\begin{table*}[t]
+\centering
+\caption{Sensitivity to outer guidance updates $H$ and inner ACO steps $S$.}
+\label{tab:hs-sensitivity-app}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}llcccccccc@{}}
+\toprule
+$H$ & $S$ & TSP-1K Obj. & Time & TSP-5K & Time & CVRP-1K & Time & CVRP-5K & Time \\
+\midrule
+5 & 200 & 23.22 & 0.32 & 51.59 & 0.75 & 36.62 & 1.34 & \textbf{96.16} & 3.07 \\
+10 & 100 & 23.23 & \textbf{0.32} & 51.63 & \textbf{0.76} & \textbf{36.28} & \textbf{1.27} & 96.81 & \textbf{2.73} \\
+20 & 50 & \textbf{23.21} & 0.42 & \textbf{51.56} & 0.87 & 36.49 & 1.33 & 97.17 & 2.82 \\
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+Table~\ref{tab:memory-scaling} reports peak GPU memory usage for representative constructive and neural-ACO baselines. Methods based on dense attention or dense heatmaps scale quadratically in the number of nodes and become infeasible at larger scales. \DyNACO{} instead operates on a fixed-size sparse candidate graph and uses perturbation-based sampling, so memory scales approximately linearly with $n$ for fixed $K$.
+
+\begin{table}[t]
+\centering
+\caption{Peak GPU memory usage (GB) on TSP instances. OOM: out of memory.}
+\label{tab:memory-scaling}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lccccc@{}}
+\toprule
+Method & 1K & 5K & 10K & 50K & 100K \\
+\midrule
+POMO & 0.10 & 2.54 & 10.11 & OOM & OOM \\
+SIGD & 0.04 & 0.95 & 3.76 & OOM & OOM \\
+LEHD & 0.10 & 2.27 & 9.01 & OOM & OOM \\
+DeepACO & 0.14 & 2.11 & 8.31 & OOM & OOM \\
+\DyNACO{} & \textbf{0.08} & \textbf{0.18} & \textbf{0.35} & 1.57 & 3.11 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+Table~\ref{tab:k-sensitivity-app} and Table~\ref{tab:m-sensitivity-app} evaluate the candidate-graph size $K$ and perturbation length $M$.
+
+\begin{table}[t]
+\centering
+\caption{Sensitivity to candidate-graph size $K$.}
+\label{tab:k-sensitivity-app}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
+\toprule
+$K$ & TSP-5K & Time & CVRP-5K & Time \\
+\midrule
+32 & 51.63 & \textbf{0.76} & 96.81 & \textbf{2.73} \\
+48 & 51.49 & 0.98 & 95.83 & 3.51 \\
+64 & \textbf{51.47} & 1.17 & \textbf{95.08} & 4.42 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Sensitivity to perturbation length $M$.}
+\label{tab:m-sensitivity-app}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
+\toprule
+$M$ & TSP-5K & Time & CVRP-5K & Time \\
+\midrule
+8 & \textbf{51.62} & \textbf{0.73} & 97.13 & \textbf{2.37} \\
+12 & 51.63 & 0.76 & 96.81 & 2.73 \\
+16 & 51.77 & 0.82 & \textbf{96.48} & 3.24 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\DyNACO{} adds dynamic state features to a compact GNN policy. The peak GPU-memory overhead of these additional features remains small even at 100K nodes, as shown in Table~\ref{tab:feature-memory-app}.
+
+\begin{table}[t]
+\centering
+\caption{Peak GPU memory (GB) for static and dynamic policy inputs.}
+\label{tab:feature-memory-app}
+\small
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}llcc@{}}
+\toprule
+Problem & Scale & Static (GB) & Dynamic (GB) \\
+\midrule
+TSP & 10K & 0.286 & 0.293 \\
+TSP & 100K & 2.524 & 2.584 \\
+CVRP & 10K & 0.286 & 0.292 \\
+CVRP & 100K & 2.513 & 2.573 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+% ======================================================================
+% Acknowledgments
+% ======================================================================
+% \section*{Acknowledgments}
+% Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras vitae fermentum est. Donec lobortis facilisis augue, id commodo libero vulputate vel. Cras dictum velit et lectus pellentesque vulputate. 
+
+% ======================================================================
+
+\section*{Data and Code Availability}
+The source code, datasets, and pretrained model checkpoints associated with this work are publicly available at \url{https://doi.org/10.5281/zenodo.20502184}. The implementation repository is available at \url{https://github.com/shoraaa/DyNACO}.
+
+% Add an acknowledgment section here when funding or contributor information is available.
+% \section*{Acknowledgment}
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+% Optional author biographies may be added using IEEEbiography environments.
+
+\end{document}

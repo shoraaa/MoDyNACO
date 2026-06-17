@@ -1063,17 +1063,13 @@ def _copy_single_head_weights_into_multi_head(model: Net, checkpoint_path: str, 
     with torch.no_grad():
         if isinstance(model, MultiHeadNet):
             par = model.par_net_heu
-            par.input.weight.copy_(state_dict[f"{single_prefix}0.weight"])
-            par.input.bias.copy_(state_dict[f"{single_prefix}0.bias"])
-            par.hidden[0].weight.copy_(state_dict[f"{single_prefix}1.weight"])
-            par.hidden[0].bias.copy_(state_dict[f"{single_prefix}1.bias"])
-            par.output.weight.copy_(state_dict[f"{single_prefix}2.weight"])
-            par.output.bias.copy_(state_dict[f"{single_prefix}2.bias"])
-            for gamma, beta in zip(par.gamma, par.beta):
-                gamma.weight.zero_()
-                gamma.bias.zero_()
-                beta.weight.zero_()
-                beta.bias.zero_()
+            par.hidden[0].weight.copy_(state_dict[f"{single_prefix}0.weight"])
+            par.hidden[0].bias.copy_(state_dict[f"{single_prefix}0.bias"])
+            par.hidden[1].weight.copy_(state_dict[f"{single_prefix}1.weight"])
+            par.hidden[1].bias.copy_(state_dict[f"{single_prefix}1.bias"])
+            par.out.base.weight.copy_(state_dict[f"{single_prefix}2.weight"])
+            par.out.base.bias.copy_(state_dict[f"{single_prefix}2.bias"])
+            par.out.lora_B.zero_()
         else:
             for decoder in model.par_net_heu:
                 decoder.lins[0].weight.copy_(state_dict[f"{single_prefix}0.weight"])
@@ -2556,7 +2552,16 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--num_heads", type=int, default=1,
                         help="Number of prediction heads; values >1 enable multi-head training")
     parser.add_argument("--head_zdim", type=int, default=16,
-                        help="Latent code width for each multi-head decoder head")
+                        help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
+    parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
+                        choices=["lora", "lowrank"], default="lora",
+                        help="Multi-head decoder type: true LoRA final layer, or legacy head-code low-rank residual")
+    parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
+                        help="Rank of each head-specific LoRA adapter in the multi-head decoder")
+    parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
+                        help="LoRA scaling alpha; the adapter scale is alpha / lora_rank")
+    parser.add_argument("--freeze_lora_base", "--freeze-lora-base", dest="freeze_lora_base", action="store_true",
+                        help="Freeze the shared final decoder linear layer and train only LoRA adapters there")
     parser.add_argument("--log_best_head", "--log-best-head", dest="log_best_head", action="store_true",
                         help="Log expensive multi-head diagnostics, including JS diversity, to WandB")
     parser.add_argument("--loss_js", "--loss-js", dest="loss_js", type=float, default=0.0,
@@ -2720,6 +2725,8 @@ def build_model_name(args: argparse.Namespace) -> str:
         name += f"_{args.edge_feature_set}"
     if _multi_head_enabled(args):
         name += f"_mh{args.num_heads}_polynet"
+        if getattr(args, "head_decoder_type", "lora") == "lora":
+            name += f"_lora_r{int(getattr(args, 'lora_rank', 8))}"
         if getattr(args, "head_ant_weights", None):
             alloc = str(args.head_ant_weights).replace(",", "-").replace(" ", "")
             name += f"_ha{alloc}"
@@ -2906,27 +2913,28 @@ def main(argv: Optional[List[str]] = None):
 
     args = _parse_base_args(args_list)
 
+    def _cli_has_flag(key: str) -> bool:
+        flag = "--" + key
+        flag_hyphen = "--" + key.replace("_", "-")
+        return any(
+            token == flag
+            or token == flag_hyphen
+            or token.startswith(f"{flag}=")
+            or token.startswith(f"{flag_hyphen}=")
+            for token in args_list
+        )
+
     # Load configuration from YAML if provided
+    yaml_config_keys = set()
     if hasattr(args, 'config') and args.config:
         print(f"Loading configuration from YAML: {args.config}")
         with open(args.config) as f:
             yaml_config = yaml.safe_load(f) or {}
-
-        def _cli_has_flag(key: str) -> bool:
-            flag = "--" + key
-            flag_hyphen = "--" + key.replace("_", "-")
-            return any(
-                token == flag
-                or token == flag_hyphen
-                or token.startswith(f"{flag}=")
-                or token.startswith(f"{flag_hyphen}=")
-                for token in args_list
-            )
+        yaml_config_keys = set(yaml_config.keys())
 
         legacy_ignored_config_keys = {
             "head_deploy",
             "head_index",
-            "head_decoder_type",
             "head_training",
             "head_gamma",
             "head_score_mode",
@@ -2950,6 +2958,13 @@ def main(argv: Optional[List[str]] = None):
 
     if args.problem is None:
         raise ValueError("Problem must be specified via --problem or the YAML config")
+    if (
+        _multi_head_enabled(args)
+        and getattr(args, "head_decoder_type", "lora") == "lowrank"
+        and not _cli_has_flag("lora_rank")
+        and "lora_rank" not in yaml_config_keys
+    ):
+        args.lora_rank = 16
 
     # Load configuration from checkpoint if resuming with a specific path
     if args.resume and args.resume != "auto" and os.path.isfile(args.resume):
@@ -3086,9 +3101,16 @@ def main(argv: Optional[List[str]] = None):
     model_kwargs = {}
     if _multi_head_enabled(args):
         args.multi_head = True
-        model_kwargs.update(num_heads=args.num_heads, head_zdim=args.head_zdim)
+        model_kwargs.update(
+            num_heads=args.num_heads,
+            head_zdim=args.head_zdim,
+            rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            freeze_lora_base=args.freeze_lora_base,
+            head_decoder_type=args.head_decoder_type,
+        )
         print(
-            f"Using PolyNet multi-head decoder: heads={args.num_heads}, ant-group routing"
+            f"Using {args.head_decoder_type} multi-head decoder: heads={args.num_heads}, rank={args.lora_rank}, ant-group routing"
         )
 
     net_model = model_cls(
@@ -3162,6 +3184,49 @@ def main(argv: Optional[List[str]] = None):
             
             # Infer input feature sizes from checkpoint model weights for backward compatibility
             state_dict = checkpoint["model_state_dict"]
+            if (
+                _multi_head_enabled(args)
+                and "par_net_heu.head_proj.weight" in state_dict
+                and not _cli_has_flag("head_decoder_type")
+            ):
+                args.head_decoder_type = "lowrank"
+                model_kwargs.update(head_decoder_type="lowrank")
+                args.lora_rank = int(state_dict["par_net_heu.head_proj.weight"].shape[0])
+                model_kwargs.update(rank=args.lora_rank)
+                if "head_codes" in state_dict:
+                    args.head_zdim = int(state_dict["head_codes"].shape[1])
+                    model_kwargs.update(head_zdim=args.head_zdim)
+                print("Checkpoint uses legacy head-code decoder; recreating model with head_decoder_type=lowrank")
+                net_model = model_cls(
+                    feats=feats,
+                    edge_feats=edge_feats,
+                    logit_net=not args.no_logit_net,
+                    grad_checkpointing=getattr(args, 'grad_checkpointing', False),
+                    **model_kwargs,
+                ).to(args.device)
+                optimizer = torch.optim.AdamW(net_model.parameters(), lr=args.lr)
+            if _multi_head_enabled(args) and "par_net_heu.out.lora_A" in state_dict:
+                ckpt_lora_a = state_dict["par_net_heu.out.lora_A"]
+                ckpt_heads = int(ckpt_lora_a.shape[0])
+                ckpt_rank = int(ckpt_lora_a.shape[1])
+                if ckpt_heads != args.num_heads or ckpt_rank != args.lora_rank:
+                    print(
+                        f"Checkpoint LoRA shape heads={ckpt_heads}, rank={ckpt_rank} "
+                        f"differs from current heads={args.num_heads}, rank={args.lora_rank}. "
+                        "Recreating model..."
+                    )
+                    args.num_heads = ckpt_heads
+                    args.lora_rank = ckpt_rank
+                    model_kwargs.update(num_heads=ckpt_heads, rank=ckpt_rank)
+                    net_model = model_cls(
+                        feats=feats,
+                        edge_feats=edge_feats,
+                        logit_net=not args.no_logit_net,
+                        grad_checkpointing=getattr(args, 'grad_checkpointing', False),
+                        **model_kwargs,
+                    ).to(args.device)
+                    optimizer = torch.optim.AdamW(net_model.parameters(), lr=args.lr)
+
             if "emb_net.v_lin0.weight" in state_dict:
                 ckpt_feats = state_dict["emb_net.v_lin0.weight"].shape[1]
                 if ckpt_feats != feats:
@@ -3192,8 +3257,14 @@ def main(argv: Optional[List[str]] = None):
                     print(f"Warning: Checkpoint edge_feats={ckpt_edge_feats} differs from expected=6. Model may not load correctly.")
             
             # Load model state
-            net_model.load_state_dict(state_dict)
+            load_result = net.load_multihead_state_dict(net_model, state_dict)
             print("Loaded model state")
+            if getattr(load_result, "missing_keys", None) or getattr(load_result, "unexpected_keys", None):
+                print(
+                    "Checkpoint loaded with architecture migration: "
+                    f"missing={list(load_result.missing_keys)}, "
+                    f"unexpected={list(load_result.unexpected_keys)}"
+                )
             if net.repair_dead_lowrank_head_adapter(net_model):
                 print(
                     "Reinitialized dead low-rank head adapter from old checkpoint; "

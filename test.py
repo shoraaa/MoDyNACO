@@ -608,7 +608,16 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--num_heads", type=int, default=1,
                         help="Number of prediction heads; values >1 enable multi-head model loading")
     parser.add_argument("--head_zdim", type=int, default=16,
-                        help="Latent code width for each multi-head decoder head")
+                        help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
+    parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
+                        choices=["lora", "lowrank"], default="lora",
+                        help="Multi-head decoder type: true LoRA final layer, or legacy head-code low-rank residual")
+    parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
+                        help="Rank of each head-specific LoRA adapter in the multi-head decoder")
+    parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
+                        help="LoRA scaling alpha; the adapter scale is alpha / lora_rank")
+    parser.add_argument("--freeze_lora_base", "--freeze-lora-base", dest="freeze_lora_base", action="store_true",
+                        help="Freeze the shared final decoder linear layer and train only LoRA adapters there")
     parser.add_argument("--head_ant_weights", type=str, default=None,
                         help="Comma-delimited ant allocation weights/counts for PolyNet ant groups, e.g. 50,20,15,15")
     parser.add_argument("--head_router", choices=["static", "ema"], default="static",
@@ -699,9 +708,11 @@ def main(argv: Optional[List[str]] = None):
 
     args = parser.parse_args(args_list)
 
+    yaml_config_keys = set()
     if args.config:
         with open(args.config, "r", encoding="utf-8") as f:
             yaml_config = yaml.safe_load(f) or {}
+        yaml_config_keys = set(yaml_config.keys())
 
         def _cli_has_flag(key: str) -> bool:
             flag = "--" + key
@@ -717,7 +728,6 @@ def main(argv: Optional[List[str]] = None):
         legacy_ignored_config_keys = {
             "head_deploy",
             "head_index",
-            "head_decoder_type",
             "head_training",
             "head_gamma",
             "head_score_mode",
@@ -735,6 +745,14 @@ def main(argv: Optional[List[str]] = None):
                 continue
             if hasattr(args, key) and not _cli_has_flag(key):
                 setattr(args, key, value)
+
+    if (
+        bool(getattr(args, "multi_head", False) or getattr(args, "num_heads", 1) > 1)
+        and getattr(args, "head_decoder_type", "lora") == "lowrank"
+        and not _cli_has_flag("lora_rank")
+        and "lora_rank" not in yaml_config_keys
+    ):
+        args.lora_rank = 16
 
 
 
@@ -793,7 +811,7 @@ def main(argv: Optional[List[str]] = None):
             "timed", "verify", "baseline", "baseline_runs", "baseline_time_limit", 
             "threads", "seed", "save_dir", "wandb_project", "wandb_entity", "no_wandb", "warmup", "no_baseline",
             "val_size",
-            "head_deploy", "head_index", "head_decoder_type", "head_training",
+            "head_deploy", "head_index", "head_training",
             "head_gamma", "head_score_mode", "head_topq", "head_diversity_coef",
             "head_complement_coef", "head_anchor_checkpoint", "head_anchor_coef",
             "head_router_gamma", "head_router_score_mode",
@@ -1128,21 +1146,58 @@ def main(argv: Optional[List[str]] = None):
                 args.num_heads = int(config.get("num_heads", args.num_heads))
             if "--head_zdim" not in sys.argv and "--head-zdim" not in sys.argv:
                 args.head_zdim = int(config.get("head_zdim", args.head_zdim))
+            if "--head_decoder_type" not in sys.argv and "--head-decoder-type" not in sys.argv:
+                args.head_decoder_type = config.get("head_decoder_type", args.head_decoder_type)
+            if "--lora_rank" not in sys.argv and "--lora-rank" not in sys.argv:
+                args.lora_rank = int(config.get("lora_rank", args.lora_rank))
+            if "--lora_alpha" not in sys.argv and "--lora-alpha" not in sys.argv:
+                args.lora_alpha = float(config.get("lora_alpha", args.lora_alpha))
+            if "--freeze_lora_base" not in sys.argv and "--freeze-lora-base" not in sys.argv:
+                args.freeze_lora_base = bool(config.get("freeze_lora_base", args.freeze_lora_base))
             if "--head_ant_weights" not in sys.argv and "--head-ant-weights" not in sys.argv:
                 args.head_ant_weights = config.get("head_ant_weights", args.head_ant_weights)
             if "--head_input_transform" not in sys.argv and "--head-input-transform" not in sys.argv:
                 args.head_input_transform = config.get("head_input_transform", args.head_input_transform)
+        if multi_head and "par_net_heu.out.lora_A" in state_dict:
+            lora_a = state_dict["par_net_heu.out.lora_A"]
+            if "--num_heads" not in sys.argv and "--num-heads" not in sys.argv:
+                args.num_heads = int(lora_a.shape[0])
+            if "--lora_rank" not in sys.argv and "--lora-rank" not in sys.argv:
+                args.lora_rank = int(lora_a.shape[1])
+        if (
+            multi_head
+            and "par_net_heu.head_proj.weight" in state_dict
+            and "--head_decoder_type" not in sys.argv
+            and "--head-decoder-type" not in sys.argv
+        ):
+            args.head_decoder_type = "lowrank"
+            args.lora_rank = int(state_dict["par_net_heu.head_proj.weight"].shape[0])
+            if "head_codes" in state_dict:
+                args.head_zdim = int(state_dict["head_codes"].shape[1])
         model_cls = MultiHeadNet if multi_head else Net
         model_kwargs = {}
         if multi_head:
-            model_kwargs.update(num_heads=args.num_heads, head_zdim=args.head_zdim)
+            model_kwargs.update(
+                num_heads=args.num_heads,
+                head_zdim=args.head_zdim,
+                rank=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                freeze_lora_base=args.freeze_lora_base,
+                head_decoder_type=args.head_decoder_type,
+            )
         model = model_cls(
             feats=feats,
             edge_feats=edge_feats,
             logit_net=not args.no_logit_net,
             **model_kwargs,
         ).to(args.device)
-        model.load_state_dict(state_dict)
+        load_result = net.load_multihead_state_dict(model, state_dict)
+        if getattr(load_result, "missing_keys", None) or getattr(load_result, "unexpected_keys", None):
+            print(
+                "Checkpoint loaded with architecture migration: "
+                f"missing={list(load_result.missing_keys)}, "
+                f"unexpected={list(load_result.unexpected_keys)}"
+            )
         if net.lowrank_head_adapter_is_dead(model):
             print(
                 "Warning: checkpoint has a dead low-rank head adapter; "
@@ -3035,13 +3090,32 @@ def main(argv: Optional[List[str]] = None):
             means = np.nanmean(arr, axis=0)
         return [None if not np.isfinite(v) else float(v) for v in means]
 
+    def _metric_vector_width(payloads, key):
+        for payload in payloads:
+            for row in (payload or {}).get(key, []) or []:
+                if isinstance(row, (list, tuple)) and row:
+                    return len(row)
+        return 0
+
     def _guidance_diagnostics(prefix):
         payloads = results.get(f"{prefix}_metrics_payload", [])
         out = {}
-        for key in ["enhance", "rebellion", "suppression", "head_logit_corr", "head_topk_overlap"]:
+        for key in [
+            "enhance",
+            "rebellion",
+            "suppression",
+            "head_logit_corr",
+            "head_topk_overlap",
+            "head_router_entropy",
+            "head_router_min_ants",
+            "head_router_max_ants",
+            "head_router_utility_spread",
+        ]:
             vals = _flatten_metric_values(payloads, key)
             out[key] = float(vals.mean()) if vals.size else None
         n_heads = _head_count(payloads)
+        if not n_heads:
+            n_heads = _metric_vector_width(payloads, "head_router_counts")
         if n_heads:
             out["num_heads"] = int(n_heads)
             out["head_best_fraction"] = _head_fraction(payloads, "head_best", n_heads)
@@ -3053,6 +3127,8 @@ def main(argv: Optional[List[str]] = None):
             out["head_enhance"] = _head_vector_mean(payloads, "head_enhance", n_heads)
             out["head_rebellion"] = _head_vector_mean(payloads, "head_rebellion", n_heads)
             out["head_suppression"] = _head_vector_mean(payloads, "head_suppression", n_heads)
+            out["head_router_mean_counts"] = _head_vector_mean(payloads, "head_router_counts", n_heads)
+            out["head_router_mean_utility"] = _head_vector_mean(payloads, "head_router_utility", n_heads)
         iter_dist = _best_head_iteration_distribution_summary(prefix)
         if iter_dist is not None:
             out["head_best_iteration_distribution"] = {k: v for k, v in iter_dist.items() if k != "events"}

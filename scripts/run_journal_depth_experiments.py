@@ -9,6 +9,7 @@ The script is intentionally conservative:
 
 The completed experiments directly support part of the paper's deeper analysis:
   1. allocation sweep under a fixed ant budget;
+  1b. adaptive-router allocation benchmark under the same ant budget;
   2. per-instance win/loss evidence via --log CSVs;
   3. guidance/stage diagnostics via existing evaluator metrics;
   4. train-size sensitivity for the currently available n=500 CVRP runs.
@@ -65,6 +66,9 @@ class RunSpec:
     checkpoint: str
     summary_name: str
     head_weights: str | None = None
+    head_router: str | None = None
+    head_router_alpha: float | None = None
+    head_router_min_frac: float | None = None
     notes: str = ""
     extra_args: tuple[str, ...] = ()
 
@@ -82,6 +86,12 @@ class RunSpec:
         ]
         if self.head_weights:
             cmd += ["--head_ant_weights", self.head_weights]
+        if self.head_router:
+            cmd += ["--head_router", self.head_router]
+        if self.head_router_alpha is not None:
+            cmd += ["--head_router_alpha", f"{self.head_router_alpha:g}"]
+        if self.head_router_min_frac is not None:
+            cmd += ["--head_router_min_frac", f"{self.head_router_min_frac:g}"]
         if args.log:
             cmd.append("--log")
         if args.iter_log:
@@ -156,6 +166,42 @@ def allocation_runs() -> list[RunSpec]:
     return runs
 
 
+def adaptive_allocation_runs() -> list[RunSpec]:
+    """Benchmark the Adaptive Prior Allocation router from Sec. 3."""
+    return [
+        RunSpec(
+            name="tsp_full_mh_adaptive_ema",
+            stage="adaptive_allocation",
+            config="configs/eval/tsp_n1000_multihead_anchor_full_eval.yaml",
+            checkpoint=TSP_MH_CKPT,
+            head_weights="25,25,25,25",
+            head_router="ema",
+            head_router_alpha=0.25,
+            head_router_min_frac=0.05,
+            summary_name="tsp_full_mh_adaptive_ema_summary.json",
+            notes=(
+                "Full TSPLIB adaptive prior-allocation benchmark: starts from "
+                "uniform heads, then reallocates ants using EMA utility."
+            ),
+        ),
+        RunSpec(
+            name="cvrp_full_mh_adaptive_ema",
+            stage="adaptive_allocation",
+            config="configs/eval/cvrp_n1000_multihead_anchor_cvrlib_eval.yaml",
+            checkpoint=CVRP_MH_CKPT,
+            head_weights="25,25,25,25",
+            head_router="ema",
+            head_router_alpha=0.25,
+            head_router_min_frac=0.05,
+            summary_name="cvrp_full_mh_adaptive_ema_summary.json",
+            notes=(
+                "Full CVRPLIB adaptive prior-allocation benchmark: starts from "
+                "uniform heads, then reallocates ants using EMA utility."
+            ),
+        ),
+    ]
+
+
 def train_size_runs() -> list[RunSpec]:
     return [
         RunSpec(
@@ -194,7 +240,7 @@ def train_size_runs() -> list[RunSpec]:
 
 
 def all_runs() -> list[RunSpec]:
-    return allocation_runs() + train_size_runs()
+    return allocation_runs() + adaptive_allocation_runs() + train_size_runs()
 
 
 def selected_runs(args: argparse.Namespace) -> list[RunSpec]:
@@ -324,6 +370,7 @@ This file states what the runner covers versus what still needs evaluator instru
 | Planned experiment | Status in this runner | Evidence produced |
 |---|---|---|
 | Allocation sweep under matched budget | Covered | Summary JSONs for single-head and multi-head allocations `100,0,0,0`, `97,1,1,1`, `85,5,5,5`, `70,10,10,10`, `50,20,15,15`, `25,25,25,25` on full TSPLIB and full CVRPLIB. |
+| Adaptive prior allocation | Covered as an opt-in stage | Use `--stage adaptive_allocation`; runs start from `25,25,25,25` and enable `--head_router ema --head_router_alpha 0.25 --head_router_min_frac 0.05`. Summary payloads include router counts and utilities when guidance metrics are collected. |
 | Per-instance win/loss analysis | Covered as raw evidence | Use `--log`; the runner copies evaluator per-instance CSVs into `per_instance/` and writes `per_instance_runs.csv` for downstream win/loss pivots. |
 | Runtime decomposition | Covered by existing timings | Use `--timed --stage-metrics`; evaluator summaries expose neural/sampling/local-search/update timing where available plus stage costs. |
 | Stagnation / anti-stagnation diagnostic | Covered for top-k candidate edges | Use `--guidance-metrics`; summaries include enhance, rebellion, and suppression metrics against pheromone, plus per-head versions for multi-head runs. |
@@ -397,7 +444,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run journal-depth DyNACO experiments: allocation sweep, per-instance logs, guidance metrics, and train-size sensitivity."
     )
-    parser.add_argument("--stage", choices=["all", "allocation", "train_size"], default="allocation")
+    parser.add_argument(
+        "--stage",
+        choices=["all", "allocation", "adaptive_allocation", "train_size"],
+        default="allocation",
+    )
     parser.add_argument("--out-dir", type=Path, default=None, help="Output directory. Default: results/journal_depth/<timestamp>")
     parser.add_argument("--run", dest="dry_run", action="store_false", help="Execute commands. Default is dry-run.")
     parser.set_defaults(dry_run=True)

@@ -1,0 +1,821 @@
+% Focused ACO (FACO) - the scalable backend we build on
+@article{faco,
+   abstract = {Ant Colony Optimization (ACO) is a family of nature-inspired metaheuristics often applied to finding approximate solutions to difficult optimization problems. Despite being significantly faster than exact methods, the ACOs can still be prohibitively slow, especially if compared to basic problem-specific heuristics. As recent research has shown, it is possible to significantly improve the performance through algorithm refinements and careful parallel implementation benefiting from multi-core CPUs and dedicated accelerators. In this paper, we present a novel ACO variant, namely the Focused ACO (FACO). One of the core elements of the FACO is a mechanism for controlling the number of differences between a newly constructed and a selected previous solution. The mechanism results in a more focused search process, allowing to find improvements while preserving the quality of the existing solution. An additional benefit is a more efficient integration with a problem-specific local search. Computational study based on a range of the Traveling Salesman Problem instances shows that the FACO outperforms the state-of-the-art ACOs when solving large TSP instances. Specifically, the FACO required less than an hour of an 8-core commodity CPU time to find high-quality solutions (within 1% from the best-known results) for TSP Art Instances ranging from 100000 to 200000 nodes.},
+   author = {Rafał Skinderowicz},
+   doi = {10.1016/J.ASOC.2022.108653},
+   issn = {1568-4946},
+   journal = {Applied Soft Computing},
+   keywords = {Ant Colony Optimization,Parallel metaheuristics,Traveling Salesman Problem},
+   month = {5},
+   pages = {108653},
+   publisher = {Elsevier},
+   title = {Improving Ant Colony Optimization efficiency for solving large TSP instances},
+   volume = {120},
+   year = {2022}
+}
+
+
+% PartialACO - related incumbent-perturbation approach
+@inproceedings{partialACO,
+   author = {Darren Chitty},
+   doi = {10.1007/978-3-319-66939-7_9},
+   isbn = {978-3-319-66938-0},
+   booktitle = {Advances in Intelligent Systems and Computing},
+   month = {1},
+   pages = {104-118},
+   title = {Applying ACO to Large Scale TSP Instances},
+   volume = {650},
+   year = {2018}
+}
+
+
+% DeepACO
+@inproceedings{deepaco,
+   abstract = {Ant Colony Optimization (ACO) is a meta-heuristic algorithm that has been successfully applied to various Combinatorial Optimization Problems (COPs). Traditionally, customizing ACO for a specific problem requires the expert design of knowledge-driven heuristics. In this paper, we propose DeepACO, a generic framework that leverages deep reinforcement learning to automate heuristic designs. DeepACO serves to strengthen the heuristic measures of existing ACO algorithms and dispense with laborious manual design in future ACO applications. As a neural-enhanced meta-heuristic, DeepACO consistently outperforms its ACO counterparts on eight COPs using a single neural model and a single set of hyperparameters. As a Neural Combinatorial Optimization method, DeepACO performs better than or on par with problem-specific methods on canonical routing problems. Our code is publicly available at https://github.com/henry-yeh/DeepACO.},
+   author = {Haoran Ye and Jiarui Wang and Zhiguang Cao and Helan Liang and Yong Li},
+   city = {Red Hook, NY, USA},
+   booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {DeepACO: neural-enhanced ant systems for combinatorial optimization},
+   year = {2023}
+}
+
+
+% GFACS
+@article{gfacs,
+   abstract = {We present the Generative Flow Ant Colony Sampler (GFACS), a novel meta-heuristic method that hierarchically combines amortized inference and parallel stochastic search. Our method first leverages Generative Flow Networks (GFlowNets) to amortize a multi-modal prior distribution over combinatorial solution space that encompasses both high-reward and diversified solutions. This prior is iteratively updated via parallel stochastic search in the spirit of Ant Colony Optimization (ACO), leading to the posterior distribution that generates near-optimal solutions. Extensive experiments across seven combinatorial optimization problems demonstrate GFACS's promising performances.},
+   author = {Minsu Kim and Sanghyeok Choi and Hyeonah Kim and Jiwoo Son and Jinkyoo Park and Yoshua Bengio},
+   issn = {2640-3498},
+   journal = {Proceedings of Machine Learning Research},
+   note = {Publisher Copyright: Copyright 2025 by the author(s).; 28th International Conference on Artificial Intelligence and Statistics, AISTATS 2025},
+   pages = {469-477},
+   title = {Ant Colony Sampling with GFlowNets for Combinatorial Optimization},
+   volume = {258},
+   year = {2025}
+}
+
+
+% GTG-ACO
+@article{gtgaco,
+   abstract = {Combinatorial optimization (CO) problems are fundamental to numerous real-world applications, ranging from logistics and scheduling to resource allocation. For solving CO problems, Ant Colony Optimization (ACO) is a widely used metaheuristic that simulates cooperative foraging behavior to iteratively construct high-quality solutions. However, traditional ACO suffers from handcrafted heuristic functions that fail to generalize across different instances and uniform pheromone initialization, which results in inefficient exploration and slow convergence. To address these limitations, we introduce Graph Transformer Guided Ant Colony Optimization- GTG-ACO, a novel approach that jointly learns both heuristic and initial pheromone matrices, enabling the model to generalize across diverse problem instances without manual tuning. Additionally, GTG-ACO employs Graph Transformer augmented with Squeeze-and-Excitation (SE) network as the backbone for heuristic and pheromone learner. The Graph Transformers enable adaptive representation learning by leveraging attention mechanisms to dynamically capture structural relationships in graph representation of combinatorial optimization problems. Additionally, SE networks enhance the model by recalibrating feature importance, ensuring that critical information is amplified while suppressing less relevant features. Extensive evaluations on four combinatorial optimization problems—Traveling Salesman Problem (TSP), Capacitated Vehicle Routing Problem (CVRP), Single Machine Total Weighted Tardiness Problem (SMTWTP) and Bin Packing Problem (BPP)—demonstrate that GTG-ACO consistently outperforms state-of-the-art baselines achieving improvements ranging from 1% to 56%. Furthermore, we validate its real-world applicability by evaluating it on benchmark datasets TSPLIB and CVRPLIB. Thus, GTG-ACO establishes itself as a powerful and generalizable framework by jointly learning heuristic and pheromone matrices, enabling more informed exploration, which leads to superior solution quality in combinatorial optimization problems. Our code is publicly available at https://github.com/abrarrahmanabir/GTG-ACO.},
+   author = {Abrar Rahman Abir and Muhammad Ali Nayeem and M. Sohel Rahman and Md Adnan Arefeen},
+   doi = {10.1016/j.swevo.2025.102147},
+   issn = {22106502},
+   journal = {Swarm and Evolutionary Computation},
+   keywords = {Ant Colony Optimization,Combinatorial optimization,Graph Transformer},
+   month = {12},
+   publisher = {Elsevier B.V.},
+   title = {GTG-ACO: Graph Transformer Guided Ant Colony Optimization for learning heuristics and pheromone dynamics for combinatorial optimization},
+   volume = {99},
+   year = {2025}
+}
+
+
+% Learning to optimize survey
+@article{l2osurvey,
+   abstract = {This paper surveys the recent attempts, both from the machine learning and operations research communities, at leveraging machine learning to solve combinatorial optimization problems. Given the hard nature of these problems, state-of-the-art algorithms rely on handcrafted heuristics for making decisions that are otherwise too expensive to compute or mathematically not well defined. Thus, machine learning looks like a natural candidate to make such decisions in a more principled and optimized way. We advocate for pushing further the integration of machine learning and combinatorial optimization and detail a methodology to do so. A main point of the paper is seeing generic optimization problems as data points and inquiring what is the relevant distribution of problems to use for learning on a given task.},
+   author = {Yoshua Bengio and Andrea Lodi and Antoine Prouvost},
+   doi = {10.1016/J.EJOR.2020.07.063},
+   issn = {0377-2217},
+   issue = {2},
+   journal = {European Journal of Operational Research},
+   keywords = {Branch and bound,Combinatorial optimization,Machine learning,Mixed-integer programming solvers},
+   month = {4},
+   pages = {405-421},
+   publisher = {North-Holland},
+   title = {Machine learning for combinatorial optimization: A methodological tour d’horizon},
+   volume = {290},
+   year = {2021}
+}
+
+
+% RLCO survey
+@article{MLCO,
+   abstract = {Many traditional algorithms for solving combinatorial optimization problems involve using hand-crafted heuristics that sequentially construct a solution. Such heuristics are designed by domain experts and may often be suboptimal due to the hard nature of the problems. Reinforcement learning (RL) proposes a good alternative to automate the search of these heuristics by training an agent in a supervised or self-supervised manner. In this survey, we explore the recent advancements of applying RL frameworks to hard combinatorial problems. Our survey provides the necessary background for operations research and machine learning communities and showcases the works that are moving the field forward. We juxtapose recently proposed RL methods, laying out the timeline of the improvements for each problem, as well as we make a comparison with traditional algorithms, indicating that RL models can become a promising direction for solving combinatorial problems.},
+   author = {Nina Mazyavkina and Sergey Sviridov and Sergei Ivanov and Evgeny Burnaev},
+   doi = {10.1016/J.COR.2021.105400},
+   issn = {0305-0548},
+   journal = {Computers \& Operations Research},
+   keywords = {Combinatorial optimization,Operations research,Policy-based methods,Reinforcement learning,Value-based methods},
+   month = {10},
+   pages = {105400},
+   publisher = {Pergamon},
+   title = {Reinforcement learning for combinatorial optimization: A survey},
+   volume = {134},
+   year = {2021}
+}
+
+
+
+% Attention Model (Kool)
+@inproceedings{attentionmodel,
+title={Attention, Learn to Solve Routing Problems!},
+author={Wouter Kool and Herke van Hoof and Max Welling},
+booktitle={International Conference on Learning Representations},
+year={2019},
+url={https://openreview.net/forum?id=ByxBFsRqYm},
+}
+
+
+% POMO
+@inproceedings{pomo,
+   abstract = {In neural combinatorial optimization (CO), reinforcement learning (RL) can turn a deep neural net into a fast, powerful heuristic solver of NP-hard problems. This approach has a great potential in practical applications because it allows near-optimal solutions to be found without expert guides armed with substantial domain knowledge. We introduce Policy Optimization with Multiple Optima (POMO), an end-to-end approach for building such a heuristic solver. POMO is applicable to a wide range of CO problems. It is designed to exploit the symmetries in the representation of a CO solution. POMO uses a modified REINFORCE algorithm that forces diverse rollouts towards all optimal solutions. Empirically, the low-variance baseline of POMO makes RL training fast and stable, and it is more resistant to local minima compared to previous approaches. We also introduce a new augmentation-based inference method, which accompanies POMO nicely. We demonstrate the effectiveness of POMO by solving three popular NP-hard problems, namely, traveling salesman (TSP), capacitated vehicle routing (CVRP), and 0-1 knapsack (KP). For all three, our solver based on POMO shows a significant improvement in performance over all recent learned heuristics. In particular, we achieve the optimality gap of 0.14% with TSP100 while reducing inference time by more than an order of magnitude.},
+   author = {Yeong-Dae Kwon and Jinho Choo and Byoungjip Kim and Iljoo Yoon and Youngjune Gwon and Seungjai Min},
+   city = {Red Hook, NY, USA},
+   isbn = {9781713829546},
+   booktitle = {Proceedings of the 34th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {POMO: policy optimization with multiple optima for reinforcement learning},
+   year = {2020}
+}
+
+
+% 2-opt learning
+@article{2optlearning,
+   abstract = {Recent works using deep learning to solve routing problems such as the traveling salesman problem (TSP) have focused on learning construction heuristics. Such approaches find good quality solutions but require additional procedures such as beam search and sampling to improve solutions and achieve state-of-the-art performance. However, few studies have focused on improvement heuristics, where a given solution is improved until reaching a near-optimal one. In this work, we propose to learn a local search heuristic based on 2-opt operators via deep reinforcement learning. We propose a policy gradient algorithm to learn a stochastic policy that selects 2-opt operations given a current solution. Moreover, we introduce a policy neural network that leverages a pointing attention mechanism, which can be easily extended to more general k-opt moves. Our results show that the learned policies can improve even over random initial solutions and approach near-optimal solutions faster than previous state-of-the-art deep learning methods for the TSP. We also show we can adapt the proposed method to two extensions of the TSP: the multiple TSP and the Vehicle Routing Problem, achieving results on par with classical heuristics and learned methods.},
+   author = {Paulo da Costa and Jason Rhuggenaath and Yingqian Zhang and Alp Akcay and Uzay Kaymak},
+   doi = {10.1007/s42979-021-00779-2},
+   issn = {2661-8907},
+   issue = {5},
+   journal = {SN Computer Science},
+   pages = {388},
+   title = {Learning 2-Opt Heuristics for Routing Problems via Deep Reinforcement Learning},
+   volume = {2},
+   url = {https://doi.org/10.1007/s42979-021-00779-2},
+   year = {2021}
+}
+
+
+% RL4CO
+@inproceedings{RL4CO,
+   abstract = {Combinatorial optimization (CO) is fundamental to several real-world applications, from logistics and scheduling to hardware design and resource allocation. Deep reinforcement learning (RL) has recently shown significant benefits in solving CO problems, reducing reliance on domain expertise and improving computational efficiency. However, the absence of a unified benchmarking framework leads to inconsistent evaluations, limits reproducibility, and increases engineering overhead, raising barriers to adoption for new researchers. To address these challenges, we introduce RL4CO, a unified and extensive benchmark with in-depth library coverage of 27 CO problem environments and 23 state-of-the-art baselines. Built on efficient software libraries and best practices in implementation, RL4CO features modularized implementation and flexible configurations of diverse environments, policy architectures, RL algorithms, and utilities with extensive documentation. RL4CO helps researchers build on existing successes while exploring and developing their own designs, facilitating the entire research process by decoupling science from heavy engineering. We finally provide extensive benchmark studies to inspire new insights and future work. RL4CO has already attracted numerous researchers in the community and is open-sourced at https://github.com/ai4co/rl4co.},
+   author = {Federico Berto and Chuanbo Hua and Junyoung Park and Laurin Luttmann and Yining Ma and Fanchen Bu and Jiarui Wang and Haoran Ye and Minsu Kim and Sanghyeok Choi and Nayeli Gast Zepeda and André Hottung and Jianan Zhou and Jieyi Bi and Yu Hu and Fei Liu and Hyeonah Kim and Jiwoo Son and Haeyeon Kim and Davide Angioni and Wouter Kool and Zhiguang Cao and Qingfu Zhang and Joungho Kim and Jie Zhang and Kijung Shin and Cathy Wu and Sungsoo Ahn and Guojie Song and Changhyun Kwon and Kevin Tierney and Lin Xie and Jinkyoo Park},
+   city = {New York, NY, USA},
+   doi = {10.1145/3711896.3737433},
+   isbn = {9798400714542},
+   booktitle = {Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining V.2},
+   keywords = {benchmark,combinatorial optimization,neural combinatorial optimization,open research community,reinforcement learning},
+   pages = {5278-5289},
+   publisher = {Association for Computing Machinery},
+   title = {RL4CO: An Extensive Reinforcement Learning for Combinatorial Optimization Benchmark},
+   url = {https://doi.org/10.1145/3711896.3737433},
+   year = {2025}
+}
+
+
+
+% MMAS
+@article{maxmin,
+   abstract = {Ant System, the first Ant Colony Optimization algorithm, showed to be a viable method for attacking hard combinatorial optimization problems. Yet, its performance, when compared to more fine-tuned algorithms, was rather poor for large instances of traditional benchmark problems like the Traveling Salesman Problem. To show that Ant Colony Optimization algorithms could be good alternatives to existing algorithms for hard combinatorial optimization problems, recent research in this area has mainly focused on the development of algorithmic variants which achieve better performance than Ant System. In this paper, we present MAX-MIN Ant System (MMAS), an Ant Colony Optimization algorithm derived from Ant System. MMAS differs from Ant System in several important aspects, whose usefulness we demonstrate by means of an experimental study. Additionally, we relate one of the characteristics specific to MMAS - that of using a greedier search than Ant System - to results from the search space analysis of the combinatorial optimization problems attacked in this paper. Our computational results on the Traveling Salesman Problem and the Quadratic Assignment Problem show that MMAS is currently among the best performing algorithms for these problems.},
+   author = {Thomas Stützle and Holger H. Hoos},
+   doi = {10.1016/S0167-739X(00)00043-1},
+   issn = {0167-739X},
+   issue = {8},
+   journal = {Future Generation Computer Systems},
+   month = {6},
+   pages = {889-914},
+   publisher = {North-Holland},
+   title = {MAX–MIN Ant System},
+   volume = {16},
+   year = {2000}
+}
+
+
+% LKH
+@article{lkhtsp,
+   abstract = {This paper describes an implementation of the Lin-Kernighan heuristic, one of the most successful methods for generating optimal or near-optimal solutions for the symmetric traveling salesman problem (TSP). Computational tests show that the implementation is highly effective. It has found optimal solutions for all solved problem instances we have been able to obtain, including a 13,509-city problem (the largest non-trivial problem instance solved to optimality today).},
+   author = {Keld Helsgaun},
+   doi = {10.1016/S0377-2217(99)00284-2},
+   issn = {0377-2217},
+   issue = {1},
+   journal = {European Journal of Operational Research},
+   month = {10},
+   pages = {106-130},
+   publisher = {North-Holland},
+   title = {An effective implementation of the Lin–Kernighan traveling salesman heuristic},
+   volume = {126},
+   year = {2000}
+}
+
+
+% Exact ML for branching
+@inbook{learn2branch,
+   abstract = {Combinatorial optimization problems are typically tackled by the branch-and-bound paradigm. We propose a new graph convolutional neural network model for learning branch-and-bound variable selection policies, which leverages the natural variable-constraint bipartite graph representation of mixed-integer linear programs. We train our model via imitation learning from the strong branching expert rule, and demonstrate on a series of hard problems that our approach produces policies that improve upon state-of-the-art machine-learning methods for branching and generalize to instances significantly larger than seen during training. Moreover, we improve for the first time over expert-designed branching rules implemented in a state-of-the-art solver on large problems. Code for reproducing all the experiments can be found at https://github.com/ds4dm/learn2branch.},
+   author = {Maxime Gasse and Didier Chételat and Nicola Ferroni and Laurent Charlin and Andrea Lodi},
+   city = {Red Hook, NY, USA},
+   booktitle = {Proceedings of the 33rd International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {Exact combinatorial optimization with graph convolutional neural networks},
+   year = {2019}
+}
+
+@article{learn2optimize,
+   abstract = {Learning to optimize (L2O) is an emerging approach that leverages machine learning to develop optimization methods, aiming at reducing the laborious iterations of hand engineering. It automates the design of an optimization method based on its performance on a set of training problems. This data-driven procedure generates methods that can efficiently solve problems similar to those in training. In sharp contrast, the typical and traditional designs of optimization methods are theory-driven, so they obtain performance guarantees over the classes of problems speci_ed by the theory. The difference makes L2O suitable for repeatedly solving a particular optimization problem over a specific distribution of data, while it typically fails on out-of-distribution problems. The practicality of L2O depends on the type of target optimization, the chosen architecture of the method to learn, and the training procedure. This new paradigm has motivated a community of researchers to explore L2O and report their findings.This article is poised to be the first comprehensive survey and benchmark of L2O for continuous optimization. We set up taxonomies, categorize existing works and research directions, present insights, and identify open challenges. We benchmarked many existing L2O approaches on a few representative optimization problems. For reproducible research and fair benchmarking purposes, we released our software implementation and data in the package Open-L2O.},
+   author = {Tianlong Chen and Xiaohan Chen and Wuyang Chen and Zhangyang Wang and Howard Heaton and Jialin Liu and Wotao Yin},
+   issn = {1532-4435},
+   issue = {1},
+   journal = {Journal of Machine Learning Research},
+   keywords = {algorithm unrolling,learning to optimize,meta learning,optimization},
+   month = {1},
+   publisher = {JMLR.org},
+   title = {Learning to optimize: a primer and a benchmark},
+   volume = {23},
+   year = {2022}
+}
+
+
+% REINFORCE
+@article{reinforce,
+   abstract = {This article presents a general class of associative reinforcement learning algorithms for connectionist networks containing stochastic units. These algorithms, called REINFORCE algorithms, are shown to make weight adjustments in a direction that lies along the gradient of expected reinforcement in both immediate-reinforcement tasks and certain limited forms of delayed-reinforcement tasks, and they do this without explicitly computing gradient estimates or even storing information from which such estimates could be computed. Specific examples of such algorithms are presented, some of which bear a close relationship to certain existing algorithms while others are novel but potentially interesting in their own right. Also given are results that show how such algorithms can be naturally integrated with backpropagation. We close with a brief discussion of a number of additional issues surrounding the use of such algorithms, including what is known about their limiting behaviors as well as further considerations that might be used to help develop similar but potentially more powerful reinforcement learning algorithms.},
+   author = {Ronald J Williams},
+   doi = {10.1007/BF00992696},
+   issn = {1573-0565},
+   issue = {3},
+   journal = {Machine Learning},
+   pages = {229-256},
+   title = {Simple statistical gradient-following algorithms for connectionist reinforcement learning},
+   volume = {8},
+   url = {https://doi.org/10.1007/BF00992696},
+   year = {1992}
+}
+
+@article{hgs,
+   abstract = {The vehicle routing problem is one of the most studied combinatorial optimization topics, due to its practical importance and methodological interest. Yet, despite extensive methodological progress, many recent studies are hampered by the limited access to simple and efficient open-source solution methods. Given the sophistication of current algorithms, reimplementation is becoming a difficult and time-consuming exercise that requires extensive care for details to be truly successful. Against this background, we use the opportunity of this short paper to introduce a simple – open-source – implementation of the hybrid genetic search (HGS) specialized to the capacitated vehicle routing problem (CVRP). This state-of-the-art algorithm uses the same general methodology as Vidal et al. (2012) but also includes additional methodological improvements and lessons learned over the past decade of research. In particular, it includes an additional neighborhood called SWAP* which consists in exchanging two customers between different routes without an insertion in place. As highlighted in our study, an efficient exploration of SWAP* moves significantly contributes to the performance of local searches. Moreover, as observed in experimental comparisons with other recent approaches on the classical instances of Uchoa et al. (2017), HGS still stands as a leading metaheuristic regarding solution quality, convergence speed, and conceptual simplicity.},
+   author = {Thibaut Vidal},
+   doi = {10.1016/J.COR.2021.105643},
+   issn = {0305-0548},
+   journal = {Computers \& Operations Research},
+   keywords = {Hybrid genetic search,Neighborhood search,Open source,Vehicle routing problem},
+   month = {4},
+   pages = {105643},
+   publisher = {Pergamon},
+   title = {Hybrid genetic search for the CVRP: Open-source implementation and SWAP* neighborhood},
+   volume = {140},
+   year = {2022}
+}
+
+
+@misc{lkhcvrp,
+   author = {Keld Helsgaun},
+   doi = {10.13140/RG.2.2.25569.40807},
+   month = {2},
+   title = {An Extension of the Lin-Kernighan-Helsgaun TSP Solver for Constrained Traveling Salesman and Vehicle Routing Problems},
+   year = {2017}
+}
+
+@inproceedings{elg,
+   author = {Chengrui Gao and Haopu Shang and Ke Xue and Dong Li and Chao Qian},
+   booktitle = {International Joint Conference on Artificial Intelligence},
+   title = {Towards Generalizable Neural Solvers for Vehicle Routing Problems via Ensemble with Transferrable Local Policy},
+   url = {https://api.semanticscholar.org/CorpusID:261243129},
+   year = {2023}
+}
+
+@inproceedings{l2c,
+      title={Learning to Insert for Constructive Neural Vehicle Routing Solver}, 
+      author={Fu Luo and Xi Lin and Mengyuan Zhong and Fei Liu and Zhenkun Wang and Jianyong Sun and Qingfu Zhang},
+      year={2025},
+      booktitle = {Neural Information Processing Systems},
+}
+
+
+@inproceedings{glop,
+   abstract = {The recent end-to-end neural solvers have shown promise for small-scale routing problems but suffered from limited realtime scaling-up performance. This paper proposes GLOP (Global and Local Optimization Policies), a unified hierarchical framework that efficiently scales toward large-scale routing problems. GLOP partitions large routing problems into Travelling Salesman Problems (TSPs) and TSPs into Shortest Hamiltonian Path Problems. For the first time, we hybridize non-autoregressive neural heuristics for coarsegrained problem partitions and autoregressive neural heuristics for fine-grained route constructions, leveraging the scalability of the former and the meticulousness of the latter. Experimental results show that GLOP achieves competitive and state-of-the-art real-time performance on large-scale routing problems, including TSP, ATSP, CVRP, and PCTSP. Our code is available at: https://github.com/henry-yeh/GLOP.},
+   author = {Haoran Ye and Jiarui Wang and Helan Liang and Zhiguang Cao and Yong Li and Fanzhang Li},
+   doi = {10.1609/aaai.v38i18.30009},
+   isbn = {978-1-57735-887-9},
+   booktitle = {Proceedings of the Thirty-Eighth AAAI Conference on Artificial Intelligence and Thirty-Sixth Conference on Innovative Applications of Artificial Intelligence and Fourteenth Symposium on Educational Advances in Artificial Intelligence},
+   publisher = {AAAI Press},
+   title = {GLOP: learning global partition and local construction for solving large-scale routing problems in real-time},
+   url = {https://doi.org/10.1609/aaai.v38i18.30009},
+   year = {2024}
+}
+
+
+@inproceedings{htsp,
+   abstract = {We propose an end-to-end learning framework based on hierarchical reinforcement learning, called H-TSP, for addressing the large-scale Traveling Salesman Problem (TSP). The proposed H-TSP constructs a solution of a TSP instance starting from the scratch relying on two components: the upper-level policy chooses a small subset of nodes (up to 200 in our experiment) from all nodes that are to be traversed, while the lower-level policy takes the chosen nodes as input and outputs a tour connecting them to the existing partial route (initially only containing the depot). After jointly training the upper-level and lower-level policies, our approach can directly generate solutions for the given TSP instances without relying on any time-consuming search procedures. To demonstrate effectiveness of the proposed approach, we have conducted extensive experiments on randomly generated TSP instances with different numbers of nodes. We show that H-TSP can achieve comparable results (gap 3.42% vs. 7.32%) as SOTA search-based approaches, and more importantly, we reduce the time consumption up to two orders of magnitude (3.32s vs. 395.85s). To the best of our knowledge, H-TSP is the first end-to-end deep reinforcement learning approach that can scale to TSP instances of up to 10,000 nodes. Although there are still gaps to SOTA results with respect to solution quality, we believe that H-TSP will be useful for practical applications, particularly those that are time-sensitive e.g., on-call routing and ride hailing service.},
+   author = {Xuanhao Pan and Yan Jin and Yuandong Ding and Mingxiao Feng and Li Zhao and Lei Song and Jiang Bian},
+   doi = {10.1609/aaai.v37i8.26120},
+   isbn = {978-1-57735-880-0},
+   booktitle = {Proceedings of the Thirty-Seventh AAAI Conference on Artificial Intelligence and Thirty-Fifth Conference on Innovative Applications of Artificial Intelligence and Thirteenth Symposium on Educational Advances in Artificial Intelligence},
+   publisher = {AAAI Press},
+   title = {H-TSP: hierarchically solving the large-scale traveling salesman problem},
+   url = {https://doi.org/10.1609/aaai.v37i8.26120},
+   year = {2023}
+}
+
+
+@inproceedings{difusco,
+   abstract = {Neural network-based Combinatorial Optimization (CO) methods have shown promising results in solving various NP-complete (NPC) problems without relying on hand-crafted domain knowledge. This paper broadens the current scope of neural solvers for NPC problems by introducing a new graph-based diffusion framework, namely DIFUSCO. Our framework casts NPC problems as discrete 0,1-vector optimization problems and leverages graph-based denoising diffusion models to generate high-quality solutions. We investigate two types of diffusion models with Gaussian and Bernoulli noise, respectively, and devise an effective inference schedule to enhance the solution quality. We evaluate our methods on two well-studied NPC combinatorial optimization problems: Traveling Salesman Problem (TSP) and Maximal Independent Set (MIS). Experimental results show that DIFUSCO strongly outperforms the previous state-of-the-art neural solvers, improving the performance gap between ground-truth and neural solvers from 1.76% to 0.46% on TSP-500, from 2.46% to 1.17% on TSP-1000, and from 3.19% to 2.58% on TSP-10000. For the MIS problem, DIFUSCO outperforms the previous state-of-the-art neural solver on the challenging SATLIB benchmark.},
+   author = {Zhiqing Sun and Yiming Yang},
+   city = {Red Hook, NY, USA},
+   booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {DIFUSCO: graph-based diffusion solvers for combinatorial optimization},
+   year = {2023}
+}
+
+
+@article{sigd,
+   author = {Jonathan Pirnay and Dominik G Grimm},
+   issn = {2835-8856},
+   journal = {Transactions on Machine Learning Research},
+   note = {Featured Certification},
+   title = {Self-Improvement for Neural Combinatorial Optimization: Sample Without Replacement, but Improvement},
+   url = {https://openreview.net/forum?id=agT8ojoH0X},
+   year = {2024}
+}
+
+
+@inproceedings{invit,
+   abstract = {Recently, deep reinforcement learning has shown promising results for learning fast heuristics to solve routing problems. Meanwhile, most of the solvers suffer from generalizing to an unseen distribution or distributions with different scales. To address this issue, we propose a novel architecture, called Invariant Nested View Transformer (INViT), which is designed to enforce a nested design together with invariant views inside the encoders to promote the generalizability of the learned solver. It applies a modified policy gradient algorithm enhanced with data augmentations. We demonstrate that the proposed INViT achieves a dominant generalization performance on both TSP and CVRP problems with various distributions and different problem scales. Code is avaiable at https://github.com/Kasumigaoka-Utaha/INViT.},
+   author = {Han Fang and Zhihao Song and Paul Weng and Yutong Ban},
+   booktitle = {Proceedings of the 41st International Conference on Machine Learning},
+   publisher = {JMLR.org},
+   title = {INViT: a generalizable routing problem solver with invariant nested view transformer},
+   year = {2024}
+}
+
+
+@inproceedings{lehd,
+   abstract = {Neural combinatorial optimization (NCO) is a promising learning-based approach for solving challenging combinatorial optimization problems without specialized algorithm design by experts. However, most constructive NCO methods cannot solve problems with large-scale instance sizes, which significantly diminishes their usefulness for real-world applications. In this work, we propose a novel Light Encoder and Heavy Decoder (LEHD) model with a strong generalization ability to address this critical issue. The LEHD model can learn to dynamically capture the relationships between all available nodes of varying sizes, which is beneficial for model generalization to problems of various scales. Moreover, we develop a data-efficient training scheme and a flexible solution construction mechanism for the proposed LEHD model. By training on small-scale problem instances, the LEHD model can generate nearly optimal solutions for the Travelling Salesman Problem (TSP) and the Capacitated Vehicle Routing Problem (CVRP) with up to 1000 nodes, and also generalizes well to solve real-world TSPLib and CVRPLib problems. These results confirm our proposed LEHD model can significantly improve the state-of-the-art performance for constructive NCO. The code is available at https://github.com/CIAM-Group/NCO_code/tree/main/single_objective/LEHD.},
+   author = {Fu Luo and Xi Lin and Fei Liu and Qingfu Zhang and Zhenkun Wang},
+   city = {Red Hook, NY, USA},
+   booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {Neural combinatorial optimization with heavy decoder: toward large scale generalization},
+   year = {2023}
+}
+
+@misc{heataco,
+   author = {Bo-Cheng Lin and Yi Mei and Mengjie Zhang},
+   title = {HEATACO: Heatmap-Guided Ant Colony Decoding for Large-Scale Travelling Salesman Problems},
+   url = {https://arxiv.org/abs/2601.19041},
+   year = {2026}
+}
+
+
+@inproceedings{bq,
+   abstract = {Despite the success of neural-based combinatorial optimization methods for end-to-end heuristic learning, out-of-distribution generalization remains a challenge. In this paper, we present a novel formulation of Combinatorial Optimization Problems (COPs) as Markov Decision Processes (MDPs) that effectively leverages common symmetries of COPs to improve out-of-distribution robustness. Starting from a direct MDP formulation of a constructive method, we introduce a generic way to reduce the state space, based on Bisimulation Quotienting (BQ) in MDPs. Then, for COPs with a recursive nature, we specialize the bisimulation and show how the reduced state exploits the symmetries of these problems and facilitates MDP solving. Our approach is principled and we prove that an optimal policy for the proposed BQ-MDP actually solves the associated COPs. We illustrate our approach on five classical problems: the Euclidean and Asymmetric Traveling Salesman, Capacitated Vehicle Routing, Orienteering and Knapsack Problems. Furthermore, for each problem, we introduce a simple attention-based policy network for the BQ-MDPs, which we train by imitation of (near) optimal solutions of small instances from a single distribution. We obtain new state-of-the-art results for the five COPs on both synthetic and realistic benchmarks. Notably, in contrast to most existing neural approaches, our learned policies show excellent generalization performance to much larger instances than seen during training, without any additional search procedure. Our code is available at: https://github.com/naver/bq-nco},
+   author = {Darko Drakulic and Sofia Michel and Florian Mai and Arnaud Sors and Jean-Marc Andreoli},
+   city = {Red Hook, NY, USA},
+   booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {BQ-NCO: bisimulation quotienting for efficient neural combinatorial optimization},
+   year = {2023}
+}
+
+@inproceedings{dualopt,
+   abstract = {This paper proposes a dual divide-and-optimize algorithm (DualOpt) for solving the large-scale traveling salesman problem (TSP). DualOpt combines two complementary strategies to improve both solution quality and computational efficiency. The first strategy is a grid-based divide-and-conquer procedure that partitions the TSP into smaller subproblems, solving them in parallel and iteratively refining the solution by merging nodes and partial routes. The process continues until only one grid remains, yielding a high-quality initial solution. The second strategy involves a path-based divide-and-optimize procedure that further optimizes the solution by dividing it into sub-paths, optimizing each using a neural solver, and merging them back to progressively improve the overall solution. Extensive experiments conducted on two groups of TSP benchmark instances, including randomly generated instances with up to 100,000 nodes and real-world datasets from TSPLIB, demonstrate the effectiveness of DualOpt. The proposed DualOpt achieves highly competitive results compared to 10 state-of-the-art algorithms in the literature. In particular, DualOpt achieves an improvement gap up to 1.40% for the largest instance TSP100K with a remarkable 104x speed-up over the leading heuristic solver LKH3. Additionally, DualOpt demonstrates strong generalization on TSPLIB benchmarks, confirming its capability to tackle diverse real-world TSP applications. Code — https://github.com/Learning4Optimization-HUST/DualOpt},
+   author = {Shipei Zhou and Yuandong Ding and Chi Zhang and Zhiguang Cao and Yan Jin},
+   doi = {10.1609/aaai.v39i25.34926},
+   isbn = {978-1-57735-897-8},
+   booktitle = {Proceedings of the Thirty-Ninth AAAI Conference on Artificial Intelligence and Thirty-Seventh Conference on Innovative Applications of Artificial Intelligence and Fifteenth Symposium on Educational Advances in Artificial Intelligence},
+   publisher = {AAAI Press},
+   title = {DualOpt: a dual divide-and-optimize algorithm for the large-scale traveling salesman problem},
+   url = {https://doi.org/10.1609/aaai.v39i25.34926},
+   year = {2025}
+}
+
+
+@inproceedings{sil,
+   author = {Fu Luo and Xi Lin and Yaoxin Wu and Zhenkun Wang and Tong Xialiang and Mingxuan Yuan and Qingfu Zhang},
+   booktitle = {The Thirteenth International Conference on Learning Representations},
+   title = {Boosting Neural Combinatorial Optimization for Large-Scale Vehicle Routing Problems},
+   url = {https://openreview.net/forum?id=TbTJJNjumY},
+   year = {2025}
+}
+
+
+@inproceedings{learn2delegate,
+   abstract = {Vehicle routing problems (VRPs) form a class of combinatorial problems with wide practical applications. While previous heuristic or learning-based works achieve decent solutions on small problem instances, their performance deteriorates in large problems. This article presents a novel learning-augmented local search framework to solve large-scale VRP. The method iteratively improves the solution by identifying appropriate subproblems and delegating their improvement to a black box subsolver. At each step, we leverage spatial locality to consider only a linear number of subproblems, rather than exponential. We frame subproblem selection as regression and train a Transformer on a generated training set of problem instances. Our method accelerates state-of-the-art VRP solvers by 10x to 100x while achieving competitive solution qualities for VRPs with sizes ranging from 500 to 3000. Learned subproblem selection offers a 1.5x to 2x speedup over heuristic or random selection. Our results generalize to a variety of VRP distributions, variants, and solvers.},
+   author = {Sirui Li and Zhongxia Yan and Cathy Wu},
+   city = {Red Hook, NY, USA},
+   isbn = {9781713845393},
+   booktitle = {Proceedings of the 35th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {Learning to delegate for large-scale vehicle routing},
+   year = {2021}
+}
+
+@misc{
+huang2024contrastive,
+title={Contrastive Predict-and-Search for Mixed Integer Linear Programs},
+author={Taoan Huang and Aaron M Ferber and Arman Zharmagambetov and Yuandong Tian and Bistra Dilkina},
+year={2024},
+url={https://openreview.net/forum?id=J2kRjUAOLh}
+}
+
+@inproceedings{li2023learning,
+title={Learning to Configure Separators in Branch-and-Cut},
+author={Sirui Li and Wenbin Ouyang and Max B. Paulus and Cathy Wu},
+booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
+year={2023},
+url={https://openreview.net/forum?id=gf5xJVQS5p}
+}
+
+@inbook{adaptant,
+   abstract = {In this paper we propose a method for parameter adaptation in Ant Colony Optimization (ACO); with the use of a fuzzy system we dynamically adapt the ``rho'' parameter which is responsible for the evaporation of the pheromone trails in ACO. The main goal is to improve the results of ACO; basically the fuzzy system controls the ACO abilities for exploration and exploitation of the search space. The best problems to test ACO algorithms are the TSP problems, so a comparison with the proposed approach and others methods is performed and results discussed.},
+   author = {Fevrier
+and Castillo Oscar Olivas Frumen
+and Valdez},
+   city = {Cham},
+   doi = {10.1007/978-3-319-17747-2_45},
+   editor = {Oscar
+and Kacprzyk Janusz Melin Patricia
+and Castillo},
+   isbn = {978-3-319-17747-2},
+   booktitle = {Design of Intelligent Systems Based on Fuzzy Logic, Neural Networks and Nature-Inspired Optimization},
+   pages = {593-603},
+   publisher = {Springer International Publishing},
+   title = {Ant Colony Optimization with Parameter Adaptation Using Fuzzy Logic for TSP Problems},
+   url = {https://doi.org/10.1007/978-3-319-17747-2_45},
+   year = {2015}
+}
+
+
+@article{adaptant2,
+   abstract = {In this paper, a parameter adaptation-based ant colony optimization (ACO) algorithm based on particle swarm optimization (PSO) algorithm with the global optimization ability, fuzzy system with the fuzzy reasoning ability and 3-Opt algorithm with local search ability, namely PF3SACO is proposed to improve the optimization ability and convergence, avoid to fall into local optimum. In the PF3SACO, a new dynamic parameter adjustment mechanism by the PSO and the fuzzy system is designed to adaptively adjust the pheromone importance factor α, pheromone volatilization coefficient ρ and the heuristic function importance factor β to accelerate the convergence, improve the search ability, enhance the local search ability and avoid premature. This is achievable by parameter adaptation to reflect the dynamic search characteristic by exploring and exploiting in the search process for the parameter values to be close to the optimal values. In addition, 3-Opt algorithm is applied to optimize the generated path to eliminate the cross path, obtain the optimal path and avoid to fall into local optimum. The optimization performance of the PF3SACO is investigated on fifteen travelling salesman problems (TSPs) with the scales from 42 to 783 cities. The experiment results show that the PF3SACO has better optimization performance by comparing with ABC, NACO, HYBRID, ACO-3Opt, PACO-3Opt, PSO-ACO-3Opt and some other well-known algorithms in most TSP in term of the solution quality, robustness and space distribution. It provides a reference to solve the large-scale TSP for obtaining better path length.},
+   author = {Xiangbing Zhou and Hongjiang Ma and Jianggang Gu and Huiling Chen and Wu Deng},
+   doi = {10.1016/J.ENGAPPAI.2022.105139},
+   issn = {0952-1976},
+   journal = {Engineering Applications of Artificial Intelligence},
+   keywords = {3-opt,Ant colony optimization,Dynamic hybrid mechanism,Fuzzy system,Parameter adaptation,Particle swarm optimization},
+   month = {9},
+   pages = {105139},
+   publisher = {Pergamon},
+   title = {Parameter adaptation-based ant colony optimization with dynamic hybrid mechanism},
+   volume = {114},
+   year = {2022}
+}
+
+
+
+@inproceedings{learn2seg,
+   author = {Wenbin Ouyang and Sirui Li and Yining Ma and Cathy Wu},
+   booktitle = {International Conference on Learning Representations},
+   title = {Learning to Segment for Vehicle Routing Problems},
+   year = {2026}
+}
+
+
+@inproceedings{neuopt,
+   abstract = {In this paper, we present Neural k-Opt (NeuOpt), a novel learning-to-search (L2S) solver for routing problems. It learns to perform flexible k-opt exchanges based on a tailored action factorization method and a customized recurrent dual-stream decoder. As a pioneering work to circumvent the pure feasibility masking scheme and enable the autonomous exploration of both feasible and infeasible regions, we then propose the Guided Infeasible Region Exploration (GIRE) scheme, which supplements the NeuOpt policy network with feasibility-related features and leverages reward shaping to steer reinforcement learning more effectively. Additionally, we equip NeuOpt with Dynamic Data Augmentation (D2A) for more diverse searches during inference. Extensive experiments on the Traveling Salesman Problem (TSP) and Capacitated Vehicle Routing Problem (CVRP) demonstrate that our NeuOpt not only significantly outstrips existing (masking-based) L2S solvers, but also showcases superiority over the learning-to-construct (L2C) and learning-to-predict (L2P) solvers. Notably, we offer fresh perspectives on how neural solvers can handle VRP constraints. Our code is available: https://github.eom/yining043/NeuOpt.},
+   author = {Yining Ma and Zhiguang Cao and Yeow Meng Chee},
+   city = {Red Hook, NY, USA},
+   booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {Learning to search feasible and infeasible regions of routing problems with flexible neural k-opt},
+   year = {2023}
+}
+
+
+@inproceedings{neurolkh,
+   abstract = {We present NeuroLKH, a novel algorithm that combines deep learning with the strong traditional heuristic Lin-Kernighan-Helsgaun (LKH) for solving Traveling Salesman Problem. Specifically, we train a Sparse Graph Network (SGN) with supervised learning for edge scores and unsupervised learning for node penalties, both of which are critical for improving the performance of LKH. Based on the output of SGN, NeuroLKH creates the edge candidate set and transforms edge distances to guide the searching process of LKH. Extensive experiments firmly demonstrate that, by training one model on a wide range of problem sizes, NeuroLKH significantly outperforms LKH and generalizes well to much larger sizes. Also, we show that NeuroLKH can be applied to other routing problems such as Capacitated Vehicle Routing Problem (CVRP), Pickup and Delivery Problem (PDP), and CVRP with Time Windows (CVRPTW).},
+   author = {Liang Xin and Wen Song and Zhiguang Cao and Jie Zhang},
+   city = {Red Hook, NY, USA},
+   isbn = {9781713845393},
+   booktitle = {Proceedings of the 35th International Conference on Neural Information Processing Systems},
+   publisher = {Curran Associates Inc.},
+   title = {NeuroLKH: combining deep learning model with lin-kernighan-helsgaun heuristic for solving the traveling salesman problem},
+   year = {2021}
+}
+
+@article{ACOTSP-MF,
+title = {ACOTSP-MF: A memory-friendly and highly scalable ACOTSP approach},
+volume = {99},
+pages = {104131},
+year = {2021},
+issn = {0952-1976},
+author = {Pablo A. Martínez and José M. García},
+journal={Engineering Applications of Artificial Intelligence},
+publisher={Elsevier},
+keywords = {Ant colony optimization, Large-size  instances, Performance analysis, Meta-heuristics, High-end CPU architectures},
+abstract = {Ant Colony Optimization (ACO) is a population-based meta-heuristic inspired by the social behavior of ants. It is successfully applied in solving many NP-hard problems, such as the Traveling Salesman Problem (TSP). Large-sized instances pose two memory problems to the ACOTSP algorithm: the memory size and the memory bandwidth. This work has focused on developing ACOTSP-MF, a new ACOTSP algorithm proposed to adequately manage the memory issues that arise while solving large TSP instances. ACOTSP-MF uses the nearest neighbor list, introducing a novel class of cities, the backup cities, while grouping cities into three classes: the nearest neighbor cities, the backup cities, and the rest of the cities (the majority). ACOTSP-MF also modifies how the base ACOTSP carries out the tour construction and pheromone update phases depending on the group to which a city belongs. This way, ACOTSP-MF reduces both the memory requirements of its data structures (from O(n∗n) to O(n)), and the memory bandwidth needs (thanks to better exploitation of the memory data locality). In this paper, we have carried out an in-depth analysis of ACOTSP-MF performance for medium and large TSP instances, covering vectorization and scalability issues and showing its main bottlenecks. For medium-size instances, the paper reports speedup factors of 20-500X for the rl11849 instance compared to the base ACOTSP version. ACOTSP-MF is intended and especially adequate for large-size instances. In this context, the paper reports excellent execution time for the Tour Construction phase, with less than 500 ms per iteration for the earring-200k instance. Finally, a study about the solution quality of ACOTSP-MF has been included, showing that ACOTSP-MF paired with local search offers high solution quality (within 2% of the best-known solution).}
+}
+
+@article{MetaHeuristic,
+  title={A survey on new generation metaheuristic algorithms},
+  author={Dokeroglu, Tansel and Sevinc, Ender and Kucukyilmaz, Tayfun and Cosar, Ahmet},
+  journal={Computers \& Industrial Engineering},
+  volume={137},
+  pages={106040},
+  year={2019},
+  publisher={Elsevier}
+}
+
+@book{Nature-inspired,
+  title={Nature-inspired optimization algorithms},
+  author={Yang, Xin-She},
+  year={2020},
+  publisher={Academic Press}
+}
+
+@book{ACO,
+  title={Ant colony optimization: overview and recent advances},
+  author={Dorigo, Marco and St{\"u}tzle, Thomas},
+  year={2019},
+  publisher={Springer}
+}
+
+@inproceedings{P-ACO,
+  title={A population based approach for ACO},
+  author={Guntsch, Michael and Middendorf, Martin},
+  booktitle={Applications of Evolutionary Computing: EvoWorkshops 2002: EvoCOP, EvoIASP, EvoSTIM/EvoPLAN Kinsale, Ireland, April 3--4, 2002 Proceedings},
+  pages={72--81},
+  year={2002},
+  organization={Springer}
+}
+
+@article{ACOVRP,
+  title={Ant colony optimization techniques for the vehicle routing problem},
+  author={Bell, John E and McMullen, Patrick R},
+  journal={Advanced engineering informatics},
+  volume={18},
+  number={1},
+  pages={41--48},
+  year={2004},
+  publisher={Elsevier}
+}
+
+@inbook{TSPAPP,
+  title={Traveling salesman problem: an overview of applications, formulations, and solution approaches},
+  author={Matai, Rajesh and Singh, Surya Prakash and Mittal, Murari Lal},
+  journal={Traveling salesman problem, theory and applications},
+  volume={1},
+  number={1},
+  pages={1--25},
+  year={2010},
+  publisher={InTech Rijeka}
+}
+
+@article{PPO,
+        added-at = {2019-12-16T18:31:56.000+0100},
+  author = {Schulman, John and Wolski, Filip and Dhariwal, Prafulla and Radford, Alec and Klimov, Oleg},
+  interhash = {f57ff463a90dbafb77d55a25aea8355c},
+  intrahash = {4bbcce6aa1c42ae7f61ef8cf5475aa85},
+  journal = {CoRR},
+  keywords = {DRLAlgoComparison ppo reinforcement_learning},
+  timestamp = {2019-12-18T21:15:59.000+0100},
+  title = {Proximal Policy Optimization Algorithms.},
+  volume = {abs/1707.06347},
+  year = 2017
+}
+
+@misc{gnn,
+      title = {Graph neural networks: A review of methods and applications},
+journal = {AI Open},
+volume = {1},
+pages = {57-81},
+year = {2020},
+issn = {2666-6510},
+author = {Jie Zhou and Ganqu Cui and Shengding Hu and Zhengyan Zhang and Cheng Yang and Zhiyuan Liu and Lifeng Wang and Changcheng Li and Maosong Sun},
+keywords = {Deep learning, Graph neural network}
+}
+
+ @article{tsplib,
+  title={TSPLIB - A Traveling Salesman Problem Library},
+  author={Gerhard Reinelt},
+  journal={INFORMS J. Comput.},
+  year={1991},
+  volume={3},
+  pages={376-384},
+}
+
+@inproceedings{stagnation,
+   author = {A Amuthan and K Deepa Thilak},
+   doi = {10.1109/ICTACC.2017.33},
+   booktitle = {2017 International Conference on Technical Advancements in Computers and Communications (ICTACC)},
+   keywords = {Heuristic algorithms;Ant colony optimization;Algorithm design and analysis;Optimization;Search problems;Particle swarm optimization;Acoustics;Ant Colony Optimization;Improved ACO;Pheromone updating rule;Pheromone Evaporation Factor;Mutation;Travelling Salesman Problem},
+   pages = {97-101},
+   title = {Improved Ant Colony Algorithms for Eliminating Stagnation and Local Optimum Problem — A Survey},
+   year = {2017}
+}
+
+@article{rlant,
+   abstract = { Improved ant colony optimization (ACO) algorithms for continuous-domain optimization have been widely applied in recent years, but these improved methods have a weak perception of environmental information changes and only rely on the residues of the pheromones in the path to guide colony evolution. In this paper, we propose an ant colony algorithm based on the reinforcement learning model (RLACO). RLACO can acquire more environmental information by calculating the diversity of the ant colony, and, uses the diversity and other basic information of the ant colony to establish a reinforcement learning model. At different stages of evolution, the algorithm chooses an optimal strategy that can maximize the reward to improve the global search ability and convergence speed of the colony. The experimental results on CEC 2017 test functions show that the proposed algorithm is superior to other algorithms for continuous-domain optimization in convergence speed, accuracy and global search ability. },
+   author = {Wenhui Zhang and Chenyu Wang and Wenjie Lin and Jiming Lin},
+   doi = {10.1142/S0219691320500848},
+   issue = {03},
+   journal = {International Journal of Wavelets, Multiresolution and Information Processing},
+   pages = {2050084},
+   title = {Continuous-domain ant colony optimization algorithm based on reinforcement learning},
+   volume = {19},
+   url = { 
+
+https://doi.org/10.1142/S0219691320500848
+
+
+
+},
+   year = {2021}
+}
+
+@article{VRPAPP,
+   author = {Mery Pangaribuan and Juliza Hidayati and Harmein Nasution},
+   doi = {10.37899/journallamultiapp.v6i6.2382},
+   journal = {Journal La Multiapp},
+   month = {2},
+   pages = {13971409},
+   title = {Literature Review on Vehicle Routing Problem: Approaches, Algorithms and Current Challenges},
+   volume = {6},
+   year = {2025}
+}
+
+@article{rlant2,
+   author = {Yahia Saqer and Khalil Eslayyeh and Nasser Abudalu and Aiman Abusamra},
+   doi = {10.5815/ijem.2025.05.03},
+   journal = {International Journal of Engineering and Manufacturing},
+   month = {2},
+   pages = {31-45},
+   title = {ACO-QL: Enhancing ACO Algorithm forRouting in MANETs Using ReinforcementLearning},
+   volume = {15},
+   year = {2025}
+}
+
+
+@article{cvrplib,
+   abstract = {The recent research on the CVRP is being slowed down by the lack of a good set of benchmark instances. The existing sets suffer from at least one of the following drawbacks: (i) became too easy for current algorithms; (ii) are too artificial; (iii) are too homogeneous, not covering the wide range of characteristics found in real applications. We propose a new set of 100 instances ranging from 100 to 1000 customers, designed in order to provide a more comprehensive and balanced experimental setting. Moreover, the same generating scheme was also used to provide an extended benchmark of 600 instances. In addition to having a greater discriminating ability to identify “which algorithm is better”, these new benchmarks should also allow for a deeper statistical analysis of the performance of an algorithm. In particular, they will enable one to investigate how the characteristics of an instance affect its performance. We report such an analysis on state-of-the-art exact and heuristic methods.},
+   author = {Eduardo Uchoa and Diego Pecin and Artur Pessoa and Marcus Poggi and Thibaut Vidal and Anand Subramanian},
+   doi = {10.1016/J.EJOR.2016.08.012},
+   issn = {0377-2217},
+   issue = {3},
+   journal = {European Journal of Operational Research},
+   keywords = {Benchmark instances,Experimental analysis of algorithms,Routing},
+   month = {3},
+   pages = {845-858},
+   publisher = {North-Holland},
+   title = {New benchmark instances for the Capacitated Vehicle Routing Problem},
+   volume = {257},
+   year = {2017}
+}
+
+@inproceedings{attgcn,
+  title={Generalize a small pre-trained model to arbitrarily large tsp instances},
+  author={Fu, Zhang-Hua and Qiu, Kai-Bin and Zha, Hongyuan},
+  booktitle={Proceedings of the AAAI conference on artificial intelligence},
+  volume={35},
+  number={8},
+  pages={7474--7482},
+  year={2021}
+}
+
+@inproceedings{utsp,
+author = {Min, Yimeng and Bai, Yiwei and Gomes, Carla P.},
+title = {Unsupervised learning for solving the travelling salesman problem},
+year = {2023},
+publisher = {Curran Associates Inc.},
+address = {Red Hook, NY, USA},
+abstract = {We propose UTSP, an Unsupervised Learning (UL) framework for solving the Travelling Salesman Problem (TSP). We train a Graph Neural Network (GNN) using a surrogate loss. The GNN outputs a heat map representing the probability for each edge to be part of the optimal path. We then apply local search to generate our final prediction based on the heat map. Our loss function consists of two parts: one pushes the model to find the shortest path and the other serves as a surrogate for the constraint that the route should form a Hamiltonian Cycle. Experimental results show that UTSP outperforms the existing data-driven TSP heuristics. Our approach is parameter efficient as well as data efficient: the model takes ~ 10\% of the number of parameters and ~ 0.2\% of training samples compared with Reinforcement Learning or Supervised Learning methods.},
+booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+articleno = {2047},
+numpages = {15},
+location = {New Orleans, LA, USA},
+series = {NIPS '23}
+}
+
+@inproceedings{dimes,
+author = {Qiu, Ruizhong and Sun, Zhiqing and Yang, Yiming},
+title = {DIMES: a differentiable meta solver for combinatorial optimization problems},
+year = {2022},
+isbn = {9781713871088},
+publisher = {Curran Associates Inc.},
+address = {Red Hook, NY, USA},
+abstract = {Recently, deep reinforcement learning (DRL) models have shown promising results in solving NP-hard Combinatorial Optimization (CO) problems. However, most DRL solvers can only scale to a few hundreds of nodes for combinatorial optimization problems on graphs, such as the Traveling Salesman Problem (TSP). This paper addresses the scalability challenge in large-scale combinatorial optimization by proposing a novel approach, namely, DIMES. Unlike previous DRL methods which suffer from costly autoregressive decoding or iterative refinements of discrete solutions, DIMES introduces a compact continuous space for parameterizing the underlying distribution of candidate solutions. Such a continuous space allows stable REINFORCE-based training and fine-tuning via massively parallel sampling. We further propose a meta-learning framework to enable effective initialization of model parameters in the fine-tuning stage. Extensive experiments show that DIMES outperforms recent DRL-based methods on large benchmark datasets for Traveling Salesman Problems and Maximal Independent Set problems.},
+booktitle = {Proceedings of the 36th International Conference on Neural Information Processing Systems},
+articleno = {1851},
+numpages = {16},
+location = {New Orleans, LA, USA},
+series = {NIPS '22}
+}
+
+@article{nrs_survey,
+  title={Survey on Neural Routing Solvers},
+  author={Ba, Yunpeng and Lin, Xi and Zhou, Changliang and Zheng, Ruihao and Wang, Zhenkun and Liang, Xinyan and Lu, Zhichao and Sun, Jianyong and Qian, Yuhua and Zhang, Qingfu},
+  journal={arXiv preprint arXiv:2602.21761},
+  year={2026}
+}
+
+@inproceedings{mdam,
+  title={Multi-Decoder Attention Model with Embedding Glimpse for Solving Vehicle Routing Problems},
+  author={Xin, Liang and Song, Wen and Cao, Zhiguang and Zhang, Jie},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={35},
+  number={13},
+  pages={12042--12049},
+  year={2021},
+  url={https://ojs.aaai.org/index.php/AAAI/article/view/17430}
+}
+
+@inproceedings{poppy,
+author = {Grinsztajn, Nathan and Furelos-Blanco, Daniel and Surana, Shikha and Bonnet, Cl\'{e}ment and Barrett, Thomas D.},
+title = {Winner takes it all: training performant RL populations for combinatorial optimization},
+year = {2023},
+publisher = {Curran Associates Inc.},
+address = {Red Hook, NY, USA},
+abstract = {Applying reinforcement learning (RL) to combinatorial optimization problems is attractive as it removes the need for expert knowledge or pre-solved instances. However, it is unrealistic to expect an agent to solve these (often NP-)hard problems in a single shot at inference due to their inherent complexity. Thus, leading approaches often implement additional search strategies, from stochastic sampling and beam-search to explicit fine-tuning. In this paper, we argue for the benefits of learning a population of complementary policies, which can be simultaneously rolled out at inference. To this end, we introduce Poppy, a simple training procedure for populations. Instead of relying on a predefined or hand-crafted notion of diversity, Poppy induces an unsupervised specialization targeted solely at maximizing the performance of the population. We show that Poppy produces a set of complementary policies, and obtains state-of-the-art RL results on four popular NP-hard problems: traveling salesman, capacitated vehicle routing, 0-1 knapsack, and job-shop scheduling.},
+booktitle = {Proceedings of the 37th International Conference on Neural Information Processing Systems},
+articleno = {2105},
+numpages = {25},
+location = {New Orleans, LA, USA},
+series = {NIPS '23}
+}
+
+@inproceedings{polynet,
+title={PolyNet: Learning Diverse Solution Strategies for Neural Combinatorial Optimization},
+author={Andr{\'e} Hottung and Mridul Mahajan and Kevin Tierney},
+booktitle={The Thirteenth International Conference on Learning Representations},
+year={2025},
+url={https://openreview.net/forum?id=TKuYWeFE6S}
+}
+
+
+@misc{nationaltsp,
+author       = {{Concorde TSP Group}},
+title        = {National Traveling Salesman Problems},
+howpublished = {\url{https://www.math.uwaterloo.ca/tsp/world/countries.html}},
+}
+
+@misc{vlsitsp,
+author       = {{Concorde TSP Group}},
+title        = {{VLSI} Traveling Salesman Problems},
+howpublished = {\url{https://www.math.uwaterloo.ca/tsp/vlsi/index.html}},
+}
+
+@misc{dimacs8tsp,
+author       = {{DIMACS}},
+title        = {The 8th {DIMACS} Implementation Challenge: The Traveling Salesman Problem},
+howpublished = {\url{http://dimacs.rutgers.edu/archive/Challenges/TSP/}},
+}
+
+@article{ags,
+author  = {Florian Arnold and Michel Gendreau and Kenneth S{"o}rensen},
+title   = {Efficiently Solving Very Large-Scale Routing Problems},
+journal = {Computers & Operations Research},
+volume  = {107},
+pages   = {32--42},
+year    = {2019}
+}
+
+@misc{ails2,
+  author =        {V. R. Máximo and J.-F.Courdeau and M. C. V. Nascimento},
+  publisher =     {INFORMS Journal on Computing},
+  title =         {AILS-II: An Adaptive Iterated Local Search Heuristic for the Large-scale Capacitated Routing Problem},
+  year =          {2024},
+  doi =           {10.1287/ijoc.2023.0106.cd},
+  url =           {https://github.com/INFORMSJoC/2023.0106},
+  note =          {Available for download at https://github.com/INFORMSJoC/2023.0106},
+}  
+
+@article{icam,
+  title={Instance-Conditioned Adaptation for Large-Scale Generalization of Neural Routing Solver},
+  author={Zhou, Changliang and Lin, Xi and Wang, Zhenkun and Tong, Xialiang and Yuan, Mingxuan and Zhang, Qingfu},
+  journal={IEEE Transactions on Intelligent Transportation Systems},
+  year={2026},
+  publisher={IEEE}
+}
+
+@inproceedings{dgl,
+author = {Xiao, Yubin and Wu, Yuesong and Cao, Rui and Wang, Di and Cao, Zhiguang and Wu, Xuan and Zhao, Peng and Li, Yuanshu and Zhou, You and Jiang, Yuan},
+title = {DGL: dynamic global-local information aggregation for scalable VRP generalization with self-improvement learning},
+year = {2025},
+isbn = {978-1-956792-06-5},
+url = {https://doi.org/10.24963/ijcai.2025/964},
+doi = {10.24963/ijcai.2025/964},
+abstract = {The Vehicle Routing Problem (VRP) is a critical combinatorial optimization problem with wide-reaching real-world applications, particularly in logistics and transportation. While neural network-based VRP solvers have shown impressive results on test instances similar to training data, their performance often degrades when faced with varying scales and unseen distributions, limiting their practical applicability. To overcome these limitations, we introduce DGL (Dynamic Global-Local Information Aggregation), a novel approach that combines global and local information to effectively solve VRPs. DGL dynamically adjusts local node selections within a localized range, capturing local invariance across problems of different scales and distributions, thereby enhancing generalization. At the same time, DGL integrates global context into the decision-making process, providing richer information for more informed decisions. Additionally, we propose a replacement-based self-improvement learning framework that leverages data augmentation and random replacement techniques, further enhancing DGL's robustness. Extensive experiments on synthetic datasets, benchmark datasets, and real-world country map instances demonstrate that DGL achieves state-of-the-art performance, particularly in generalizing to large-scale VRPs and real-world scenarios. These results showcase DGL's effectiveness in solving complex, realistic optimization challenges and highlight its potential for practical applications.},
+booktitle = {Proceedings of the Thirty-Fourth International Joint Conference on Artificial Intelligence},
+articleno = {964},
+numpages = {9},
+location = {Montreal, Canada},
+series = {IJCAI '25}
+}
+
+@inproceedings{reld,
+  title={Rethinking Light Decoder-based Solvers for Vehicle Routing Problems},
+  author={Huang, Ziwei and Zhou, Jianan and Cao, Zhiguang and Xu, Yixin},
+  booktitle={The Thirteenth International Conference on Learning Representations (ICLR)},
+  year={2025}
+}
+
+@inproceedings{dact,
+ author = {Ma, Yining and Li, Jingwen and Cao, Zhiguang and Song, Wen and Zhang, Le and Chen, Zhenghua and Tang, Jing},
+ booktitle = {Advances in Neural Information Processing Systems},
+ pages = {11096--11107},
+ title = {Learning to Iteratively Solve Routing Problems with Dual-Aspect Collaborative Transformer},
+ volume = {34},
+ year = {2021}
+}
+
+@inproceedings{drhg,
+  title={Destroy and Repair Using Hyper-Graphs for Routing},
+  author={Li, Ke and Liu, Fei and Wang, Zhenkun and Zhang, Qingfu},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  year={2025}
+}
+
+@inproceedings{fastt2t,
+  title={Fast t2t: Optimization consistency speeds up diffusion-based training-to-testing solving for combinatorial optimization},
+  author={Li, Yang and Guo, Jinpei and Wang, Runzhong and Zha, Hongyuan and Yan, Junchi},
+  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
+  year={2024}
+}
