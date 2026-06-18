@@ -3007,7 +3007,7 @@ float MFACO_CVRP::inter_route_ls_optimized(std::vector<int32_t> &perm,
   };
 
   auto touch = [&](int32_t u) {
-    if (u < n) {
+    if (u > 0 && u < n) {
       dlb[u] = false;
       if (!in_checklist[u]) {
         checklist.push_back(u);
@@ -3106,6 +3106,9 @@ float MFACO_CVRP::inter_route_ls_optimized(std::vector<int32_t> &perm,
       break;
     }
     int32_t u = checklist[head++];
+    if (u <= 0 || u >= n) {
+      continue;
+    }
     in_checklist[u] = 0;
 
     if (dlb[u])
@@ -3117,7 +3120,7 @@ float MFACO_CVRP::inter_route_ls_optimized(std::vector<int32_t> &perm,
     // Check neighbors
     for (int32_t j = 0; j < k; ++j) {
       int32_t v = nn_list[u * k + j];
-      if (v == 0)
+      if (v <= 0 || v >= n)
         continue;
 
       int32_t r_v = node_route[v];
@@ -4691,11 +4694,11 @@ float MFACO_CVRP::sample_ant_direct(const float *probmat, int32_t start_node,
     int32_t u_idx = (curr >= n) ? 0 : curr;
     if (!is_source_edge(u_idx, v)) {
       new_edges_all++;
-      if (!in_checklist[u_idx]) {
+      if (u_idx > 0 && !in_checklist[u_idx]) {
         checklist.push_back(u_idx);
         in_checklist[u_idx] = 1;
       }
-      if (!in_checklist[v]) {
+      if (v > 0 && !in_checklist[v]) {
         checklist.push_back(v);
         in_checklist[v] = 1;
       }
@@ -5201,17 +5204,17 @@ float MFACO_CVRP::sample_ant_direct_traced(
     visited[v] = 1;
     visited_count++;
 
-    int32_t u_idx = (curr >= n) ? 0 : curr;
-    if (!is_source_edge(u_idx, v)) {
-      new_edges_all++;
-      if (!in_checklist[u_idx]) {
-        checklist.push_back(u_idx);
-        in_checklist[u_idx] = 1;
-      }
-      if (!in_checklist[v]) {
-        checklist.push_back(v);
-        in_checklist[v] = 1;
-      }
+      int32_t u_idx = (curr >= n) ? 0 : curr;
+      if (!is_source_edge(u_idx, v)) {
+        new_edges_all++;
+        if (u_idx > 0 && !in_checklist[u_idx]) {
+          checklist.push_back(u_idx);
+          in_checklist[u_idx] = 1;
+        }
+        if (v > 0 && !in_checklist[v]) {
+          checklist.push_back(v);
+          in_checklist[v] = 1;
+        }
 
       // Cross check
       bool is_cross = false;
