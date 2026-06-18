@@ -11,12 +11,22 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <string>
 
 #include <omp.h>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
 namespace mfaco {
+
+static void assert_cvrp_node_index(int32_t node, int32_t limit,
+                                   const char *phase) {
+  if (node < 0 || node >= limit) {
+    throw std::runtime_error(std::string("CVRP route corruption in ") + phase +
+                             ": node index " + std::to_string(node) +
+                             " outside [0," + std::to_string(limit) + ")");
+  }
+}
 
 // ============================================================================
 // Constructor
@@ -3016,11 +3026,25 @@ float MFACO_CVRP::inter_route_ls_optimized(std::vector<int32_t> &perm,
     int64_t load = 0;
 
     curr = next_node[curr];
+    int32_t walk_steps = 0;
     while (curr < n) {
+      if (++walk_steps > n) {
+        throw std::runtime_error(
+            "CVRP route corruption in inter_route update_route_state: route " +
+            std::to_string(route_id) + " did not reach depot");
+      }
+      assert_cvrp_node_index(curr, (int32_t)next_node.size(),
+                             "inter_route update_route_state");
       load += demand_int[curr];
       cum_demand[curr] = load;
       node_route[curr] = route_id;
       curr = next_node[curr];
+    }
+    if (curr != start_node) {
+      throw std::runtime_error(
+          "CVRP route corruption in inter_route update_route_state: route " +
+          std::to_string(route_id) + " reached wrong depot " +
+          std::to_string(curr) + " instead of " + std::to_string(start_node));
     }
     route_loads[route_id] = load;
   };
@@ -3230,10 +3254,27 @@ float MFACO_CVRP::inter_route_ls_optimized(std::vector<int32_t> &perm,
           if (delta < -EPS) {
             int32_t nu = next_node[u];
             int32_t nv = next_node[v];
-            next_node[u] = nv;
-            prev_node[nv] = u;
-            next_node[v] = nu;
-            prev_node[nu] = v;
+            int32_t depot_u = n + r_u;
+            int32_t depot_v = n + r_v;
+            int32_t tail_u_end = prev_node[depot_u];
+            int32_t tail_v_end = prev_node[depot_v];
+
+            // Swap route tails after u and v. Each synthetic depot represents
+            // its own route, so the imported tail must be re-closed to the
+            // destination route's depot instead of keeping its old depot.
+            next_node[u] = (nv < n) ? nv : depot_u;
+            prev_node[next_node[u]] = u;
+            if (nv < n) {
+              next_node[tail_v_end] = depot_u;
+              prev_node[depot_u] = tail_v_end;
+            }
+
+            next_node[v] = (nu < n) ? nu : depot_v;
+            prev_node[next_node[v]] = v;
+            if (nu < n) {
+              next_node[tail_u_end] = depot_v;
+              prev_node[depot_v] = tail_u_end;
+            }
 
             update_route_state(n + r_u, r_u);
             update_route_state(n + r_v, r_v);
@@ -3263,7 +3304,15 @@ float MFACO_CVRP::inter_route_ls_optimized(std::vector<int32_t> &perm,
     if (curr >= n)
       continue;
     perm.push_back(0); // Start depot
+    int32_t walk_steps = 0;
     while (curr < n) {
+      if (++walk_steps > n) {
+        throw std::runtime_error(
+            "CVRP route corruption in inter_route flatten: route " +
+            std::to_string(r) + " did not reach depot");
+      }
+      assert_cvrp_node_index(curr, (int32_t)next_node.size(),
+                             "inter_route flatten");
       perm.push_back(curr);
       curr = next_node[curr];
     }
@@ -4568,7 +4617,15 @@ float MFACO_CVRP::sample_ant_direct(const float *probmat, int32_t start_node,
       // Update Loads & Route IDs for the new segment
       int64_t load_shift = 0;
       int32_t w = next_c;
+      int32_t walk_steps = 0;
       while (w != new_depot && w < n) {
+        if (++walk_steps > n) {
+          throw std::runtime_error(
+              "CVRP route corruption in sample_ant_direct split: segment did "
+              "not reach new depot");
+        }
+        assert_cvrp_node_index(w, n + max_routes,
+                               "sample_ant_direct split");
         node_route[w] = r_new;
         load_shift += demand_int[w];
         w = next_node[w];
@@ -4671,7 +4728,15 @@ float MFACO_CVRP::sample_ant_direct(const float *probmat, int32_t start_node,
       continue; // Empty
 
     route_out.push_back(0);
+    int32_t walk_steps = 0;
     while (w < n) {
+      if (++walk_steps > n) {
+        throw std::runtime_error(
+            "CVRP route corruption in sample_ant_direct flatten: route " +
+            std::to_string(r) + " did not reach depot");
+      }
+      assert_cvrp_node_index(w, n + max_routes,
+                             "sample_ant_direct flatten");
       route_out.push_back(w);
       w = next_node[w];
     }
@@ -5067,9 +5132,13 @@ float MFACO_CVRP::sample_ant_direct_traced(
       int32_t w = next_c;
       int32_t walk_steps = 0;
       while (w != new_depot && w < n) {
-        walk_steps++;
-        if (walk_steps > 2 * n)
-          break; // safety
+        if (++walk_steps > n) {
+          throw std::runtime_error(
+              "CVRP route corruption in sample_ant_direct_traced split: "
+              "segment did not reach new depot");
+        }
+        assert_cvrp_node_index(w, n + max_routes,
+                               "sample_ant_direct_traced split");
         node_route[w] = r_new;
         load_shift += demand_int[w];
         w = next_node[w];
@@ -5172,7 +5241,15 @@ float MFACO_CVRP::sample_ant_direct_traced(
       continue; // Empty
 
     route_out.push_back(0);
+    int32_t walk_steps = 0;
     while (w < n) {
+      if (++walk_steps > n) {
+        throw std::runtime_error(
+            "CVRP route corruption in sample_ant_direct_traced flatten: route " +
+            std::to_string(r) + " did not reach depot");
+      }
+      assert_cvrp_node_index(w, n + max_routes,
+                             "sample_ant_direct_traced flatten");
       route_out.push_back(w);
       w = next_node[w];
     }

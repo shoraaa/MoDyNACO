@@ -114,6 +114,7 @@ def _base_cache_path(args: argparse.Namespace, val_list_len: int) -> Path:
         "disable_heuristic": bool(args.disable_heuristic),
         "L": int(getattr(args, "L", 0)),
         "seed": int(args.seed),
+        "val_start": int(getattr(args, "val_start", 0)),
         "dataset": dataset_tag,
         "dataset_stat": dataset_stat,
         "n_instances": int(val_list_len),
@@ -682,6 +683,8 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--capacity_override", type=float, default=None,
                         help="Override CVRP capacity during generated evaluation dataset creation")
     parser.add_argument("--val_size", type=int, default=None, help="Limit validation set size")
+    parser.add_argument("--val_start", type=int, default=0,
+                        help="Start validation from this zero-based instance offset")
     parser.add_argument("--log", action="store_true", help="Enable logging to file (auto-named)")
     parser.add_argument("--no_baseline", "--no-baseline", dest="no_baseline", action="store_true",
                         help="Skip pure MFACO baseline calculation")
@@ -1062,6 +1065,19 @@ def main(argv: Optional[List[str]] = None):
             
             # Save for reuse
             utils.save_val_dataset(val_list, args.n_node, problem=args.problem)
+
+    # Slice validation set if requested. Keep the original offset for deterministic seeds.
+    eval_seed_offset = int(getattr(args, "val_start", 0) or 0)
+    if eval_seed_offset < 0:
+        raise ValueError("--val_start must be non-negative")
+    if eval_seed_offset and val_list is not None:
+        if isinstance(val_list, (list, tuple)) or torch.is_tensor(val_list):
+            original_len = len(val_list)
+            val_list = val_list[eval_seed_offset:]
+            print(
+                f"Started validation at offset {eval_seed_offset}: "
+                f"{original_len} -> {len(val_list)} instances."
+            )
 
     # Limit validation set size if requested
     if args.val_size is not None and val_list is not None:
@@ -2080,7 +2096,7 @@ def main(argv: Optional[List[str]] = None):
                     use_heuristic_only=True,
                     collect_metrics=args.visualize,
                     metrics_every_step=args.visualize,
-                    seed=args.seed + i
+                    seed=args.seed + eval_seed_offset + i
                 )
                 tb1 = time.time()
                 _, base_best, base_timings, base_extra = base_ret
@@ -2172,7 +2188,7 @@ def main(argv: Optional[List[str]] = None):
                       use_heuristic_only=False,
                       collect_metrics=collect_guidance_metrics,
                       metrics_every_step=collect_guidance_metrics,
-                      seed=args.seed + i,
+                      seed=args.seed + eval_seed_offset + i,
                       ablation_pheromone=args.ablation_pheromone_features,
                       ablation_incumbent=args.ablation_incumbent_features
                   )
@@ -2226,7 +2242,7 @@ def main(argv: Optional[List[str]] = None):
                       use_heuristic_only=False,
                       collect_metrics=collect_guidance_metrics,
                       metrics_every_step=collect_guidance_metrics,
-                      seed=args.seed + i,
+                      seed=args.seed + eval_seed_offset + i,
                       ablation_pheromone=args.ablation_pheromone_features,
                       ablation_incumbent=args.ablation_incumbent_features
                   )
@@ -2282,7 +2298,7 @@ def main(argv: Optional[List[str]] = None):
                           collect_metrics=collect_guidance_metrics,
                           metrics_every_step=collect_guidance_metrics,
                           inject_step=inject_step,
-                          seed=args.seed + i,
+                          seed=args.seed + eval_seed_offset + i,
                           ablation_pheromone=args.ablation_pheromone_features,
                           ablation_incumbent=args.ablation_incumbent_features
                       )
@@ -2332,7 +2348,7 @@ def main(argv: Optional[List[str]] = None):
                           collect_metrics=collect_guidance_metrics,
                           metrics_every_step=collect_guidance_metrics,
                           inject_step=inject_step,
-                          seed=args.seed + i,
+                          seed=args.seed + eval_seed_offset + i,
                           ablation_pheromone=args.ablation_pheromone_features,
                           ablation_incumbent=args.ablation_incumbent_features
                       )
