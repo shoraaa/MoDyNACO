@@ -621,12 +621,14 @@ def main(argv: Optional[List[str]] = None):
                         help="Freeze the shared final decoder linear layer and train only LoRA adapters there")
     parser.add_argument("--head_ant_weights", type=str, default=None,
                         help="Comma-delimited ant allocation weights/counts for PolyNet ant groups, e.g. 50,20,15,15")
-    parser.add_argument("--head_router", choices=["static", "ema"], default="static",
+    parser.add_argument("--head_router", choices=["static", "ema", "learned"], default="static",
                         help="Ant routing for PolyNet ant groups; static preserves head_ant_weights")
     parser.add_argument("--head_router_alpha", type=float, default=0.25,
                         help="EMA update rate for adaptive head utility routing")
     parser.add_argument("--head_router_min_frac", type=float, default=0.0,
                         help="Minimum allocation fraction blended into each head by adaptive routing")
+    parser.add_argument("--allocator_temperature", type=float, default=1.0,
+                        help="Softmax temperature for learned ant allocation")
     parser.add_argument(
         "--head_input_transform",
         "--head-input-transform",

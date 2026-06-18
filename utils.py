@@ -108,8 +108,40 @@ def _multi_head_enabled(args: Any) -> bool:
 def head_router_enabled(args: Any) -> bool:
     return (
         _multi_head_enabled(args)
-        and str(getattr(args, "head_router", "static") or "static").lower() != "static"
+        and str(getattr(args, "head_router", "static") or "static").lower() not in {"static", "learned"}
     )
+
+
+def learned_head_router_enabled(args: Any) -> bool:
+    return (
+        _multi_head_enabled(args)
+        and str(getattr(args, "head_router", "static") or "static").lower() == "learned"
+    )
+
+
+def learned_head_counts_from_logits(logits: Any, n_ants: int, args: Any) -> List[int]:
+    if torch.is_tensor(logits):
+        vals = logits.detach().cpu().numpy().reshape(-1).astype(np.float64)
+    else:
+        vals = np.asarray(logits, dtype=np.float64).reshape(-1)
+    num_heads = int(vals.shape[0])
+    if n_ants < num_heads:
+        raise ValueError(f"n_ants={n_ants} must be >= num_heads={num_heads} for learned allocation")
+    min_frac = float(getattr(args, "head_router_min_frac", 0.0))
+    floor_count = max(1, int(np.floor(min_frac * int(n_ants))))
+    if floor_count * num_heads > int(n_ants):
+        floor_count = 1
+    residual = int(n_ants) - floor_count * num_heads
+    temperature = max(float(getattr(args, "allocator_temperature", 1.0)), 1e-6)
+    probs = _softmax_np(vals / temperature)
+    exact = probs * residual
+    extra = np.floor(exact).astype(np.int32)
+    rem = residual - int(extra.sum())
+    if rem > 0:
+        order = np.argsort(-(exact - extra))
+        for idx in order[:rem]:
+            extra[int(idx)] += 1
+    return [int(floor_count + x) for x in extra.tolist()]
 
 
 class HeadUtilityRouter:
@@ -2449,6 +2481,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
             
             prior_mat = None
             prior_head_counts = None
+            alloc_logits = None
             if do_metrics:
                 pher_before.append(aco.pheromone_sparse.detach().cpu().clone())
 
@@ -2476,10 +2509,25 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                             ablation_pheromone,
                             ablation_incumbent,
                         )
+                        if learned_head_router_enabled(args) and hasattr(model, "forward_with_alloc"):
+                            if problem == 'tsp':
+                                alloc_pyg = build_fn(aco, norm_coords, args.device, dynamic=dynamic,
+                                                     ablation_pheromone=ablation_pheromone,
+                                                     ablation_incumbent=ablation_incumbent,
+                                                     edge_feature_set=getattr(args, "edge_feature_set", "full"))
+                            else:
+                                alloc_pyg = build_fn(aco, norm_coords, demand, args.device, dynamic=dynamic,
+                                                     ablation_pheromone=ablation_pheromone,
+                                                     ablation_incumbent=ablation_incumbent,
+                                                     edge_feature_set=getattr(args, "edge_feature_set", "full"))
+                            _, alloc_logits = model.forward_with_alloc(alloc_pyg)
                         prior_for_metrics = prior_mat.mean(dim=0)
-                        prior_head_counts = head_counts_for_router(
-                            args, int(prior_mat.shape[0]), n_ants, head_router
-                        )
+                        if learned_head_router_enabled(args) and alloc_logits is not None:
+                            prior_head_counts = learned_head_counts_from_logits(alloc_logits, n_ants, args)
+                        else:
+                            prior_head_counts = head_counts_for_router(
+                                args, int(prior_mat.shape[0]), n_ants, head_router
+                            )
                     else:
                         if problem == 'tsp':
                             pyg_data = build_fn(aco, norm_coords, args.device, dynamic=dynamic,
@@ -2491,14 +2539,20 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                                               ablation_pheromone=ablation_pheromone,
                                               ablation_incumbent=ablation_incumbent,
                                               edge_feature_set=getattr(args, "edge_feature_set", "full"))
-                        prior_output = model(pyg_data)
+                        if learned_head_router_enabled(args) and hasattr(model, "forward_with_alloc"):
+                            prior_output, alloc_logits = model.forward_with_alloc(pyg_data)
+                        else:
+                            prior_output = model(pyg_data)
 
                         if prior_output.dim() == 2:
                             prior_mat = dynaco_net.output_to_multi_sparse_priors(prior_output, aco.n, aco.k)
                             prior_for_metrics = prior_mat.mean(dim=0)
-                            prior_head_counts = head_counts_for_router(
-                                args, int(prior_mat.shape[0]), n_ants, head_router
-                            )
+                            if learned_head_router_enabled(args) and alloc_logits is not None:
+                                prior_head_counts = learned_head_counts_from_logits(alloc_logits, n_ants, args)
+                            else:
+                                prior_head_counts = head_counts_for_router(
+                                    args, int(prior_mat.shape[0]), n_ants, head_router
+                                )
                         else:
                             prior_mat = dynaco_net.output_to_sparse_prior(prior_output, aco.n, aco.k)
                             prior_for_metrics = prior_mat

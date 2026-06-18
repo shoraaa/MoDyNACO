@@ -693,6 +693,35 @@ def _model_to_multi_priors(
     return net.output_to_multi_sparse_priors(model(pyg_data), n, k)
 
 
+def _model_to_multi_priors_and_alloc(
+    model: Net,
+    pyg_data: Any,
+    n: int,
+    k: int,
+    args: argparse.Namespace,
+    aco: Any = None,
+    build_fn: Any = None,
+    pyg_args: Optional[Tuple[Any, ...]] = None,
+    problem: Optional[str] = None,
+    dynamic: bool = True,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if _learned_router_enabled(args) and hasattr(model, "forward_with_alloc"):
+        if _head_input_transform_mode(args) in {"none", "identity"}:
+            output, alloc_logits = model.forward_with_alloc(pyg_data)
+            return net.output_to_multi_sparse_priors(output, n, k), alloc_logits
+        alloc_pyg = pyg_data
+        _, alloc_logits = model.forward_with_alloc(alloc_pyg)
+        priors = _model_to_multi_priors(
+            model, pyg_data, n, k, args=args, aco=aco, build_fn=build_fn,
+            pyg_args=pyg_args, problem=problem, dynamic=dynamic
+        )
+        return priors, alloc_logits
+    return _model_to_multi_priors(
+        model, pyg_data, n, k, args=args, aco=aco, build_fn=build_fn,
+        pyg_args=pyg_args, problem=problem, dynamic=dynamic
+    ), None
+
+
 def _head_cost_scores(head_costs: torch.Tensor, args: Optional[argparse.Namespace] = None) -> torch.Tensor:
     if isinstance(head_costs, (list, tuple)):
         return torch.stack([c.mean() for c in head_costs])
@@ -806,6 +835,88 @@ class MultiHeadRollout(NamedTuple):
     best_cost: float
     new_edges: Any
     survival: Any
+    alloc_action: Optional[Any] = None
+
+
+class AllocationAction(NamedTuple):
+    counts: List[int]
+    residual_counts: torch.Tensor
+    floor_count: int
+    probs: torch.Tensor
+    logits: torch.Tensor
+    logp_old: torch.Tensor
+    entropy_old: torch.Tensor
+    reward: float
+
+
+def _learned_router_enabled(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "head_router", "static") or "static").lower() == "learned"
+
+
+def _allocation_floor(n_ants: int, num_heads: int, min_frac: float) -> int:
+    if n_ants < num_heads:
+        raise ValueError(f"n_ants={n_ants} must be >= num_heads={num_heads} for learned allocation")
+    requested = max(1, int(np.floor(float(min_frac) * int(n_ants))))
+    return requested if requested * num_heads <= n_ants else 1
+
+
+def _largest_remainder_counts(total: int, probs: torch.Tensor) -> torch.Tensor:
+    if total <= 0:
+        return torch.zeros_like(probs, dtype=torch.long)
+    exact = probs.detach().double().cpu().numpy() * int(total)
+    counts = np.floor(exact).astype(np.int64)
+    rem = int(total) - int(counts.sum())
+    if rem > 0:
+        order = np.argsort(-(exact - counts))
+        for idx in order[:rem]:
+            counts[int(idx)] += 1
+    return torch.as_tensor(counts, device=probs.device, dtype=torch.long)
+
+
+def _sample_learned_allocation(
+    alloc_logits: torch.Tensor,
+    args: argparse.Namespace,
+    deterministic: bool = False,
+    residual_counts: Optional[torch.Tensor] = None,
+) -> Tuple[List[int], AllocationAction, torch.Tensor]:
+    num_heads = int(alloc_logits.numel())
+    floor_count = _allocation_floor(args.n_ants, num_heads, getattr(args, "head_router_min_frac", 0.0))
+    residual_total = int(args.n_ants) - floor_count * num_heads
+    temperature = max(float(getattr(args, "allocator_temperature", 1.0)), 1e-6)
+    probs = torch.softmax(alloc_logits / temperature, dim=0).clamp_min(1e-12)
+    probs = probs / probs.sum()
+    cat = torch.distributions.Categorical(probs=probs)
+
+    if residual_counts is None:
+        if deterministic:
+            residual_counts = _largest_remainder_counts(residual_total, probs)
+        elif residual_total <= 0:
+            residual_counts = torch.zeros(num_heads, device=alloc_logits.device, dtype=torch.long)
+        else:
+            dist = torch.distributions.Multinomial(total_count=residual_total, probs=probs)
+            residual_counts = dist.sample().to(dtype=torch.long)
+    else:
+        residual_counts = residual_counts.to(device=alloc_logits.device, dtype=torch.long)
+
+    counts_t = residual_counts + int(floor_count)
+    counts = [int(x) for x in counts_t.detach().cpu().tolist()]
+    if residual_total <= 0:
+        logp = alloc_logits.new_tensor(0.0)
+    else:
+        dist = torch.distributions.Multinomial(total_count=residual_total, probs=probs)
+        logp = dist.log_prob(residual_counts.to(dtype=probs.dtype))
+    entropy = cat.entropy()
+    action = AllocationAction(
+        counts=counts,
+        residual_counts=residual_counts.detach(),
+        floor_count=int(floor_count),
+        probs=probs.detach(),
+        logits=alloc_logits.detach(),
+        logp_old=logp.detach(),
+        entropy_old=entropy.detach(),
+        reward=0.0,
+    )
+    return counts, action, probs.detach()
 
 
 def _ppo_clipped_loss(
@@ -838,11 +949,21 @@ def _collect_multi_head_rollout(
     eta_nk: torch.Tensor,
     args: argparse.Namespace,
     head_router: Any,
+    alloc_logits: Optional[torch.Tensor] = None,
 ) -> MultiHeadRollout:
     tau_nk = aco.tau_nk_torch().detach()
-    head_counts = utils.head_counts_for_router(
-        args, int(current_prior.shape[0]), args.n_ants, head_router
-    )
+    alloc_action = None
+    if _learned_router_enabled(args):
+        if alloc_logits is None:
+            raise ValueError("learned head router requires allocation logits")
+        with torch.no_grad():
+            head_counts, alloc_action, _ = _sample_learned_allocation(
+                alloc_logits.detach(), args, deterministic=False
+            )
+    else:
+        head_counts = utils.head_counts_for_router(
+            args, int(current_prior.shape[0]), args.n_ants, head_router
+        )
     res = aco.sample_mixed_priors(
         current_prior,
         require_prob=True,
@@ -880,6 +1001,8 @@ def _collect_multi_head_rollout(
         ]
 
     best_idx = int(costs_all.argmin().item())
+    if alloc_action is not None:
+        alloc_action = alloc_action._replace(reward=-float(costs_all[best_idx].item()))
     return MultiHeadRollout(
         tau_nk=tau_nk,
         traces=traces,
@@ -894,6 +1017,7 @@ def _collect_multi_head_rollout(
         best_cost=float(costs_all[best_idx].item()),
         new_edges=new_edges,
         survival=survival,
+        alloc_action=alloc_action,
     )
 
 
@@ -909,6 +1033,14 @@ def _record_multi_head_rollout_metrics(
     metrics.add("head_cost_spread", float(head_scores.std(unbiased=False).item()))
     metrics.add("head_ants_min", float(min(rollout.head_counts)))
     metrics.add("head_ants_max", float(max(rollout.head_counts)))
+    for h, (count, head_costs) in enumerate(zip(rollout.head_counts, rollout.costs_by_head)):
+        head_best = float(head_costs.min().item())
+        metrics.add(f"head_count_{h}", float(count))
+        metrics.add(f"head_mean_cost_{h}", float(head_costs.mean().item()))
+        metrics.add(f"head_best_cost_{h}", head_best)
+        metrics.add(f"head_win_{h}", 1.0 if h == rollout.selected_head else 0.0)
+        if np.isfinite(incumbent_before):
+            metrics.add(f"head_improvement_{h}", float(incumbent_before - head_best))
     if rollout.new_edges is not None:
         metrics.add("new_edges", np.asarray(rollout.new_edges, dtype=np.float32).mean())
     if rollout.survival is not None:
@@ -943,6 +1075,27 @@ def _record_multi_head_rollout_metrics(
     if head_utility is not None:
         for h, value in enumerate(head_utility):
             metrics.add(f"head_utility_{h}", float(value))
+    if rollout.alloc_action is not None:
+        counts_np = np.asarray(rollout.alloc_action.counts, dtype=np.float64)
+        count_probs_np = counts_np / max(float(counts_np.sum()), 1e-12)
+        policy_probs = rollout.alloc_action.probs.detach().cpu().numpy().astype(np.float64)
+        policy_logits = rollout.alloc_action.logits.detach().cpu().numpy().astype(np.float64)
+        metrics.add("allocator_entropy", float(-(count_probs_np * np.log(count_probs_np + 1e-12)).sum()))
+        metrics.add("allocator_policy_entropy", float(rollout.alloc_action.entropy_old.item()))
+        metrics.add("allocator_prob_max", float(policy_probs.max()))
+        metrics.add("allocator_prob_min", float(policy_probs.min()))
+        metrics.add("allocator_logit_max", float(policy_logits.max()))
+        metrics.add("allocator_logit_min", float(policy_logits.min()))
+        metrics.add("allocator_logit_spread", float(policy_logits.max() - policy_logits.min()))
+        metrics.add("allocator_logprob", float(rollout.alloc_action.logp_old.item()))
+        metrics.add("allocator_reward", float(rollout.alloc_action.reward))
+        metrics.add("allocator_min_ants", float(counts_np.min()))
+        metrics.add("allocator_max_ants", float(counts_np.max()))
+        for h, c in enumerate(rollout.alloc_action.counts):
+            metrics.add(f"allocator_count_{h}", float(c))
+        for h, (p, z) in enumerate(zip(policy_probs, policy_logits)):
+            metrics.add(f"allocator_prob_{h}", float(p))
+            metrics.add(f"allocator_logit_{h}", float(z))
 
 
 def _multi_head_ppo_loss(
@@ -981,6 +1134,57 @@ def _multi_head_ppo_loss(
         costs_by_head[selected],
         args,
         baseline=head_scores.mean(),
+    )
+
+
+def _allocation_ppo_loss(
+    alloc_logits: torch.Tensor,
+    actions: List[AllocationAction],
+    rewards: torch.Tensor,
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not actions:
+        z = alloc_logits.new_tensor(0.0)
+        return z, z.detach(), z.detach(), z.detach(), z.detach()
+    losses = []
+    kls = []
+    clip_fracs = []
+    entropy_terms = []
+    for action, reward in zip(actions, rewards):
+        num_heads = int(alloc_logits.numel())
+        floor_count = _allocation_floor(args.n_ants, num_heads, getattr(args, "head_router_min_frac", 0.0))
+        residual_total = int(args.n_ants) - floor_count * num_heads
+        temperature = max(float(getattr(args, "allocator_temperature", 1.0)), 1e-6)
+        probs = torch.softmax(alloc_logits / temperature, dim=0).clamp_min(1e-12)
+        probs = probs / probs.sum()
+        cat = torch.distributions.Categorical(probs=probs)
+        residual_counts = action.residual_counts.to(device=alloc_logits.device, dtype=alloc_logits.dtype)
+        if residual_total <= 0:
+            logp_new = alloc_logits.new_tensor(0.0)
+        else:
+            dist = torch.distributions.Multinomial(total_count=residual_total, probs=probs)
+            logp_new = dist.log_prob(residual_counts)
+        logp_old = action.logp_old.to(device=alloc_logits.device, dtype=alloc_logits.dtype)
+        adv = reward.to(device=alloc_logits.device, dtype=alloc_logits.dtype)
+        ratio = torch.exp(logp_new - logp_old)
+        surr1 = ratio * adv
+        surr2 = torch.clamp(ratio, 1 - args.ppo_clip, 1 + args.ppo_clip) * adv
+        losses.append(-torch.min(surr1, surr2))
+        kls.append(0.5 * (logp_new - logp_old).pow(2))
+        clipped = (ratio > 1 + args.ppo_clip) | (ratio < 1 - args.ppo_clip)
+        clip_fracs.append(clipped.to(dtype=alloc_logits.dtype))
+        entropy_terms.append(cat.entropy())
+    pg_loss = torch.stack(losses).mean()
+    entropy = torch.stack(entropy_terms).mean()
+    entropy_coef = float(getattr(args, "allocator_entropy_coef", 0.01))
+    entropy_bonus = entropy_coef * entropy
+    loss = pg_loss - entropy_bonus
+    return (
+        loss,
+        torch.stack(kls).mean().detach(),
+        torch.stack(clip_fracs).mean().detach(),
+        entropy.detach(),
+        entropy_bonus.detach(),
     )
 
 
@@ -1347,7 +1551,7 @@ def train_instance_ppo(
     
     aco, pyg_args = setup_aco(args, instance_data, args.problem)
     head_router = None
-    if _multi_head_enabled(args):
+    if _multi_head_enabled(args) and not _learned_router_enabled(args):
         head_router = utils.make_head_router(args, int(getattr(args, "num_heads", 1)), args.n_ants)
     eta_nk = get_heuristic_tensor(aco, args.problem, args.device)
     if args.problem == 'tsp':
@@ -1379,7 +1583,7 @@ def train_instance_ppo(
         if outer >= warmup_steps:
             with torch.no_grad():
                 if _multi_head_enabled(args):
-                    prior_old = _model_to_multi_priors(
+                    prior_old, alloc_logits_old = _model_to_multi_priors_and_alloc(
                         model,
                         pyg_data,
                         aco.n,
@@ -1396,6 +1600,7 @@ def train_instance_ppo(
                     prior_old_for_metrics = prior_old.mean(dim=0)
                 else:
                     prior_old = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
+                    alloc_logits_old = None
                     prior_old_for_metrics = prior_old
                 t_neural_total += time.time() - t0
                 
@@ -1410,6 +1615,7 @@ def train_instance_ppo(
         logp_old_list = []
         ndec_list = []
         tau_list = []
+        alloc_actions: List[AllocationAction] = []
         costs_raw_t = None
         
         if hasattr(aco, "reset_timings"):
@@ -1428,8 +1634,15 @@ def train_instance_ppo(
             if _multi_head_enabled(args) and current_prior is not None:
                 incumbent_before = best_seen
                 rollout = _collect_multi_head_rollout(
-                    aco, current_prior, eta_nk, args, head_router
+                    aco,
+                    current_prior,
+                    eta_nk,
+                    args,
+                    head_router,
+                    alloc_logits=alloc_logits_old,
                 )
+                if rollout.alloc_action is not None:
+                    alloc_actions.append(rollout.alloc_action)
                 costs_raw_t = rollout.costs_by_head
 
                 tau_list.append(rollout.tau_nk)
@@ -1516,7 +1729,7 @@ def train_instance_ppo(
             
             t0 = time.time()
             if _multi_head_enabled(args):
-                prior_new_base = _model_to_multi_priors(
+                prior_new_base, alloc_logits_new = _model_to_multi_priors_and_alloc(
                     model,
                     pyg_data,
                     aco.n,
@@ -1533,6 +1746,7 @@ def train_instance_ppo(
                         metrics.add(f"update_{key}", value)
             else:
                 prior_new_base = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
+                alloc_logits_new = None
             t_neural_total += time.time() - t0
             
             if getattr(args, 'smallvram', False):
@@ -1585,7 +1799,7 @@ def train_instance_ppo(
                     all_clip_frac.append(clip_frac.detach().item())
                     total_loss_val_epoch += loss.item()
                     continue
-                
+
                 log_prob_new = log_prob_sparse_from_tau_eta_prior(
                     tau_nk, eta_nk, current_prior,
                     alpha=args.alpha, beta=args.beta, eps=EPS
@@ -1627,6 +1841,39 @@ def train_instance_ppo(
                     all_losses.append(loss)
                     
                 total_loss_val_epoch += loss.item()
+
+            if _multi_head_enabled(args) and _learned_router_enabled(args) and alloc_actions:
+                raw_rewards = torch.as_tensor(
+                    [a.reward for a in alloc_actions],
+                    device=args.device,
+                    dtype=torch.float32,
+                )
+                rewards = raw_rewards
+                if not args.no_adv_norm:
+                    if rewards.numel() > 1:
+                        rewards = (rewards - rewards.mean()) / (rewards.std(unbiased=False) + 1e-8)
+                    else:
+                        rewards = rewards - rewards.mean()
+                alloc_loss, alloc_kl, alloc_clip, alloc_entropy, alloc_entropy_bonus = _allocation_ppo_loss(
+                    alloc_logits_new,
+                    alloc_actions,
+                    rewards,
+                    args,
+                )
+                alloc_loss = float(getattr(args, "allocator_loss_coef", 1.0)) * alloc_loss
+                all_losses.append(alloc_loss)
+                all_param_kl.append(float(alloc_kl.item()))
+                all_clip_frac.append(float(alloc_clip.item()))
+                total_loss_val_epoch += float(alloc_loss.detach().item())
+                metrics.add("allocator_loss", float(alloc_loss.detach().item()))
+                metrics.add("allocator_kl", float(alloc_kl.item()))
+                metrics.add("allocator_clip_frac", float(alloc_clip.item()))
+                metrics.add("allocator_policy_entropy_update", float(alloc_entropy.item()))
+                metrics.add("allocator_entropy_bonus", float(alloc_entropy_bonus.item()))
+                metrics.add("allocator_reward_mean", float(raw_rewards.mean().item()))
+                metrics.add("allocator_reward_std", float(raw_rewards.std(unbiased=False).item()))
+                metrics.add("allocator_adv_mean", float(rewards.mean().item()))
+                metrics.add("allocator_adv_std", float(rewards.std(unbiased=False).item()))
             
             if getattr(args, 'smallvram', False):
                 prior_new_base.backward(prior_new.grad)
@@ -1787,7 +2034,7 @@ def infer_instance(
     if net is not None:
         net.eval()
     head_router = None
-    if net is not None and _multi_head_enabled(args):
+    if net is not None and _multi_head_enabled(args) and not _learned_router_enabled(args):
         head_router = utils.make_head_router(args, int(getattr(args, "num_heads", 1)), args.n_ants)
     
     # Initialize metrics
@@ -1873,10 +2120,13 @@ def infer_instance(
 
         guidance = None
         guidance_multi = None
+        alloc_logits = None
+        alloc_action = None
+        guidance_head_counts = None
         if net is not None and outer >= warmup_steps:
             with torch.no_grad():
                 if _multi_head_enabled(args):
-                    guidance_multi = _model_to_multi_priors(
+                    guidance_multi, alloc_logits = _model_to_multi_priors_and_alloc(
                         net,
                         pyg_data_net,
                         aco.n,
@@ -1889,6 +2139,35 @@ def infer_instance(
                         dynamic=dynamic,
                     )
                     guidance = guidance_multi.mean(dim=0)
+                    if _learned_router_enabled(args) and alloc_logits is not None:
+                        guidance_head_counts, alloc_action, _ = _sample_learned_allocation(
+                            alloc_logits, args, deterministic=True
+                        )
+                        if collect_metrics:
+                            policy_probs = alloc_action.probs.detach().cpu().numpy().astype(np.float64)
+                            policy_logits = alloc_action.logits.detach().cpu().numpy().astype(np.float64)
+                            count_probs = (
+                                np.asarray(alloc_action.counts, dtype=np.float64)
+                                / max(float(sum(alloc_action.counts)), 1e-12)
+                            )
+                            metrics_log.setdefault("allocator_entropy", []).append(
+                                float(-(count_probs * np.log(count_probs + 1e-12)).sum())
+                            )
+                            metrics_log.setdefault("allocator_policy_entropy", []).append(
+                                float(alloc_action.entropy_old.item())
+                            )
+                            metrics_log.setdefault("allocator_prob_max", []).append(float(policy_probs.max()))
+                            metrics_log.setdefault("allocator_prob_min", []).append(float(policy_probs.min()))
+                            metrics_log.setdefault("allocator_logit_max", []).append(float(policy_logits.max()))
+                            metrics_log.setdefault("allocator_logit_min", []).append(float(policy_logits.min()))
+                            metrics_log.setdefault("allocator_logit_spread", []).append(
+                                float(policy_logits.max() - policy_logits.min())
+                            )
+                            for h, c in enumerate(alloc_action.counts):
+                                metrics_log.setdefault(f"allocator_count_{h}", []).append(float(c))
+                            for h, (p, z) in enumerate(zip(policy_probs, policy_logits)):
+                                metrics_log.setdefault(f"allocator_prob_{h}", []).append(float(p))
+                                metrics_log.setdefault(f"allocator_logit_{h}", []).append(float(z))
                 else:
                     prior_output = net(pyg_data_net)
                     guidance = dynaco_net.output_to_sparse_prior(prior_output, aco.n, aco.k)
@@ -1919,11 +2198,11 @@ def infer_instance(
                 current_prior = current_prior * factor
             
             incumbent_before = best_seen
-            guidance_head_counts = None
             if current_prior is not None and getattr(current_prior, "dim", lambda: 0)() == 3:
-                guidance_head_counts = utils.head_counts_for_router(
-                    args, int(current_prior.shape[0]), args.n_ants, head_router
-                )
+                if not (_learned_router_enabled(args) and guidance_head_counts is not None):
+                    guidance_head_counts = utils.head_counts_for_router(
+                        args, int(current_prior.shape[0]), args.n_ants, head_router
+                    )
                 costs, flats, _, _, _, costs_raw, _, new_edges, survival = aco.sample_mixed_priors(
                     current_prior,
                     require_prob=False,
@@ -1950,6 +2229,20 @@ def infer_instance(
             best_seen = min(best_seen, best_val)
             best_seen_before_ls = min(best_seen_before_ls, float(costs_before_ls.min()))
             if current_prior is not None and getattr(current_prior, "dim", lambda: 0)() == 3:
+                costs_np = np.asarray(costs, dtype=np.float32)
+                head_costs = np.split(costs_np, np.cumsum(guidance_head_counts)[:-1])
+                head_best_values = [float(x.min()) for x in head_costs]
+                selected_head = int(np.argmin(head_best_values))
+                for h, (count, vals) in enumerate(zip(guidance_head_counts, head_costs)):
+                    head_best = float(vals.min())
+                    metrics_log.setdefault(f"head_count_{h}", []).append(float(count))
+                    metrics_log.setdefault(f"head_mean_cost_{h}", []).append(float(vals.mean()))
+                    metrics_log.setdefault(f"head_best_cost_{h}", []).append(head_best)
+                    metrics_log.setdefault(f"head_win_{h}", []).append(1.0 if h == selected_head else 0.0)
+                    if np.isfinite(incumbent_before):
+                        metrics_log.setdefault(f"head_improvement_{h}", []).append(
+                            float(incumbent_before - head_best)
+                        )
                 utils.update_head_router(
                     head_router,
                     guidance_head_counts,
@@ -2568,12 +2861,18 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Coefficient for Jensen-to-mean PolyNet head-diversity reward; 0 disables it")
     parser.add_argument("--head_ant_weights", type=str, default=None,
                         help="Comma-delimited ant allocation weights/counts for PolyNet ant groups, e.g. 50,20,15,15")
-    parser.add_argument("--head_router", choices=["static", "ema"], default="static",
+    parser.add_argument("--head_router", choices=["static", "ema", "learned"], default="static",
                         help="Ant routing for PolyNet ant groups; static preserves head_ant_weights")
     parser.add_argument("--head_router_alpha", type=float, default=0.25,
                         help="EMA update rate for adaptive head utility routing")
     parser.add_argument("--head_router_min_frac", type=float, default=0.0,
                         help="Minimum allocation fraction blended into each head by adaptive routing")
+    parser.add_argument("--allocator_loss_coef", type=float, default=1.0,
+                        help="Loss coefficient for learned PolyNet ant-allocation policy")
+    parser.add_argument("--allocator_entropy_coef", type=float, default=0.01,
+                        help="Entropy bonus coefficient for learned ant allocation")
+    parser.add_argument("--allocator_temperature", type=float, default=1.0,
+                        help="Softmax temperature for learned ant allocation")
     parser.add_argument(
         "--head_input_transform",
         "--head-input-transform",
@@ -2732,7 +3031,12 @@ def build_model_name(args: argparse.Namespace) -> str:
             name += f"_ha{alloc}"
         if str(getattr(args, "head_router", "static") or "static").lower() != "static":
             name += f"_hr{getattr(args, 'head_router')}"
-            name += f"_hra{float(getattr(args, 'head_router_alpha', 0.25)):g}"
+            if _learned_router_enabled(args):
+                name += f"_alcoef{float(getattr(args, 'allocator_loss_coef', 1.0)):g}"
+                name += f"_alent{float(getattr(args, 'allocator_entropy_coef', 0.01)):g}"
+                name += f"_alt{float(getattr(args, 'allocator_temperature', 1.0)):g}"
+            else:
+                name += f"_hra{float(getattr(args, 'head_router_alpha', 0.25)):g}"
         if _head_input_transform_mode(args) != "none":
             name += f"_ht{_head_input_transform_mode(args)}"
 

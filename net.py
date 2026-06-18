@@ -602,14 +602,30 @@ class MultiHeadNet(Net):
                 zero_init=True,
                 freeze_base=freeze_lora_base,
             )
+        self.alloc_net = nn.Sequential(
+            nn.Linear(units, units),
+            nn.SiLU(),
+            nn.Linear(units, num_heads),
+        )
+        nn.init.zeros_(self.alloc_net[-1].weight)
+        nn.init.zeros_(self.alloc_net[-1].bias)
 
-    def forward(self, pyg):
-        pyg = move_pyg_to_module_device(self, pyg)
-        x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
-        emb = self.emb_net(x, edge_index, edge_attr)
+    def _decode_heads(self, emb):
         if self.head_decoder_type == "lowrank":
             return self.par_net_heu(emb, self.head_codes)
         return self.par_net_heu(emb)
+
+    def forward_with_alloc(self, pyg):
+        pyg = move_pyg_to_module_device(self, pyg)
+        x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
+        emb = self.emb_net(x, edge_index, edge_attr)
+        prior = self._decode_heads(emb)
+        alloc_logits = self.alloc_net(emb.mean(dim=0))
+        return prior, alloc_logits
+
+    def forward(self, pyg):
+        prior, _ = self.forward_with_alloc(pyg)
+        return prior
 
 
 def lowrank_head_adapter_is_dead(model: nn.Module, atol: float = 1e-12) -> bool:
@@ -649,7 +665,7 @@ def load_multihead_state_dict(model: nn.Module, state_dict: dict):
     if not isinstance(model, MultiHeadNet):
         return model.load_state_dict(state_dict)
     if getattr(model, "head_decoder_type", "lora") == "lowrank":
-        return model.load_state_dict(state_dict)
+        return model.load_state_dict(state_dict, strict=False)
 
     migrated = dict(state_dict)
     old_prefix = "par_net_heu.base.lins."
@@ -671,7 +687,7 @@ def load_multihead_state_dict(model: nn.Module, state_dict: dict):
 
     is_current_lora = "par_net_heu.out.lora_A" in migrated
     if is_current_lora:
-        return model.load_state_dict(migrated)
+        return model.load_state_dict(migrated, strict=False)
 
     return model.load_state_dict(migrated, strict=False)
 
