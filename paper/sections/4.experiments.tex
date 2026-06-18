@@ -1,26 +1,26 @@
 
-We evaluate \DyNACS{} with emphasis on \emph{zero-shot in-problem generalization}. Unless otherwise specified, a single model trained on uniformly distributed 1K-node synthetic instances is directly tested on benchmark \TSP{} and \CVRP{} instances with different scales, structures, and distributions. This setting differs from the conventional neural combinatorial optimization protocol, where models are often trained and tested on matched synthetic distributions, or where different models are trained for different scales. Our goal is to evaluate whether the learned guidance transfers beyond the training distribution while preserving the efficiency and reliability of the underlying ACO search.
+We evaluate \DyNACS{} with emphasis on zero-shot generalization within each problem type. Unless otherwise specified, a single model trained on uniformly distributed 1K-node synthetic instances is directly tested on benchmark \TSP{} and \CVRP{} instances with different scales, structures, and distributions. This setting differs from the conventional neural combinatorial optimization protocol, where models are often trained and tested on matched synthetic distributions, or where different models are trained for different scales. Our goal is to evaluate whether the learned guidance transfers beyond the training distribution while preserving the efficiency and reliability of the underlying ACO search.
 
-The evaluation follows the progression of the method. We first compare the full \DyNACS{} framework with classical solvers, neural routing solvers, and neural-guided ACO baselines under the zero-shot benchmark protocol. We then isolate the contribution of trajectory-diverse guidance by comparing the shared backend, the single-prior dynamic model \DyNACO{}, and the full \DyNACS{} model. Next, we study the main algorithmic mechanisms through ablations, with particular attention to whether SRR preserves policy credit assignment while maintaining local-search quality. Finally, we analyze runtime, neural overhead, training efficiency, and learned guidance behavior to clarify how the method scales in practice.
+The evaluation follows the progression of the method. We first compare the full \DyNACS{} framework with classical solvers, neural routing solvers, and neural-guided ACO baselines under the zero-shot benchmark protocol. We then isolate the contribution of trajectory-diverse guidance by comparing the shared backend, \DyNACO{} with one learned behavior, and the full \DyNACS{} model. Next, we study the main algorithmic mechanisms through ablations, with particular attention to whether SRR preserves policy credit assignment while maintaining the quality of local search. Finally, we analyze runtime, neural overhead, training efficiency, and learned guidance behavior to clarify how the method scales in practice.
 
 \subsection{Experimental Setup}
 \label{sec:setup}
 
 \smallskip\noindent\textbf{Training setup.}
-All experiments use a fixed random seed and deterministic single-run evaluation. Training instances are generated online, with coordinates sampled uniformly from $[0,1]^2$, yielding 320 training instances in total (32 per epoch $\times$ 10 epochs). We train with PPO on a single RTX 5090 GPU and Ryzen 9 7950X CPU with 16 cores. Default \DyNACS{} hyperparameters are summarized in Table~\ref{tab:hyperparams}, and baseline configurations are detailed in Appendix~\ref{app:setup}.
+All experiments use a fixed random seed and one deterministic run per instance. Training instances are generated online, with coordinates sampled uniformly from $[0,1]^2$, yielding 320 training instances in total (32 per epoch $\times$ 10 epochs). We train with PPO on a single RTX 5090 GPU and Ryzen 9 7950X CPU with 16 cores. Default \DyNACS{} hyperparameters are summarized in Table~\ref{tab:hyperparams}, and baseline configurations are detailed in Appendix~\ref{app:setup}.
 
 \smallskip\noindent\textbf{Benchmark datasets.}
-For the main zero-shot evaluation, we follow the proposed generalization-focused benchmark protocol. The \TSP{} test suite includes instances from TSPLIB~\cite{tsplib}, National TSP~\cite{nationaltsp}, VLSI TSP~\cite{vlsitsp}, and the 8th DIMACS Implementation Challenge for TSP~\cite{dimacs8tsp}. These datasets cover geographic, industrial, clustered, and benchmark-generated structures. The \CVRP{} test suite includes instances from CVRPLIB~\cite{cvrplib}, including Set X and large-scale AGS instances~\cite{ags}. We include only standard Euclidean instances with available best-known solutions and without additional side constraints such as fixed edges, fixed route numbers, or duration limits.
+For the main zero-shot evaluation, we follow a benchmark protocol designed to test generalization. The \TSP{} test suite includes instances from TSPLIB~\cite{tsplib}, National TSP~\cite{nationaltsp}, VLSI TSP~\cite{vlsitsp}, and the 8th DIMACS Implementation Challenge for TSP~\cite{dimacs8tsp}. These datasets cover geographic, industrial, clustered, and benchmark-generated structures. The \CVRP{} test suite includes instances from CVRPLIB~\cite{cvrplib}, including Set X and large-scale AGS instances~\cite{ags}. We include only standard Euclidean instances with available best-known solutions and without additional side constraints such as fixed edges, fixed route numbers, or duration limits.
 
-This benchmark construction is substantially more challenging than synthetic in-distribution testing. The training distribution contains only uniform 1K-node instances, whereas the test suite contains benchmark instances with diverse structures and scales. Therefore, strong performance on this suite indicates zero-shot transfer across both scale and distribution.
+This benchmark construction is substantially more challenging than testing on synthetic instances from the training distribution. The training distribution contains only uniform 1K-node instances, whereas the test suite contains benchmark instances with diverse structures and scales. Therefore, strong performance on this suite indicates zero-shot transfer across both scale and distribution.
 
 \smallskip\noindent\textbf{Candidate graph and backend.}
-The candidate graph is a symmetric $K$-nearest-neighbor graph with $K{=}32$, with ties broken by node index. A backup list of 64 additional neighbors is maintained for fallback~\cite{ACOTSP-MF}. For \TSP{}, the backend follows the perturbation-based ACO design adapted from~\cite{faco}. For \CVRP{}, we design a capacity-aware perturbation-based backend with scope-restricted refinement, described in Appendix~\ref{app:cvrp}.
+The candidate graph is a symmetric $K$-nearest-neighbor graph with $K{=}32$, with ties broken by node index. A backup list of 64 additional neighbors is maintained for fallback~\cite{ACOTSP-MF}. For \TSP{}, the backend follows the ACO design based on perturbations from~\cite{faco}. For \CVRP{}, we use a capacity-aware version of the same backend with scope-restricted refinement, described in Appendix~\ref{app:cvrp}.
 
 \smallskip\noindent\textbf{Baselines.}
-We compare with four groups of methods. First, we include simple construction heuristics, including Nearest Neighbor and Random Insertion. These baselines are important because recent generalization-focused evaluations show that many neural solvers can degrade below simple heuristics under benchmark distribution shift. Second, we include strong classical solvers, including LKH-3~\cite{lkhtsp,lkhcvrp} for \TSP{} and HGS~\cite{hgs} and AILS-II~\cite{ails2} for \CVRP{}. Third, we compare with representative neural routing solvers, including BQ~\cite{bq}, LEHD~\cite{lehd}, SIL~\cite{sil}, ICAM~\cite{icam}, ELG~\cite{elg}, INViT~\cite{invit}, L2R~\cite{l2r}, DGL~\cite{dgl}, ReLD~\cite{reld}, L2C-Insert~\cite{l2c}, H-TSP~\cite{htsp}, DACT~\cite{dact}, NeuOpt~\cite{neuopt}, GenSCO~\cite{gensco}, DRHG~\cite{drhg}, and Fast T2T~\cite{fastt2t}. Finally, we compare with neural-guided ACO methods, including DeepACO~\cite{deepaco}, GFACS~\cite{gfacs}, GTG-ACO~\cite{gtgaco}, and HeatACO~\cite{heataco}.
+We compare with four groups of methods. First, we include simple construction heuristics, including Nearest Neighbor and Random Insertion. These baselines are important because recent evaluations of generalization show that many neural solvers can degrade below simple heuristics under benchmark distribution shift. Second, we include strong classical solvers, including LKH-3~\cite{lkhtsp,lkhcvrp} for \TSP{} and HGS~\cite{hgs} and AILS-II~\cite{ails2} for \CVRP{}. Third, we compare with representative neural routing solvers, including BQ~\cite{bq}, LEHD~\cite{lehd}, SIL~\cite{sil}, ICAM~\cite{icam}, ELG~\cite{elg}, INViT~\cite{invit}, L2R~\cite{l2r}, DGL~\cite{dgl}, ReLD~\cite{reld}, L2C-Insert~\cite{l2c}, H-TSP~\cite{htsp}, DACT~\cite{dact}, NeuOpt~\cite{neuopt}, GenSCO~\cite{gensco}, DRHG~\cite{drhg}, and Fast T2T~\cite{fastt2t}. Finally, we compare with neural-guided ACO methods, including DeepACO~\cite{deepaco}, GFACS~\cite{gfacs}, GTG-ACO~\cite{gtgaco}, and HeatACO~\cite{heataco}.
 
-We also include the unguided perturbation-based ACO backend as a direct ablation baseline. This isolates the contribution of neural guidance, since \DyNACO{}, \DyNACS{}, and the unguided backend share the same candidate graph, perturbation mechanism, refinement procedure, and search budget.
+We also include the unguided ACO backend as a direct ablation baseline. This isolates the contribution of neural guidance, since \DyNACO{}, \DyNACS{}, and the unguided backend share the same candidate graph, perturbation mechanism, refinement procedure, and search budget.
 
 \smallskip\noindent\textbf{Metrics.}
 We report three complementary metrics. \emph{Effectiveness} is measured by the average optimality gap to the best-known solution (BKS):
@@ -31,14 +31,14 @@ We report three complementary metrics. \emph{Effectiveness} is measured by the a
 \end{equation}
 \emph{Efficiency} is measured by wall-clock inference time. \emph{Reliability} is measured by the number of successfully solved instances. A method is considered unsuccessful if it runs out of memory, times out, fails to produce a feasible solution, or suffers severe performance breakdown. Results are grouped into three scale ranges: $(0,1\mathrm{K})$, $[1\mathrm{K},10\mathrm{K})$, and $[10\mathrm{K},100\mathrm{K}]$, with aggregate results also reported.
 
-\subsection{Zero-Shot Benchmark Generalization}
+\subsection{Zero-Shot Generalization on Benchmarks}
 \label{sec:main-results}
 
-Table~\ref{tab:exp_proposed} presents the main zero-shot benchmark results on \TSP{} and \CVRP{}. Unlike the conventional in-distribution setting, all neural methods are evaluated without benchmark-specific retraining or fine-tuning. The results show that \DyNACS{} achieves the strongest overall performance among neural methods while solving all instances.
+Table~\ref{tab:exp_proposed} presents the main zero-shot results on \TSP{} and \CVRP{} benchmarks. Unlike the conventional setting where training and testing distributions are matched, all neural methods are evaluated without retraining or fine-tuning on benchmark instances. The results show that \DyNACS{} achieves the strongest overall performance among neural methods while solving all instances.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
-\caption{Headline zero-shot benchmark results from Table~\ref{tab:exp_proposed}.}
+\caption{Headline zero-shot results from Table~\ref{tab:exp_proposed}.}
 \label{tab:headline-results}
 \small
 \renewcommand{\arraystretch}{0.85}
@@ -174,35 +174,38 @@ ACO backend & 2.31\% / 228 & 3.18\% / 110 \\
 \end{table*}%
 
 \smallskip\noindent\textbf{TSP.}
-On \TSP{}, \DyNACS{} achieves the best aggregate gap among neural methods and remains reliable across all scale groups. This is particularly important on medium and large benchmark instances, where many end-to-end neural solvers either degrade sharply or fail to solve all instances. Compared with the unguided ACO backend, \DyNACS{} consistently improves solution quality, confirming that the neural policy contributes useful guidance beyond the handcrafted perturbation-based search. Compared with neural baselines, \DyNACS{} combines stronger effectiveness with full reliability, avoiding the severe degradation observed in several construction-based and heatmap-based methods.
+On \TSP{}, \DyNACS{} achieves the best aggregate gap among neural methods while solving all 228 instances. The advantage is most relevant in the medium and large groups, where several end-to-end neural solvers either lose many instances or degrade sharply. The comparison with the ACO backend shows a smaller but consistent gain, indicating that the learned guidance improves the same search environment rather than changing the evaluation budget.
 
 \smallskip\noindent\textbf{CVRP.}
-On \CVRP{}, \DyNACS{} also achieves the best overall gap among neural methods and solves all instances. This result is notable because \CVRP{} introduces capacity constraints and route-feasibility decisions that are absent in \TSP{}. The capacity-aware backend handles feasibility, while the neural policy provides dynamic edge-level guidance conditioned on pheromone and incumbent states. The consistent improvement over the unguided backend indicates that \DyNACS{} learns transferable search signals rather than merely exploiting \TSP{}-specific structure.
+On \CVRP{}, \DyNACS{} also gives the best aggregate neural result and solves all 110 instances. The gain over the ACO backend is larger than on \TSP{} in the total column, suggesting that multiple learned behaviors are particularly useful when capacity constraints create more heterogeneous local decisions. Unlike several neural baselines, the method does not trade quality for the number of solved instances.
 
 \smallskip\noindent\textbf{Comparison with simple heuristics.}
 The inclusion of Nearest Neighbor and Random Insertion tests whether neural methods provide value beyond simple handcrafted rules. \DyNACS{} substantially outperforms these heuristics on both problems while preserving full reliability. This is important because several neural baselines degrade below simple heuristics under benchmark distribution shift, suggesting that strong synthetic performance does not necessarily translate to zero-shot deployment.
 
+\smallskip\noindent\textbf{Scalability of neural baselines.}
+The failures and high runtimes of several neural baselines are largely explained by their inference structure. End-to-end constructive policies~\cite{attentionmodel,pomo,bq,lehd,invit,sigd} are usually trained on small instances and often rely on quadratic attention in the number of nodes. When applied directly to larger benchmarks, they face both scale shift and memory pressure. Neural ACO baselines encounter a related dense bottleneck because they materialize heatmap or pheromone-prior matrices in $\mathbb{R}^{N\times N}$ and then use them inside an ACO loop. Decomposition and hierarchical methods such as GLOP~\cite{glop}, H-TSP~\cite{htsp}, SIL~\cite{sil}, and LEHD~\cite{lehd} mitigate this issue, but their global context modules or repeated subproblem calls can still become expensive at extreme scales. In contrast, \DyNACS{} keeps both neural inference and search state on a sparse $K$-NN graph, so the learned component scales with $nK$ rather than a dense edge matrix.
+
 \smallskip\noindent\textbf{Comparison with classical solvers.}
-Classical solvers such as LKH-3, HGS, and AILS-II remain stronger in absolute solution quality, reflecting decades of specialized engineering. However, \DyNACS{} is not intended to replace these solvers directly. Instead, it shows that a compact neural policy can improve a scalable population-based optimizer and generalize across benchmark distributions with low overhead. This positions \DyNACS{} as a practical learning-guided optimizer rather than an end-to-end neural replacement for mature heuristics.
+Classical solvers such as LKH-3, HGS, and AILS-II remain stronger in absolute solution quality, reflecting decades of specialized engineering. The relevant comparison here is therefore not replacement, but whether learning improves a scalable ACO backend under zero-shot evaluation. Table~\ref{tab:exp_proposed} shows that it does, while keeping reliability at 100\% on both problem families.
 
 \subsection{Effect of Trajectory-Diverse Guidance}
 \label{sec:trajectory-diverse-effect}
 
-Table~\ref{tab:trajectory-diverse-effect} isolates the progression from the shared search substrate to the base model and then to the full model. The unguided backend tests the perturbation-based ACO substrate without neural guidance. \DyNACO{} adds Dynamic Neural ACO through one state-aware guidance field. \DyNACS{} builds on \DyNACO{} by adding behavior-conditioned trajectory guidance, allowing multiple learned behaviors to steer disjoint ant groups within the same search process. This comparison is the central test of the second method layer: whether trajectory-diverse guidance strengthens the single-behavior dynamic model, rather than merely benefiting from the same backend or a larger search budget. The consistent reduction from \DyNACO{} to \DyNACS{} shows that trajectory-diverse guidance improves the search process itself: heterogeneous behaviors, shared search memory, and online behavior routing together improve zero-shot benchmark generalization over the base dynamic policy.
+Table~\ref{tab:trajectory-diverse-effect} isolates the progression from the shared search environment to the base model and then to the full model. The unguided backend tests the ACO environment without neural guidance. \DyNACO{} adds Dynamic Neural Ant Colony Optimization through one guidance field that observes the search state. \DyNACS{} builds on \DyNACO{} by allowing multiple learned behaviors to steer disjoint ant groups within the same search process. This comparison is the central test of the second method layer: whether trajectory-diverse guidance improves on the one-behavior model, rather than merely benefiting from the same backend or a larger search budget. The consistent reduction from \DyNACO{} to \DyNACS{} shows that multiple behaviors improve the search process itself: heterogeneous behaviors, shared search memory, and online behavior routing together improve zero-shot benchmark generalization over the dynamic base policy.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Aggregate zero-shot effect of trajectory-diverse guidance. Gaps are copied from Table~\ref{tab:exp_proposed}.}
 \label{tab:trajectory-diverse-effect}
 \small
 \renewcommand{\arraystretch}{0.85}
-\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcc@{}}
 \toprule
-Method & \TSP{} Gap & \TSP{} Solved & \CVRP{} Gap & \CVRP{} Solved \\
+Method & \TSP{} Gap & \CVRP{} Gap \\
 \midrule
-ACO backend & 2.31\% & 228/228 & 3.18\% & 110/110 \\
-\DyNACO{} (single behavior) & 2.16\% & 228/228 & 3.10\% & 110/110 \\
-\DyNACS{} & \textbf{1.98\%} & 228/228 & \textbf{2.80\%} & 110/110 \\
+ACO backend & 2.31\%  & 3.18\%  \\
+\DyNACO{} (single behavior) & 2.16\% & 3.10\%  \\
+\DyNACS{} & \textbf{1.98\%}  & \textbf{2.80\%} \\
 \bottomrule
 \end{tabular*}
 \end{table}
@@ -210,10 +213,10 @@ ACO backend & 2.31\% & 228/228 & 3.18\% & 110/110 \\
 \subsection{Zero-Shot Comparison with Neural-Guided ACO}
 \label{sec:neural-aco-comparison}
 
-Table~\ref{tab:neural-aco} compares \DyNACS{} with prior neural-guided ACO methods at their maximum reported scales. Existing neural ACO methods mainly use static heatmaps or static heuristic priors, while \DyNACS{} updates its guidance throughout the search trajectory and diversifies behavior-conditioned trajectories within one shared colony. The results show that \DyNACS{} achieves better solution quality while substantially reducing runtime. This supports our central claim that the limitation of prior neural ACO is not only model architecture, but also the static integration strategy.
+Table~\ref{tab:neural-aco} compares \DyNACS{} with prior neural-guided ACO methods at their maximum reported scales. Existing neural ACO methods mainly use static heatmaps or static heuristic priors, while \DyNACS{} updates its guidance throughout the search trajectory and diversifies the trajectories followed by different ant groups within one shared colony. The results show that \DyNACS{} achieves better solution quality while substantially reducing runtime. This supports our central claim that the limitation of prior neural ACO is not only model architecture, but also the static integration strategy.
 
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \small
 \renewcommand{\arraystretch}{0.85}
@@ -243,10 +246,10 @@ ACO+DIFUSCO~\cite{difusco}   & 0.23\% & 10s & 1.19\% & 2.89m & -- & -- \\
 \subsection{Credit Assignment and Component Ablations}
 \label{sec:ablations}
 
-\smallskip\noindent\textbf{Both dynamic-guidance mechanisms are essential.}
-Table~\ref{tab:ablation-decoupling} isolates the two core mechanisms of dynamic neural guidance. Removing trajectory-aware training, which reverts the model toward static single-step optimization, causes the largest degradation. Removing the state-aware representation also consistently hurts performance. This confirms that both mechanisms are important, and that aligning training with the iterative search dynamics is the more critical factor.
+\smallskip\noindent\textbf{Both dynamic guidance mechanisms are essential.}
+Table~\ref{tab:ablation-decoupling} isolates the two core mechanisms of dynamic neural guidance. Removing training over full trajectories causes the largest degradation, especially on \TSP{}1K and \TSP{}5K. Removing the representation of the search state also hurts performance across all four columns. The ordering of the rows suggests that trajectory-aware training supplies the larger gain, while state features provide an additional improvement once the policy is trained on full search trajectories.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Decoupling the two mechanisms of dynamic neural guidance. We reported Gap (\%) of 16 instances to BKS at I$_{1000}$.}
 \label{tab:ablation-decoupling}
@@ -268,7 +271,7 @@ Static only       & 3.65 & 4.87 & 3.56 & 3.00 \\
 \smallskip\noindent\textbf{SRR preserves both training signal and search quality.}
 Tables~\ref{tab:srr-training} and~\ref{tab:srr-inference} compare SRR with full local search (FLS) and truncated local search (TLS). FLS can produce strong individual solutions, but it may rewrite the sampled perturbation enough to wash out the model's contribution. TLS preserves more of the policy signal, but leaves solutions under-refined. SRR provides the best trade-off: it runs local search to convergence within the perturbation scope, preserving the causal link between the policy action and the post-refinement reward while maintaining low refinement cost.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Training progress under different refinement strategies. Values are improvement over the untrained model.}
 \label{tab:srr-training}
@@ -289,7 +292,7 @@ Avg. ACO time & \textbf{2.35s} & 4.33s & 8.03s \\
 \end{tabular*}
 \end{table}
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Inference quality and runtime under different refinement strategies (TSP-5K, I$_{1000}$).}
 \label{tab:srr-inference}
@@ -309,7 +312,7 @@ SRR & \textbf{1.93} & \textbf{51.66} & \textbf{1.35\%} \\
 \smallskip\noindent\textbf{Pheromone stabilization improves consistency without replacing dynamic guidance.}
 Table~\ref{tab:ps-ablation} shows that pheromone stabilization improves the consistency of the training signal for both the unguided backend and \DyNACO{}. Dynamic guidance remains beneficial with or without stabilized pheromone bounds, while stabilization further improves the final guided solver.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Ablation of pheromone stabilization (PS). We reported Gap (\%) to BKS.}
 \label{tab:ps-ablation}
@@ -329,7 +332,7 @@ CVRPlib (5) & 2.91 & \textbf{2.71} & 2.76 & \textbf{2.18} \\
 \smallskip\noindent\textbf{Inference-time strategies provide complementary gains.}
 All models are trained identically on the full trajectory with constant $\gamma{=}1$. At inference, guidance annealing and phased injection are applied as fixed problem- and scale-level configurations, rather than tuned per instance. Table~\ref{tab:inference-config} reports the configurations, and Table~\ref{tab:ablation-inference} shows their effects. On \TSP{}, both strategies yield consistent improvements; on \CVRP{}, phased injection is mainly beneficial at longer horizons.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Inference strategy configuration per problem \& scale.}
 \label{tab:inference-config}
@@ -367,7 +370,7 @@ Phased + Annealing         & 1.23 & 1.60 & 7.35 & 11.02 \\
 
 The asymmetry between training and inference is deliberate. During training, annealing the guidance weight would scale the policy gradient by $\gamma_t$ and weaken late-stage learning as $\gamma_t \to 0$; phased injection would similarly hide early pheromone states from the policy. We therefore train with constant $\gamma{=}1$ over the full trajectory and apply annealing or phased injection only as post-hoc inference controls. Table~\ref{tab:train-strategy} supports this design choice on \TSP{}-5K: training-time annealing or phasing does not provide a consistent advantage, while post-hoc inference controls recover the best results without requiring separate training regimes.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Training regime vs.\ inference strategy on \TSP{}-5K ($I_{1000}$). Gap (\%) to BKS; lower is better.}
 \label{tab:train-strategy}
@@ -384,12 +387,17 @@ Phased ($\phi{=}0.5$) & 1.37 & 1.26 & 1.24 & 1.25 \\
 \end{tabular*}
 \end{table}
 
+\subsection{Sensitivity to Search Granularity}
+\label{sec:sensitivity_summary}
+
+The method is stable under moderate changes to the candidate graph and search granularity. Increasing the number of candidates $K$ improves solution quality with the expected near-linear runtime tradeoff, while perturbation length $M$ has a problem-dependent optimum because overly long interventions can disrupt the incumbent basin and increase refinement work. Varying the outer guidance updates $H$ and inner ACO steps $S$ while keeping the total iteration budget fixed produces small differences, which supports the fixed-duration semi-MDP abstraction used by the policy. Appendix~\ref{extended_ablation} reports the detailed sensitivity tables for $K$, $M$, $H$, and $S$.
+
 \subsection{Efficiency and Neural Overhead}
 \label{sec:runtime}
 
 A practical learning-guided optimizer must improve solution quality without introducing prohibitive neural overhead. Table~\ref{tab:time-breakdown} compares the runtime of \DyNACS{} and the unguided ACO backend at matched iteration budgets.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Time breakdown (CPU vs.\ GPU) and quality for unguided ACO vs.\ \DyNACS{} at $I_{10000}$.}
 \label{tab:time-breakdown}
@@ -429,19 +437,19 @@ Problem & Method & Gap & CPU (s) & GPU (s) & Total (s) \\
 \end{table}
 
 
-On \TSP{}, \DyNACS{} can even reduce total runtime compared with the unguided backend while producing better solutions. Better-targeted perturbations create less downstream suboptimality, so SRR terminates in fewer local-search steps; the GPU inference cost is offset by reduced CPU refinement time. On \CVRP{}, the capacity-aware backend dominates runtime, but neural overhead remains below 1\% at large scales while still yielding consistent quality improvements. These results show that the neural policy changes the search trajectory rather than acting as an expensive post-processing module.
+On \TSP{}, \DyNACS{} reduces total runtime at the reported scales while also improving solution quality. The CPU component decreases enough to offset the GPU inference cost, which is consistent with SRR requiring fewer repair steps after better-targeted perturbations. On \CVRP{}, the capacity-aware backend dominates runtime; the GPU column remains below 1\% of total time at larger scales, while the quality column still improves over the unguided backend.
 
 \subsection{Training Efficiency}
 \label{sec:training-efficiency}
 
-\DyNACS{} converges in approximately 30 minutes for TSP-1K and roughly 4 hours for TSP-100K on our machine, using only 320 training instances. This is substantially lighter than many end-to-end neural solvers that require large offline datasets or long training schedules. The shared \DyNACO{} encoder keeps the parameter count essentially scale independent because the architecture operates on local $K$-NN neighborhoods; \DyNACS{} adds only lightweight behavior-conditioned guidance maps on top of this representation. Appendix~\ref{extended_ablation} reports the static-vs-dynamic feature memory overhead in Table~\ref{tab:feature-memory-app}.
+\DyNACS{} converges in approximately 30 minutes for TSP-1K and roughly 4 hours for TSP-100K on our machine, using only 320 training instances. This is substantially lighter than many end-to-end neural solvers that require large offline datasets or long training schedules. The shared \DyNACO{} encoder keeps the parameter count essentially scale independent because the architecture operates on local $K$-NN neighborhoods; \DyNACS{} adds only lightweight behavior maps on top of this representation. Appendix~\ref{extended_ablation} reports the memory overhead of static and dynamic feature inputs in Table~\ref{tab:feature-memory-app}.
 
 \subsection{Extension to Other COPs}
 \label{sec:other-cops}
 
-Table~\ref{tab:other-cops} evaluates whether the same dynamic-guidance formulation can extend beyond routing. We test on Orienteering, Multiple Knapsack, and Bin Packing using the same environments as~\cite{deepaco}. These experiments do not use SRR, allowing us to isolate whether the dynamic policy interface itself can improve existing ACO algorithms. Dynamic guidance improves over both unguided ACO and static guidance on all three problems, suggesting that the framework is not tied to a routing-specific objective, even though SRR remains essential for large-scale routing.
+Table~\ref{tab:other-cops} evaluates whether the same dynamic guidance formulation can extend beyond routing. We test on Orienteering, Multiple Knapsack, and Bin Packing using the same environments as~\cite{deepaco}. These experiments do not use SRR, allowing us to isolate whether the dynamic policy interface itself can improve existing ACO algorithms. Dynamic guidance improves over both unguided ACO and static guidance on all three problems, suggesting that the framework is not tied to a routing objective, even though SRR remains essential for large routing instances.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Extension to additional COPs. Higher is better.}
 \label{tab:other-cops}
@@ -464,9 +472,9 @@ Dynamic & \textbf{10.4177} & \textbf{24.1477} & \textbf{0.9205} \\
 We now examine what dynamic neural guidance learns that static heatmaps cannot capture.
 
 \smallskip\noindent\textbf{The policy adapts its guidance to the current search phase.}
-Standard neural-ACO methods produce a static heatmap that is identical whether the solver has run for 10 or 10,000 iterations. Because \DyNACO{} conditions on the evolving pheromone field and incumbent solution, its improvements grow with longer search horizons. This confirms that state-aware conditioning enables the policy to remain useful across different stages of the search.
+Standard neural-ACO methods produce a static heatmap that is identical whether the solver has run for 10 or 10,000 iterations. In contrast, the guidance shown here changes with the pheromone field and incumbent solution. The improvement at longer horizons indicates that the policy remains active after the early construction phase, rather than acting only as an initialization signal.
 
-\begin{figure}[t]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\columnwidth]{figures/matrix_model_t5.pdf}
     \caption{Visualization of pheromone concentration and neural guidance scores (first 32 rows of the edge matrix) at successive iterations~$T$.}
@@ -477,9 +485,9 @@ Standard neural-ACO methods produce a static heatmap that is identical whether t
 Figure~\ref{fig:matrix_model} displays the pheromone matrix and corresponding neural guidance scores at successive iterations. As the search progresses, pheromone concentrations saturate and many edges converge toward $\tau_{\max}$, making the pheromone signal less informative. Despite this, the model outputs diverse guidance scores. In particular, over-reinforced edges often receive negative guidance, which redirects exploration away from stagnant regions. This selective counter-pressure is unavailable to static priors because they cannot observe the evolving pheromone landscape.
 
 \smallskip\noindent\textbf{The 1K-trained model transfers zero-shot to larger synthetic scales.}
-Table~\ref{tab:cross-scale} compares an in-scale model with the 1K-trained model on larger synthetic instances. The small degradation, and in some cases improvement, indicates that the learned policy is largely scale-invariant. This transferability stems from three design choices: the local $K$-NN architecture, normalized state-aware features, and a perturbation action space whose size does not grow with the number of nodes.
+Table~\ref{tab:cross-scale} compares an in-scale model with the 1K-trained model on larger synthetic instances. The 1K model remains close to the in-scale model in all columns and is slightly better in two \TSP{}5K settings. This supports the scale-transfer claim without requiring separate models for each tested size.
 
-\begin{table}[t]
+\begin{table}[h]
 \centering
 \caption{Cross-scale zero-shot transfer: 1K model evaluated on larger instances.}
 \label{tab:cross-scale}
@@ -510,38 +518,38 @@ Problem & Model & Gap & $\Delta$ & Gap & $\Delta$ \\
 \end{tabular*}
 \end{table}
 
-\smallskip\noindent\textbf{\DyNACS{} generalizes zero-shot to real-world benchmarks.}
-Table~\ref{tab:realworld} evaluates the 1K-trained model on large TSPLIB and CVRPLIB instances without any fine-tuning. These instances include non-uniform, clustered, and geographically derived node distributions that differ substantially from the uniform training data. \DyNACS{} solves all instances and consistently improves over the unguided backend, confirming that dynamic and trajectory-diverse guidance trained only on synthetic 1K instances can transfer to realistic benchmark distributions.
+% \smallskip\noindent\textbf{\DyNACS{} generalizes zero-shot to real-world benchmarks.}
+% Table~\ref{tab:realworld} evaluates the 1K-trained model on large TSPLIB and CVRPLIB instances without any fine-tuning. These instances include non-uniform, clustered, and geographically derived node distributions that differ substantially from the uniform training data. \DyNACS{} solves all instances and consistently improves over the unguided backend, confirming that the full guidance mechanism trained only on synthetic 1K instances can transfer to realistic benchmark distributions.
 
-\begin{table}[t]
-\centering
-\caption{Real-world benchmark results (zero-shot from 1K model, $I_{10000}$).}
-\label{tab:realworld}
-\small
-\renewcommand{\arraystretch}{0.80}
-\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
-\toprule
-& \multicolumn{2}{c}{TSPLIB (33)} & \multicolumn{2}{c}{CVRPlib (14)} \\
-\cmidrule(lr){2-3} \cmidrule(lr){4-5}
-Method & Gap (\%) & Time & Gap (\%) & Time \\
-\midrule
-LKH3 & 0.07 & 35m & 13.6 & 2.1h \\
-HGS & -- & -- & 5.15 & 5h \\
-\midrule
-LEHD~\cite{lehd}  & 13.2 & 38m & 16.9 & 40m \\
-GLOP~\cite{glop} & 6.99 & 34s & 20.6 & 39s \\
-SIL~\cite{sil} & 3.03 & 45m & 7.69 & 54m \\
-\midrule
-% ACO                   & 1.29 & 13s & 4.26 & 50.85s \\
-\textbf{\DyNACS{} (ours)}       & \textbf{0.89} & 11.57s & \textbf{3.66} & 51.07s \\
-\bottomrule
-\end{tabular*}
-\end{table}
+% \begin{table}[h]
+% \centering
+% \caption{Real-world benchmark results (zero-shot from 1K model, $I_{10000}$).}
+% \label{tab:realworld}
+% \small
+% \renewcommand{\arraystretch}{0.80}
+% \begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
+% \toprule
+% & \multicolumn{2}{c}{TSPLIB (33)} & \multicolumn{2}{c}{CVRPlib (14)} \\
+% \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+% Method & Gap (\%) & Time & Gap (\%) & Time \\
+% \midrule
+% LKH3 & 0.07 & 35m & 13.6 & 2.1h \\
+% HGS & -- & -- & 5.15 & 5h \\
+% \midrule
+% LEHD~\cite{lehd}  & 13.2 & 38m & 16.9 & 40m \\
+% GLOP~\cite{glop} & 6.99 & 34s & 20.6 & 39s \\
+% SIL~\cite{sil} & 3.03 & 45m & 7.69 & 54m \\
+% \midrule
+% % ACO                   & 1.29 & 13s & 4.26 & 50.85s \\
+% \textbf{\DyNACS{} (ours)}       & \textbf{0.89} & 11.57s & \textbf{3.66} & 51.07s \\
+% \bottomrule
+% \end{tabular*}
+% \end{table}
 
 \smallskip\noindent\textbf{Guidance--pheromone dynamics are consistent across scales.}
-Figure~\ref{fig:guidance_pheromone_dynamics} shows a consistent two-phase interaction between neural guidance and pheromone. Early in the search, the policy tends to cooperate with pheromone by amplifying promising signals. Later, as pheromone concentrates and risks premature convergence, the policy increasingly suppresses over-reinforced edges to preserve exploration. The volatility diagnostics further show that guidance changes sharply after the first pheromone feedback, then settles into smaller but persistent updates across later outer steps. This rapid adaptation followed by steady refinement is the behavior expected from search-dynamics-aligned guidance: the policy reacts strongly when the search state first becomes informative, then continues to recalibrate as the pheromone field evolves.
+Figure~\ref{fig:guidance_pheromone_dynamics} shows a consistent two-phase interaction between neural guidance and pheromone. Early in the search, the policy tends to cooperate with pheromone by amplifying promising signals. Later, as pheromone concentrates and risks premature convergence, the policy increasingly suppresses over-reinforced edges to preserve exploration. The volatility diagnostics further show that guidance changes sharply after the first pheromone feedback, then settles into smaller but persistent updates across later outer steps. This rapid adaptation followed by steady refinement is expected from a policy that observes the search state directly: it reacts strongly when the pheromone field first becomes informative, then continues to recalibrate as the field evolves.
 
-\begin{figure}[t]
+\begin{figure}[h]
     \centering
 
     \subfloat[Training correlation\label{fig:guidance_eta_corr}]{%

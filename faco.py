@@ -1132,6 +1132,7 @@ class MFACO_TSP(_BaseMFACO):
         ls_scope: str = "localized",
         ls_budget: str = "truncated",
         ls_max_opt: int = 0,
+        euc_2d_cost: bool = False,
         **kwargs
     ):
         self.device = device
@@ -1143,6 +1144,7 @@ class MFACO_TSP(_BaseMFACO):
         self.ls_scope = ls_scope
         self.ls_budget = ls_budget
         self.ls_max_opt = int(ls_max_opt)
+        self.euc_2d_cost = bool(euc_2d_cost)
         self.alpha = alpha
         self._enable_torch_sync = enable_torch_sync
 
@@ -1174,6 +1176,7 @@ class MFACO_TSP(_BaseMFACO):
             ls_scope=ls_scope,
             ls_budget=ls_budget,
             ls_max_opt=ls_max_opt,
+            euc_2d_cost=euc_2d_cost,
         )
 
         self._cpp = faco_opt.MFACO_TSP(
@@ -1195,6 +1198,7 @@ class MFACO_TSP(_BaseMFACO):
             _ls_scope_to_int(ls_scope),
             _ls_budget_to_int(ls_budget),
             self.ls_max_opt,
+            self.euc_2d_cost,
         )
 
         if self.normalized_heuristic and not self.disable_heuristic:
@@ -1602,6 +1606,7 @@ class MFACO_CVRP(_BaseMFACO):
         ls_scope: str = "localized",
         ls_budget: str = "truncated",
         ls_max_opt: int = 0,
+        euc_2d_cost: bool = False,
         **kwargs
     ):
         coords_np = _as_numpy(coords, np.float32)
@@ -1632,6 +1637,7 @@ class MFACO_CVRP(_BaseMFACO):
             _ls_scope_to_int(ls_scope),
             _ls_budget_to_int(ls_budget),
             int(ls_max_opt),
+            bool(euc_2d_cost),
         )
         self.device = device
         self._enable_torch_sync = enable_torch_sync
@@ -1640,6 +1646,7 @@ class MFACO_CVRP(_BaseMFACO):
         self.ls_scope = ls_scope
         self.ls_budget = ls_budget
         self.ls_max_opt = int(ls_max_opt)
+        self.euc_2d_cost = bool(euc_2d_cost)
         
         if normalized_heuristic and not disable_heuristic:
             h = np.asarray(self._cpp.heuristic_sparse_np)

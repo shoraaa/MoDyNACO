@@ -237,6 +237,7 @@ public:
 
   // State arrays
   std::vector<float> coords;        // (n, 2) row-major (x,y)
+  bool euc_2d_cost = false;
   std::vector<int32_t> nn_list;     // (n, k) row-major: nearest neighbors
   std::vector<int32_t> backup_list; // (n, bl) row-major: backup neighbors
   std::vector<float>
@@ -272,7 +273,7 @@ public:
             bool extend_ls = false, bool smooth_mmas = false,
             int32_t fixed_steps = 0, bool nls = false, int32_t T_nls = 10,
             int32_t ls_scope = 0, int32_t ls_budget = 0,
-            int32_t ls_max_opt = 0);
+            int32_t ls_max_opt = 0, bool euc_2d_cost = false);
 
   // ========================================================================
   // API Methods
@@ -379,7 +380,8 @@ private:
     const size_t ib = static_cast<size_t>(b) * 2;
     const float dx = coords[ib + 0] - coords[ia + 0];
     const float dy = coords[ib + 1] - coords[ia + 1];
-    return std::sqrt(dx * dx + dy * dy);
+    const float d = std::sqrt(dx * dx + dy * dy);
+    return euc_2d_cost ? std::floor(d + 0.5f) : d;
   }
 
   std::pair<float, float> calc_trail_limits_cl(float solution_cost) const;
@@ -557,6 +559,7 @@ public:
   // State
   // -------------------------
   std::vector<float> coords;       // (n,2)
+  bool euc_2d_cost = false;
   std::vector<float> demand;       // (n,) demand[0]=0
   std::vector<int64_t> demand_int; // (n,) scaled/rounded
   std::vector<float> d0;           // (n,) dist to depot (precomputed)
@@ -596,7 +599,8 @@ public:
              bool disable_heuristic_, bool extend_ls_ = false,
              bool smooth_mmas_ = false, int32_t fixed_steps_ = 0,
              bool nls_ = false, int32_t T_nls_ = 10, int32_t ls_scope_ = 0,
-             int32_t ls_budget_ = 0, int32_t ls_max_opt_ = 0);
+             int32_t ls_budget_ = 0, int32_t ls_max_opt_ = 0,
+             bool euc_2d_cost_ = false);
 
   void seed_rng(uint64_t seed);
 

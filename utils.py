@@ -670,6 +670,45 @@ def gen_distance_matrix(coords):
     dists[torch.arange(n), torch.arange(n)] = 1e9
     return dists
 
+
+def euc_2d_route_costs(coords, routes, problem: str = "tsp") -> np.ndarray:
+    """Return EUC_2D integer costs for TSP tours or depot-separated CVRP routes."""
+    coords_np = np.asarray(coords, dtype=np.float64)
+    route_list = [None if route is None else np.asarray(route, dtype=np.int64) for route in routes]
+    costs = np.empty((len(route_list),), dtype=np.float64)
+    for idx, route in enumerate(route_list):
+        if route is None:
+            costs[idx] = np.nan
+            continue
+        route = route[route >= 0]
+        if route.size < 2:
+            costs[idx] = np.nan
+            continue
+        if problem == "tsp":
+            if route[0] != route[-1]:
+                route = np.concatenate([route, route[:1]])
+        else:
+            if route[0] != 0:
+                route = np.concatenate([np.array([0], dtype=np.int64), route])
+            if route[-1] != 0:
+                route = np.concatenate([route, np.array([0], dtype=np.int64)])
+        pts = coords_np[route]
+        delta = pts[1:] - pts[:-1]
+        edge_lengths = np.floor(np.sqrt(np.sum(delta * delta, axis=1)) + 0.5)
+        costs[idx] = float(edge_lengths.sum())
+    return costs
+
+
+def _has_complete_routes(routes, expected_len: int) -> bool:
+    if routes is None:
+        return False
+    try:
+        if len(routes) != expected_len:
+            return False
+        return all(route is not None and np.asarray(route).size > 0 for route in routes)
+    except TypeError:
+        return False
+
 def generate_tsp_instance(n):
     return np.random.rand(n, 2).astype(np.float32)
 
@@ -1239,7 +1278,15 @@ def gen_op_prizes(coords_or_instance: Any) -> Tensor:
 
 # ----------------- Shared/Dataset -----------------
 
-def load_auto_dataset(n, problem='tsp', data_source='test_set', rl_data=False, device='cpu'):
+def load_auto_dataset(
+    n,
+    problem='tsp',
+    data_source='test_set',
+    rl_data=False,
+    device='cpu',
+    cvrp_normalize_coords=True,
+    cvrp_keep_raw_coords=False,
+):
     """
     Load dataset automatically based on problem size (n) and source/mode.
     defaults to data/{problem}/data/test_set
@@ -1383,7 +1430,11 @@ def load_auto_dataset(n, problem='tsp', data_source='test_set', rl_data=False, d
         if problem == 'tsp':
             return load_tsp_txt_dataset(str(full_path))
         else:
-            return load_cvrp_txt_dataset(str(full_path))
+            return load_cvrp_txt_dataset(
+                str(full_path),
+                normalize_coords=cvrp_normalize_coords,
+                keep_raw_coords=cvrp_keep_raw_coords,
+            )
     else:
 
         print(f"No strict match for N={n} (rl_data={rl_data}). Scanning for partial match...")
@@ -1406,7 +1457,11 @@ def load_auto_dataset(n, problem='tsp', data_source='test_set', rl_data=False, d
             if problem == 'tsp':
                 return load_tsp_txt_dataset(str(best_cand))
             else:
-                return load_cvrp_txt_dataset(str(best_cand))
+                return load_cvrp_txt_dataset(
+                    str(best_cand),
+                    normalize_coords=cvrp_normalize_coords,
+                    keep_raw_coords=cvrp_keep_raw_coords,
+                )
 
     # Priority 2: Fallback to .pt file (unchanged)
     path = f'{DATA_DIR}/{problem}/valDataset-{n}.pt'
@@ -1545,7 +1600,7 @@ def load_tsp_txt_dataset(path):
     return data_list
 
 
-def load_cvrp_txt_dataset(path):
+def load_cvrp_txt_dataset(path, normalize_coords=True, keep_raw_coords=False):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Dataset file not found: {path}")
@@ -1605,6 +1660,7 @@ def load_cvrp_txt_dataset(path):
                 # Combine depot + customers
                 all_coords_flat = depot_coords + cust_coords_flat
                 coords = torch.tensor(all_coords_flat).view(num_cust+1, 2)
+                raw_coords = coords.clone()
                 
                 # Demand
                 if dem_idx != -1:
@@ -1629,10 +1685,11 @@ def load_cvrp_txt_dataset(path):
                 coord_min = coords.min(dim=0)[0]
                 coord_max = coords.max(dim=0)[0]
                 coord_range = (coord_max - coord_min).max().item()
-                if coord_range > 1.0 + 1e-6:
+                if normalize_coords and coord_range > 1.0 + 1e-6:
                     coords = (coords - coord_min) / coord_range
-                    # Scale cost by the same factor
-                    cost = cost_raw / coord_range if cost_raw > 0 else 0.0
+                    # Normal evaluation compares normalized route costs; EUC_2D
+                    # rescoring compares against the original CVRPLIB scale.
+                    cost = cost_raw if keep_raw_coords else (cost_raw / coord_range if cost_raw > 0 else 0.0)
                 else:
                     cost = cost_raw
                 
@@ -1641,7 +1698,10 @@ def load_cvrp_txt_dataset(path):
                     demand = demand / capacity
                     capacity = 1.0
                 
-                data_list.append((coords, demand, capacity, cost, tour, name))
+                item = (coords, demand, capacity, cost, tour, name)
+                if keep_raw_coords:
+                    item = item + (raw_coords,)
+                data_list.append(item)
 
             # Format 1 (Comma separated with keywords)
             elif "depot" in line and "customer" in line:
@@ -1685,6 +1745,7 @@ def load_cvrp_txt_dataset(path):
                 
                 all_coords_flat = depot_coords + cust_coords_flat
                 coords = torch.tensor(all_coords_flat).view(num_cust+1, 2)
+                raw_coords = coords.clone()
                 
                 # Capacity
                 capacity = float(parts[cap_idx+1])
@@ -1719,9 +1780,9 @@ def load_cvrp_txt_dataset(path):
                 coord_min = coords.min(dim=0)[0]
                 coord_max = coords.max(dim=0)[0]
                 coord_range = (coord_max - coord_min).max().item()
-                if coord_range > 1.0 + 1e-6:
+                if normalize_coords and coord_range > 1.0 + 1e-6:
                     coords = (coords - coord_min) / coord_range
-                    cost = cost_raw / coord_range if cost_raw > 0 else 0.0
+                    cost = cost_raw if keep_raw_coords else (cost_raw / coord_range if cost_raw > 0 else 0.0)
                 else:
                     cost = cost_raw
                 
@@ -1730,7 +1791,10 @@ def load_cvrp_txt_dataset(path):
                     demand = demand / capacity
                     capacity = 1.0
                 
-                data_list.append((coords, demand, capacity, cost, tour, name))
+                item = (coords, demand, capacity, cost, tour, name)
+                if keep_raw_coords:
+                    item = item + (raw_coords,)
+                data_list.append(item)
 
         except Exception as e:
             print(f"Error parsing CVRP line {line_idx+1}: {e}")
@@ -2234,9 +2298,10 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
             'ls_scope': getattr(args, 'ls_scope', 'localized'),
             'ls_budget': getattr(args, 'ls_budget', 'truncated'),
             'ls_max_opt': getattr(args, 'ls_max_opt', 0),
+            'euc_2d_cost': bool(getattr(args, 'euc_2d_cost', False)),
         }
     else:
-        coords, demand, capacity = instance_data
+        coords, demand, capacity = instance_data[:3]
         n = len(coords) - 1 # n customers
         if n_ants is None:
              n_ants = int(math.ceil(4 * math.sqrt(n) / 64) * 64)
@@ -2262,6 +2327,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
             'ls_scope': getattr(args, 'ls_scope', 'localized'),
             'ls_budget': getattr(args, 'ls_budget', 'truncated'),
             'ls_max_opt': getattr(args, 'ls_max_opt', 0),
+            'euc_2d_cost': bool(getattr(args, 'euc_2d_cost', False)),
         }
 
     aco = aco_class(**kwargs)
@@ -2471,7 +2537,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                         args, int(current_prior.shape[0]), n_ants, head_router
                     )
                     incumbent_before = best_seen
-                    costs_t, flats, _, _, traces, costs_raw, _, new_edges, survival = aco.sample_mixed_priors(
+                    costs_t, flats, _, _, traces, costs_raw, flats_raw, new_edges, survival = aco.sample_mixed_priors(
                         current_prior,
                         require_prob=sample_require_prob,
                         parallel_traced=True,
@@ -2479,24 +2545,25 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     )
                 elif problem == 'tsp':
                     prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior
-                    costs_t, flats, _, _, traces, costs_raw, _, _, survival = aco.sample(require_prob=sample_require_prob, prior=prior_arg, parallel_traced=True)
+                    costs_t, flats, _, _, traces, costs_raw, flats_raw, _, survival = aco.sample(require_prob=sample_require_prob, prior=prior_arg, parallel_traced=True)
                 else:
                     prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior
-                    costs_t, routes, decoded, _, traces, costs_raw, _, _, survival = aco.sample(require_prob=sample_require_prob, prior=prior_arg, return_decoded=return_decoded, parallel_traced=True)
+                    costs_t, routes, decoded, _, traces, costs_raw, routes_raw, _, survival = aco.sample(require_prob=sample_require_prob, prior=prior_arg, return_decoded=return_decoded, parallel_traced=True)
                     flats = routes
+                    flats_raw = routes_raw
 
                 if do_metrics:
                     metrics_log["survival"].append(survival.mean().item())
 
                 if return_decoded and problem == 'cvrp':
-                     best_idx_t = int(costs_t.argmin().item())
-                     try:
-                         rt = decoded[best_idx_t] if decoded is not None else flats[best_idx_t]
-                         best_decoded_route = rt
-                         verify_solution_cvrp(coords, demand, capacity, float(costs_t[best_idx_t]), rt)
-                     except ValueError as e:
-                         print(f"Verification failed: {e}")
-                         sys.exit(1)
+                    best_idx_t = int(costs_t.argmin().item())
+                    try:
+                        rt = decoded[best_idx_t] if decoded is not None else flats[best_idx_t]
+                        best_decoded_route = rt
+                        verify_solution_cvrp(coords, demand, capacity, float(costs_t[best_idx_t]), rt)
+                    except ValueError as e:
+                        print(f"Verification failed: {e}")
+                        sys.exit(1)
 
                 raw_costs = costs_raw if costs_raw is not None else costs_t
                 avg_raw = float(raw_costs.mean().item())
@@ -2719,6 +2786,14 @@ def get_dataset_signature(dataset, problem):
             hasher.update(coords.tobytes())
             hasher.update(demand.tobytes())
             hasher.update(str(cap).encode('utf-8'))
+            if len(first_item) > 3:
+                hasher.update(str(first_item[3]).encode('utf-8'))
+            if len(first_item) > 6:
+                raw_coords = first_item[6]
+                if torch.is_tensor(raw_coords):
+                    raw_coords = raw_coords.cpu().numpy()
+                if isinstance(raw_coords, np.ndarray):
+                    hasher.update(raw_coords.tobytes())
     except Exception as e:
         print(f"Warning: Could not hash dataset item: {e}")
         return "unknown_dataset"
@@ -2737,6 +2812,7 @@ def get_pure_mfaco_config_hash(args):
         'H', 'mini_H', 'L', # Iterations
         'parallel_traced', 'no_local_search', 'no_smooth_mmas', 
         'no_extend_ls', 'disable_heuristic', 'no_normalized_heuristic',
+        'euc_2d_cost',
     ]
     
     config_str = ""

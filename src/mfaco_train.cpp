@@ -29,7 +29,8 @@ MFACO_TSP::MFACO_TSP(const float *coords_ptr, int32_t n_, int32_t n_ants_,
                      bool disable_heuristic_, bool extend_ls_,
                      bool smooth_mmas_, int32_t fixed_steps_, bool nls_,
                      int32_t T_nls_, int32_t ls_scope_,
-                     int32_t ls_budget_, int32_t ls_max_opt_)
+                     int32_t ls_budget_, int32_t ls_max_opt_,
+                     bool euc_2d_cost_)
     : n(n_), n_ants(n_ants_), k(std::min(cand_list_size, n_ - 1)),
       bl(std::min(backup_list_size, std::max(0, n_ - 1 - k))),
       min_new_edges(min_new_edges_), rho(decay), alpha(alpha_), p_best(p_best_),
@@ -38,7 +39,8 @@ MFACO_TSP::MFACO_TSP(const float *coords_ptr, int32_t n_, int32_t n_ants_,
       fixed_steps(fixed_steps_), nls(nls_), T_nls(T_nls_),
       ls_scope(static_cast<LSScope>(ls_scope_)),
       ls_budget(static_cast<LSBudget>(ls_budget_)),
-      ls_max_opt(ls_max_opt_ > 0 ? ls_max_opt_ : std::max<int32_t>(1, n_ / 4)) {
+      ls_max_opt(ls_max_opt_ > 0 ? ls_max_opt_ : std::max<int32_t>(1, n_ / 4)),
+      euc_2d_cost(euc_2d_cost_) {
   if (coords_ptr == nullptr) {
     throw std::runtime_error("coords_ptr must not be null");
   }
@@ -1716,7 +1718,8 @@ MFACO_CVRP::MFACO_CVRP(const float *coords_ptr, const float *demand_ptr,
                        bool disable_heuristic_, bool extend_ls_,
                        bool smooth_mmas_, int32_t fixed_steps_, bool nls_,
                        int32_t T_nls_, int32_t ls_scope_,
-                       int32_t ls_budget_, int32_t ls_max_opt_)
+                       int32_t ls_budget_, int32_t ls_max_opt_,
+                       bool euc_2d_cost_)
     : n(n_), m(n_ - 1), n_ants(n_ants_), k(std::min(cand_list_size, n_ - 1)),
       bl(std::min(backup_list_size, std::max(0, n_ - 1 - k))),
       min_new_edges(min_new_edges_), fixed_steps(fixed_steps_), rho(decay),
@@ -1728,7 +1731,7 @@ MFACO_CVRP::MFACO_CVRP(const float *coords_ptr, const float *demand_ptr,
       ls_scope(static_cast<LSScope>(ls_scope_)),
       ls_budget(static_cast<LSBudget>(ls_budget_)),
       ls_max_opt(ls_max_opt_ > 0 ? ls_max_opt_ : std::max<int32_t>(1, m / 4)),
-      use_relocate(true), use_swap(true),
+      use_relocate(true), use_swap(true), euc_2d_cost(euc_2d_cost_),
       use_2opt_star(true) {
   if (!coords_ptr || !demand_ptr) {
     throw std::runtime_error("coords_ptr and demand_ptr must not be null");
@@ -1796,7 +1799,8 @@ float MFACO_CVRP::dist(int32_t u, int32_t v) const {
   const size_t ov = static_cast<size_t>(v) * 2;
   float dx = coords[ou] - coords[ov];
   float dy = coords[ou + 1] - coords[ov + 1];
-  return std::sqrt(dx * dx + dy * dy);
+  const float d = std::sqrt(dx * dx + dy * dy);
+  return euc_2d_cost ? std::floor(d + 0.5f) : d;
 }
 
 // -------------------- NN lists (same as TSP) --------------------

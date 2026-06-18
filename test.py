@@ -654,6 +654,15 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--no_anneal", action="store_true")
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--min_gamma", type=float, default=0.0)
+    parser.add_argument(
+        "--euc_2d_cost",
+        "--euc-2d-cost",
+        "--tsp_euc_2d_cost",
+        "--tsp-euc-2d-cost",
+        dest="euc_2d_cost",
+        action="store_true",
+        help="For TSP/CVRP evaluation, use raw-coordinate EUC_2D integer costs in the C++ backend.",
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--visualize", action="store_true")
@@ -974,6 +983,20 @@ def main(argv: Optional[List[str]] = None):
             MFACO = faco.MFACO_CVRP
 
     # Dataset
+    def _text_dataset_looks_euc_2d(path: str) -> bool:
+        try:
+            with open(path, "r") as f:
+                for _ in range(8):
+                    line = f.readline()
+                    if not line:
+                        break
+                    low = line.lower()
+                    if "euc_2d" in low or "tsplib" in low or "cvrplib" in low:
+                        return True
+        except OSError:
+            pass
+        return False
+
     if args.generate_val:
         # Generate test dataset dynamically
         baseline_solver = 'none' # Don't force LKH during generation unless specified elsewhere
@@ -990,10 +1013,22 @@ def main(argv: Optional[List[str]] = None):
         )
     elif args.dataset:
         print(f"Loading {args.dataset}...")
+        dataset_name_l = Path(args.dataset).name.lower()
+        if args.problem in {"tsp", "cvrp"} and (
+            args.euc_2d_cost
+            or "tsplib" in dataset_name_l
+            or "cvrplib" in dataset_name_l
+            or (args.dataset.endswith(".txt") and _text_dataset_looks_euc_2d(args.dataset))
+        ):
+            args.euc_2d_cost = True
         if args.dataset.endswith(".txt") and args.problem == 'tsp':
              val_list = utils.load_tsp_txt_dataset(args.dataset)
         elif args.dataset.endswith(".txt") and args.problem == 'cvrp':
-             val_list = utils.load_cvrp_txt_dataset(args.dataset)
+             val_list = utils.load_cvrp_txt_dataset(
+                 args.dataset,
+                 normalize_coords=True,
+                 keep_raw_coords=args.euc_2d_cost,
+             )
         else:
             data = torch.load(args.dataset, map_location="cpu", weights_only=False)
             if isinstance(data, dict):
@@ -1003,11 +1038,15 @@ def main(argv: Optional[List[str]] = None):
                 val_list = data
     else:
         print("Loading validation dataset...")
+        if args.problem in {"tsp", "cvrp"} and args.rl_data:
+            args.euc_2d_cost = True
         val_list = utils.load_auto_dataset(
             args.n_node, 
             problem=args.problem, 
             rl_data=args.rl_data,
-            device='cpu'
+            device='cpu',
+            cvrp_normalize_coords=True,
+            cvrp_keep_raw_coords=args.euc_2d_cost,
         )
         
         if val_list is None:
@@ -1046,7 +1085,7 @@ def main(argv: Optional[List[str]] = None):
             except Exception: pass
             
         # CVRP Tuple: (coords, demand, capacity, cost, tour)
-        elif args.problem == 'cvrp' and isinstance(val_list[0], tuple) and len(val_list[0]) == 5:
+        elif args.problem == 'cvrp' and isinstance(val_list[0], tuple) and len(val_list[0]) >= 5:
              try:
                  costs = [x[3] for x in val_list]
                  if all((isinstance(c, (int, float)) or np.issubdtype(type(c), np.number)) and c > 1e-6 for c in costs):
@@ -1073,7 +1112,7 @@ def main(argv: Optional[List[str]] = None):
 
             
             if args.problem == 'cvrp' and isinstance(val_list, list) and not hasattr(val_list, 'tensors'):
-                if len(val_list)>0 and isinstance(val_list[0], tuple) and len(val_list[0]) == 5:
+                if len(val_list)>0 and isinstance(val_list[0], tuple) and len(val_list[0]) >= 5:
                      # Text dataset tuple: (coords, demand, capacity, cost, tour)
                      cs = torch.stack([x[0] for x in val_list])
                      ds = torch.stack([x[1] for x in val_list])
@@ -1302,6 +1341,9 @@ def main(argv: Optional[List[str]] = None):
 
     # Baseline cache (heuristic-only MFACO). Reuse across runs for the same dataset+config.
     cached_base_costs = None
+    euc_2d_scoring = bool(args.euc_2d_cost and args.problem in {"tsp", "cvrp"})
+    if euc_2d_scoring:
+        print(f"{args.problem.upper()} EUC_2D scoring enabled: using separate pure-MFACO cache key.")
     if not args.no_baseline:
         cached_res = utils.load_pure_mfaco_cache(args, val_list)
         if cached_res is not None and "costs" in cached_res:
@@ -1978,12 +2020,15 @@ def main(argv: Optional[List[str]] = None):
                 # (coords, demand, capacity, cost, tour)
                 coords, demand, capacity, cost, tour = item[:5]
                 if len(item) > 5: name = item[5]
+                raw_coords_for_cost = item[6] if args.euc_2d_cost and len(item) > 6 else None
                 
                 if cost is not None and isinstance(cost, (float, int)) and cost > 0:
                     opt_cost = cost
                 
-                # Reduce to (coords, demand, capacity) for solver
-                item = (coords, demand, capacity)
+                # Benchmark EUC_2D uses raw coords in the C++ solver; the GNN
+                # path re-normalizes inside infer_instance.
+                item_coords = raw_coords_for_cost if raw_coords_for_cost is not None else coords
+                item = (item_coords, demand, capacity)
 
             # item is [coords, demand, cap] tensors if from DataLoader
             # or (coords, demand, cap) tuple if from list

@@ -135,7 +135,8 @@ public:
 
       bool extend_ls = false, bool smooth_mmas = false, int32_t fixed_steps = 0,
       bool nls = false, int32_t T_nls = 10, int32_t ls_scope = 0,
-      int32_t ls_budget = 0, int32_t ls_max_opt = 0) {
+      int32_t ls_budget = 0, int32_t ls_max_opt = 0,
+      bool euc_2d_cost = false) {
     auto buf = coords.request();
     if (buf.ndim != 2 || buf.shape[1] != 2) {
       throw std::runtime_error("coords must have shape (n, 2)");
@@ -147,7 +148,7 @@ public:
         coords_ptr, n, n_ants, cand_list_size, backup_list_size, min_new_edges,
         decay, alpha, p_best, use_local_search, disable_heuristic, extend_ls,
         smooth_mmas, fixed_steps, nls, T_nls, ls_scope, ls_budget,
-        ls_max_opt);
+        ls_max_opt, euc_2d_cost);
   }
 
   // Properties
@@ -426,7 +427,7 @@ public:
                bool extend_ls = false, bool smooth_mmas = false,
                int32_t fixed_steps = 0, bool nls = false, int32_t T_nls = 10,
                int32_t ls_scope = 0, int32_t ls_budget = 0,
-               int32_t ls_max_opt = 0) {
+               int32_t ls_max_opt = 0, bool euc_2d_cost = false) {
     auto cbuf = coords.request();
     if (cbuf.ndim != 2 || cbuf.shape[1] != 2) {
       throw std::runtime_error("coords must be shape (n,2)");
@@ -442,7 +443,8 @@ public:
         (const float *)cbuf.ptr, (const float *)dbuf.ptr, n, capacity, n_ants,
         cand_list_size, backup_list_size, min_new_edges, decay, alpha, p_best,
         use_local_search, disable_heuristic, extend_ls, smooth_mmas,
-        fixed_steps, nls, T_nls, ls_scope, ls_budget, ls_max_opt);
+        fixed_steps, nls, T_nls, ls_scope, ls_budget, ls_max_opt,
+        euc_2d_cost);
   }
 
   // properties
@@ -1063,7 +1065,7 @@ PYBIND11_MODULE(faco_opt, m) {
                py::array_t<float, py::array::c_style | py::array::forcecast>,
                int32_t, int32_t, int32_t, int32_t, float, float, float, bool,
                bool, bool, bool, int32_t, bool, int32_t, int32_t, int32_t,
-               int32_t>(),
+               int32_t, bool>(),
            py::arg("coords"), py::arg("n_ants"), py::arg("cand_list_size") = 32,
            py::arg("backup_list_size") = 32, py::arg("min_new_edges") = 8,
            py::arg("decay") = 0.9f, py::arg("alpha") = 1.0f,
@@ -1072,7 +1074,7 @@ PYBIND11_MODULE(faco_opt, m) {
            py::arg("smooth_mmas") = false, py::arg("fixed_steps") = 0,
            py::arg("nls") = false, py::arg("T_nls") = 10,
            py::arg("ls_scope") = 0, py::arg("ls_budget") = 0,
-           py::arg("ls_max_opt") = 0)
+           py::arg("ls_max_opt") = 0, py::arg("euc_2d_cost") = false)
       .def_property_readonly("n", &PyMFACO_TSP::get_n)
       .def_property_readonly("n_ants", &PyMFACO_TSP::get_n_ants)
       .def_property_readonly("k", &PyMFACO_TSP::get_k)
@@ -1126,7 +1128,7 @@ PYBIND11_MODULE(faco_opt, m) {
                py::array_t<float, py::array::c_style | py::array::forcecast>,
                float, int32_t, int32_t, int32_t, int32_t, float, float, float,
                bool, bool, bool, bool, int32_t, bool, int32_t, int32_t, int32_t,
-               int32_t>(),
+               int32_t, bool>(),
            py::arg("coords"), py::arg("demand"), py::arg("capacity"),
            py::arg("n_ants"), py::arg("cand_list_size") = 32,
            py::arg("backup_list_size") = 32, py::arg("min_new_edges") = 8,
@@ -1136,7 +1138,7 @@ PYBIND11_MODULE(faco_opt, m) {
            py::arg("smooth_mmas") = false, py::arg("fixed_steps") = 0,
            py::arg("nls") = false, py::arg("T_nls") = 10,
            py::arg("ls_scope") = 0, py::arg("ls_budget") = 0,
-           py::arg("ls_max_opt") = 0)
+           py::arg("ls_max_opt") = 0, py::arg("euc_2d_cost") = false)
       .def_property_readonly("n", &PyMFACO_CVRP::get_n)
       .def_property_readonly("m", &PyMFACO_CVRP::get_m)
       .def_property_readonly("n_ants", &PyMFACO_CVRP::get_n_ants)
