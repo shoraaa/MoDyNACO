@@ -1,0 +1,1 @@
+{"variant": "deep_lora_r4", "decoder": "deep_lora", "rank": 4, "loss_js": 0.0, "train_rc": 0, "eval_rc": null, "checkpoint": "", "summary_json": "results/multihead_decoder_sweep/smoke_dryrun/deep_lora_r4_summary.json"}

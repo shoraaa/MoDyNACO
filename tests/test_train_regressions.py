@@ -3,6 +3,7 @@ from argparse import Namespace
 from unittest import mock
 
 import torch
+from torch_geometric.data import Data
 
 import train
 import utils
@@ -57,6 +58,79 @@ class TrainRegressionTests(unittest.TestCase):
         _, cost, tour, _ = dataset[0]
         self.assertAlmostEqual(cost, 12.34)
         self.assertIsNone(tour)
+
+    def test_robust_capacity_uses_domain_randomized_generator(self):
+        args = Namespace(
+            problem="cvrp",
+            n_node=1000,
+            capacity_override=None,
+            robust_capacity=True,
+        )
+
+        capacity = train.resolve_cvrp_generation_capacity(args)
+
+        self.assertIsNone(capacity)
+
+    def test_robust_capacity_rejects_non_1k_cvrp(self):
+        args = Namespace(
+            problem="cvrp",
+            n_node=500,
+            capacity_override=None,
+            robust_capacity=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "n_node=1000"):
+            train.resolve_cvrp_generation_capacity(args)
+
+    def test_robust_cvrp_instance_randomizes_raw_demand_and_capacity(self):
+        raw_demand = torch.arange(1, 1001, dtype=torch.float32).remainder(80).add(1)
+
+        with (
+            mock.patch.object(train, "_sample_robust_cvrp_raw_demands", return_value=raw_demand),
+            mock.patch.object(train.random, "choice", return_value=10.0),
+        ):
+            coords, demand, capacity = train.gen_robust_cvrp_1k_instance(1000, "cpu")
+
+        self.assertEqual(coords.shape, (1001, 2))
+        self.assertEqual(demand.shape, (1001,))
+        self.assertEqual(capacity, 1.0)
+        self.assertEqual(float(demand[0]), 0.0)
+        self.assertTrue(torch.all(demand[1:] > 0))
+        self.assertLessEqual(float(demand[1:].max()), 1.0)
+        self.assertGreater(float(demand[1:].max()), float(demand[1:].min()))
+
+    def test_train_epoch_uses_robust_generator_instead_of_default_cvrp_generator(self):
+        args = Namespace(
+            problem="cvrp",
+            n_node=1000,
+            device="cpu",
+            capacity_override=None,
+            robust_capacity=True,
+            steps_per_epoch=2,
+            algo="ppo",
+        )
+        coords = torch.zeros(1001, 2)
+        demand = torch.full((1001,), 0.2)
+        captured_instances = []
+
+        def capture_train_instance(_net, _optimizer, instance_data, _args):
+            captured_instances.append(instance_data)
+            return 1.0, 0.5, {}
+
+        with (
+            mock.patch.object(train, "gen_robust_cvrp_1k_instance", return_value=(coords, demand, 1.0)) as robust_mock,
+            mock.patch.object(utils, "gen_cvrp_instance") as gen_mock,
+            mock.patch.object(train, "train_instance_ppo", side_effect=capture_train_instance),
+            mock.patch.object(train, "get_logger") as logger_mock,
+        ):
+            logger_mock.return_value.set_step.return_value = None
+            logger_mock.return_value.log_train_step.return_value = None
+            train.train_epoch(mock.Mock(), mock.Mock(), 0, 1, args)
+
+        self.assertEqual(robust_mock.call_count, 2)
+        gen_mock.assert_not_called()
+        self.assertEqual(len(captured_instances), 2)
+        self.assertTrue((captured_instances[0][1] == 0.2).all())
 
     def test_ppo_clipped_loss_rewards_better_than_average_cost(self):
         args = Namespace(ppo_clip=0.1, no_adv_norm=True)
@@ -192,6 +266,113 @@ class TrainRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(loss.item(), expected.item())
         self.assertAlmostEqual(approx_kl.item(), expected_kl.item())
         self.assertAlmostEqual(clip_frac.item(), expected_clip.item())
+
+    def test_infer_instance_preserves_learned_head_counts(self):
+        class DummyModel:
+            def eval(self):
+                return self
+
+            def forward_with_alloc(self, pyg_data):
+                num_edges = pyg_data.edge_attr.shape[0]
+                priors = torch.zeros(num_edges, 2)
+                logits = torch.tensor([10.0, -10.0])
+                return priors, logits
+
+        class DummyACO:
+            recorded_head_counts = None
+
+            def __init__(self, **kwargs):
+                self.n = 3
+                self.k = 2
+                self.n_ants = int(kwargs["n_ants"])
+                self.nn_torch = torch.tensor([[1, 2], [0, 2], [0, 1]])
+                self.pheromone_sparse = torch.ones(self.n, self.k)
+                self.source_route = torch.tensor([0, 1, 0, 2, 0])
+
+            def seed_rng(self, seed):
+                self.seed = seed
+
+            def reset_timings(self):
+                pass
+
+            def sample_mixed_priors(
+                self,
+                priors,
+                require_prob=False,
+                parallel_traced=True,
+                return_decoded=False,
+                head_counts=None,
+            ):
+                DummyACO.recorded_head_counts = list(head_counts)
+                costs = torch.arange(1, self.n_ants + 1, dtype=torch.float32)
+                routes = [torch.tensor([0, 1, 0, 2, 0]) for _ in range(self.n_ants)]
+                survival = torch.ones(self.n_ants)
+                return costs, routes, None, None, None, None, None, 0, survival
+
+            def update_pheromone(self, best_route, best_cost):
+                pass
+
+        def build_fn(aco, coords, demand, device, **kwargs):
+            return Data(
+                x=torch.zeros(3, 4),
+                edge_index=torch.zeros(2, 6, dtype=torch.long),
+                edge_attr=torch.zeros(6, 3),
+            )
+
+        args = Namespace(
+            disable_heuristic=False,
+            no_local_search=True,
+            rho=0.5,
+            device="cpu",
+            no_smooth_mmas=True,
+            min_new_edges=1,
+            no_extend_ls=True,
+            no_normalized_heuristic=True,
+            L=0,
+            ls_scope="localized",
+            ls_budget="truncated",
+            ls_max_opt=0,
+            euc_2d_cost=False,
+            no_dynamic_feats=False,
+            head_router="learned",
+            multi_head=True,
+            num_heads=2,
+            n_ants=8,
+            head_router_min_frac=0.0,
+            allocator_temperature=1.0,
+            head_ant_weights=None,
+            head_input_transform="none",
+            edge_feature_set="compact3",
+            no_anneal=True,
+            mini_H=1,
+            H=1,
+            gamma=1.0,
+            min_gamma=0.0,
+            iter_log=False,
+            iter_print=False,
+            stage_metrics=False,
+            runtime_limit=None,
+            verify=False,
+            verify_final_only=False,
+            timed=False,
+        )
+        coords = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        demand = torch.tensor([0.0, 0.5, 0.5])
+
+        utils.infer_instance(
+            "cvrp",
+            DummyACO,
+            build_fn,
+            DummyModel(),
+            (coords, demand, 1.0),
+            k_sparse=2,
+            n_ants=8,
+            dynamic=True,
+            args=args,
+            seed=1234,
+        )
+
+        self.assertEqual(DummyACO.recorded_head_counts, [7, 1])
 
 
 if __name__ == "__main__":

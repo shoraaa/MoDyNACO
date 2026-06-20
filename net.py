@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import torch_geometric.nn as gnn
+import math
+import os
 
 
 def move_pyg_to_module_device(module: nn.Module, pyg):
@@ -228,7 +230,17 @@ class ParNet(MLP):
 class ParNetCondFiLM(nn.Module):
     """Head-conditioned edge decoder used by MultiHeadNet."""
 
-    def __init__(self, depth=3, units=32, num_heads=4, zdim=16, act_fn='silu', logit_net=False):
+    def __init__(
+        self,
+        depth=3,
+        units=32,
+        num_heads=4,
+        zdim=16,
+        act_fn='silu',
+        logit_net=False,
+        init_mode="anchored",
+        init_std=0.02,
+    ):
         super().__init__()
         if depth < 2:
             raise ValueError("ParNetCondFiLM requires depth >= 2")
@@ -242,13 +254,28 @@ class ParNetCondFiLM(nn.Module):
         self.output = nn.Linear(units, 1)
         self.gamma = nn.ModuleList([nn.Linear(zdim, units) for _ in range(depth - 1)])
         self.beta = nn.ModuleList([nn.Linear(zdim, units) for _ in range(depth - 1)])
+        self.decode_chunk_edges = int(os.getenv("DYNACO_DECODE_CHUNK_EDGES", "0"))
+        self._init_conditioners(init_mode, init_std)
+
+    def _init_conditioners(self, init_mode, init_std):
+        mode = str(init_mode or "anchored").lower()
+        if mode not in {"anchored", "zero", "small", "random"}:
+            raise ValueError("head_adapter_init must be one of: anchored, zero, small, random")
+        if mode == "random":
+            return
+        for layer in list(self.gamma) + list(self.beta):
+            nn.init.zeros_(layer.bias)
+            if mode == "zero":
+                nn.init.zeros_(layer.weight)
+            else:
+                nn.init.normal_(layer.weight, std=init_std)
 
     def _apply_film(self, x, z, layer_idx):
         gamma = self.gamma[layer_idx](z).unsqueeze(0)
         beta = self.beta[layer_idx](z).unsqueeze(0)
         return x * (1.0 + gamma) + beta
 
-    def forward(self, emb, z):
+    def _forward_impl(self, emb, z):
         # emb: (E, units), z: (K, zdim), output: (E, K)
         e = emb.unsqueeze(1).expand(-1, z.shape[0], -1)
         x = self.input(e)
@@ -262,6 +289,13 @@ class ParNetCondFiLM(nn.Module):
         if self.sigmoid_output:
             x = torch.sigmoid(x)
         return x
+
+    def forward(self, emb, z):
+        chunk = int(getattr(self, "decode_chunk_edges", 0) or 0)
+        if self.training or chunk <= 0 or emb.shape[0] <= chunk:
+            return self._forward_impl(emb, z)
+        outs = [self._forward_impl(emb[start:start + chunk], z) for start in range(0, emb.shape[0], chunk)]
+        return torch.cat(outs, dim=0)
 
 
 # =============================================================================
@@ -462,12 +496,16 @@ class MultiHeadLoRALinear(nn.Module):
         rank: int = 8,
         alpha: float = 1.0,
         bias: bool = True,
-        zero_init: bool = True,
+        init_mode: str = "anchored",
+        init_std: float = 0.02,
         freeze_base: bool = False,
     ):
         super().__init__()
         if rank <= 0:
             raise ValueError("LoRA rank must be positive")
+        init_mode = str(init_mode or "anchored").lower()
+        if init_mode not in {"anchored", "zero", "small", "random"}:
+            raise ValueError("head_adapter_init must be one of: anchored, zero, small, random")
         self.in_features = in_features
         self.out_features = out_features
         self.num_heads = num_heads
@@ -478,22 +516,51 @@ class MultiHeadLoRALinear(nn.Module):
         self.lora_A = nn.Parameter(torch.empty(num_heads, rank, in_features))
         self.lora_B = nn.Parameter(torch.empty(num_heads, out_features, rank))
 
-        nn.init.normal_(self.lora_A, std=0.02)
-        if zero_init:
+        if init_mode == "random":
+            for h in range(num_heads):
+                nn.init.kaiming_uniform_(self.lora_A[h], a=math.sqrt(5))
+                nn.init.kaiming_uniform_(self.lora_B[h], a=math.sqrt(5))
+        elif init_mode == "zero":
+            nn.init.normal_(self.lora_A, std=init_std)
             nn.init.zeros_(self.lora_B)
         else:
-            nn.init.normal_(self.lora_B, std=0.02)
+            nn.init.normal_(self.lora_A, std=init_std)
+            nn.init.normal_(self.lora_B, std=init_std)
+            if init_mode == "anchored":
+                with torch.no_grad():
+                    self.lora_B[0].zero_()
 
         if freeze_base:
             for param in self.base.parameters():
                 param.requires_grad = False
 
     def forward(self, x):
-        # x: (E, d), out: (E, H, out_features)
-        base = self.base(x)
-        low = torch.einsum("ed,hrd->ehr", x, self.lora_A)
+        # x: (E, D) or (E, H, D); out: (E, H, out_features)
+        if x.dim() == 2:
+            base = self.base(x).unsqueeze(1)
+            low = torch.einsum("ed,hrd->ehr", x, self.lora_A)
+        elif x.dim() == 3:
+            if x.shape[1] != self.num_heads:
+                raise ValueError(f"Expected {self.num_heads} heads, got {x.shape[1]}")
+            base = self.base(x)
+            low = torch.einsum("ehd,hrd->ehr", x, self.lora_A)
+        else:
+            raise ValueError(f"Expected 2D or 3D input, got shape {tuple(x.shape)}")
         delta = torch.einsum("ehr,hor->eho", low, self.lora_B)
-        return base.unsqueeze(1) + self.scaling * delta
+        if base.shape == delta.shape:
+            return base.add_(delta, alpha=self.scaling)
+        return delta.mul_(self.scaling).add_(base)
+
+    def forward_head(self, x, head_idx: int):
+        """Evaluate one LoRA head without materializing the full head axis."""
+        if x.dim() != 2:
+            raise ValueError(f"Expected 2D input for one-head decode, got shape {tuple(x.shape)}")
+        if head_idx < 0 or head_idx >= self.num_heads:
+            raise ValueError(f"head_idx must be in [0, {self.num_heads}), got {head_idx}")
+        base = self.base(x)
+        low = F.linear(x, self.lora_A[head_idx])
+        delta = F.linear(low, self.lora_B[head_idx])
+        return base + self.scaling * delta
 
 
 class ParNetCondLoRA(nn.Module):
@@ -514,7 +581,8 @@ class ParNetCondLoRA(nn.Module):
         alpha: float = 1.0,
         act_fn: str = 'silu',
         logit_net: bool = True,
-        zero_init: bool = True,
+        init_mode: str = "anchored",
+        init_std: float = 0.02,
         freeze_base: bool = False,
     ):
         super().__init__()
@@ -535,7 +603,8 @@ class ParNetCondLoRA(nn.Module):
             rank=rank,
             alpha=alpha,
             bias=True,
-            zero_init=zero_init,
+            init_mode=init_mode,
+            init_std=init_std,
             freeze_base=freeze_base,
         )
 
@@ -547,6 +616,114 @@ class ParNetCondLoRA(nn.Module):
         if self.sigmoid_output:
             out = torch.sigmoid(out)
         return out
+
+
+class ParNetCondDeepLoRA(nn.Module):
+    """Head-specific LoRA adapters at every decoder layer."""
+
+    def __init__(
+        self,
+        depth: int = 3,
+        units: int = 32,
+        num_heads: int = 4,
+        rank: int = 4,
+        alpha: float = 1.0,
+        act_fn: str = 'silu',
+        logit_net: bool = True,
+        init_mode: str = "anchored",
+        init_std: float = 0.02,
+        freeze_base: bool = False,
+    ):
+        super().__init__()
+        if depth < 2:
+            raise ValueError("ParNetCondDeepLoRA requires depth >= 2")
+        self.units = units
+        self.num_heads = num_heads
+        self.rank = rank
+        self.decode_chunk_edges = int(os.getenv("DYNACO_DECODE_CHUNK_EDGES", "0"))
+        self.decode_headwise = os.getenv("DYNACO_DECODE_HEADWISE", "0").lower() in {"1", "true", "yes"}
+        self.act_fn = getattr(F, act_fn)
+        self.sigmoid_output = not logit_net
+        self.hidden = nn.ModuleList([
+            MultiHeadLoRALinear(
+                units,
+                units,
+                num_heads=num_heads,
+                rank=rank,
+                alpha=alpha,
+                bias=True,
+                init_mode=init_mode,
+                init_std=init_std,
+                freeze_base=freeze_base,
+            )
+            for _ in range(depth - 1)
+        ])
+        self.out = MultiHeadLoRALinear(
+            units,
+            1,
+            num_heads=num_heads,
+            rank=rank,
+            alpha=alpha,
+            bias=True,
+            init_mode=init_mode,
+            init_std=init_std,
+            freeze_base=freeze_base,
+        )
+
+    def _forward_impl(self, emb):
+        x = emb
+        for layer in self.hidden:
+            x = self.act_fn(layer(x))
+        out = self.out(x).squeeze(-1)
+        if self.sigmoid_output:
+            out = torch.sigmoid(out)
+        return out
+
+    def _forward_head(self, emb, head_idx: int):
+        x = emb
+        for layer in self.hidden:
+            x = self.act_fn(layer.forward_head(x, head_idx))
+        out = self.out.forward_head(x, head_idx).squeeze(-1)
+        if self.sigmoid_output:
+            out = torch.sigmoid(out)
+        return out
+
+    def _forward_impl_headwise(self, emb):
+        outs = [self._forward_head(emb, head_idx) for head_idx in range(self.num_heads)]
+        return torch.stack(outs, dim=1)
+
+    def forward(self, emb):
+        chunk = int(getattr(self, "decode_chunk_edges", 0) or 0)
+        if self.training:
+            return self._forward_impl(emb)
+        if self.decode_headwise:
+            return self._forward_impl_headwise(emb)
+        if chunk <= 0 or emb.shape[0] <= chunk:
+            return self._forward_impl(emb)
+        outs = [self._forward_impl(emb[start:start + chunk]) for start in range(0, emb.shape[0], chunk)]
+        return torch.cat(outs, dim=0)
+
+
+class ParNetMultiMLP(nn.Module):
+    """Independent small decoder per head over the shared GNN embedding."""
+
+    def __init__(
+        self,
+        depth: int = 3,
+        units: int = 32,
+        num_heads: int = 4,
+        act_fn: str = 'silu',
+        logit_net: bool = True,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.heads = nn.ModuleList([
+            ParNet(depth=depth, units=units, preds=1, act_fn=act_fn, logit_net=logit_net)
+            for _ in range(num_heads)
+        ])
+
+    def forward(self, emb):
+        return torch.stack([head(emb) for head in self.heads], dim=1)
 
 class MultiHeadNet(Net):
     """DyNACO edge-prior model with a shared trunk and multi-head LoRA decoder."""
@@ -560,6 +737,8 @@ class MultiHeadNet(Net):
         lora_alpha: float = 1.0,
         freeze_lora_base: bool = False,
         head_decoder_type: str = "lora",
+        head_adapter_init: str = "anchored",
+        head_adapter_init_std: float = 0.02,
         logit_net: bool = True,
         fixed_head_codes: bool = True,
         **kwargs
@@ -570,8 +749,13 @@ class MultiHeadNet(Net):
         self.head_decoder_type = str(head_decoder_type or "lora").lower()
         if self.head_decoder_type in {"head_code", "head-code", "residual"}:
             self.head_decoder_type = "lowrank"
-        if self.head_decoder_type not in {"lora", "lowrank"}:
-            raise ValueError("head_decoder_type must be 'lora' or 'lowrank'")
+        if self.head_decoder_type in {"deep-lora", "deeplora"}:
+            self.head_decoder_type = "deep_lora"
+        if self.head_decoder_type in {"per-head-mlp", "perhead_mlp", "perhead"}:
+            self.head_decoder_type = "per_head_mlp"
+        valid_decoders = {"lora", "deep_lora", "film", "per_head_mlp", "lowrank"}
+        if self.head_decoder_type not in valid_decoders:
+            raise ValueError(f"head_decoder_type must be one of {sorted(valid_decoders)}")
         super().__init__(*args, logit_net=True, **kwargs)
 
         units = self.emb_net.units
@@ -592,6 +776,49 @@ class MultiHeadNet(Net):
                 logit_net=logit_net,
                 zero_init=True,
             )
+        elif self.head_decoder_type == "film":
+            adapter_init = str(head_adapter_init or "anchored").lower()
+            if fixed_head_codes:
+                codes = torch.randn(num_heads, head_zdim)
+                if adapter_init == "anchored":
+                    codes[0].zero_()
+                    if num_heads > 1:
+                        codes[1:] = F.normalize(codes[1:], dim=-1)
+                else:
+                    codes = F.normalize(codes, dim=-1)
+                self.register_buffer("head_codes", codes)
+            else:
+                codes = torch.randn(num_heads, head_zdim)
+                if adapter_init != "random":
+                    codes = codes * head_adapter_init_std
+                if adapter_init == "anchored":
+                    codes[0].zero_()
+                self.head_codes = nn.Parameter(codes)
+            self.par_net_heu = ParNetCondFiLM(
+                units=units,
+                num_heads=num_heads,
+                zdim=head_zdim,
+                logit_net=logit_net,
+                init_mode=head_adapter_init,
+                init_std=head_adapter_init_std,
+            )
+        elif self.head_decoder_type == "deep_lora":
+            self.par_net_heu = ParNetCondDeepLoRA(
+                units=units,
+                num_heads=num_heads,
+                rank=rank,
+                alpha=lora_alpha,
+                logit_net=logit_net,
+                init_mode=head_adapter_init,
+                init_std=head_adapter_init_std,
+                freeze_base=freeze_lora_base,
+            )
+        elif self.head_decoder_type == "per_head_mlp":
+            self.par_net_heu = ParNetMultiMLP(
+                units=units,
+                num_heads=num_heads,
+                logit_net=logit_net,
+            )
         else:
             self.par_net_heu = ParNetCondLoRA(
                 units=units,
@@ -599,7 +826,8 @@ class MultiHeadNet(Net):
                 rank=rank,
                 alpha=lora_alpha,
                 logit_net=logit_net,
-                zero_init=True,
+                init_mode=head_adapter_init,
+                init_std=head_adapter_init_std,
                 freeze_base=freeze_lora_base,
             )
         self.alloc_net = nn.Sequential(
@@ -611,7 +839,7 @@ class MultiHeadNet(Net):
         nn.init.zeros_(self.alloc_net[-1].bias)
 
     def _decode_heads(self, emb):
-        if self.head_decoder_type == "lowrank":
+        if self.head_decoder_type in {"lowrank", "film"}:
             return self.par_net_heu(emb, self.head_codes)
         return self.par_net_heu(emb)
 

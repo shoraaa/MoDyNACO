@@ -1,0 +1,43 @@
+# DyNACO Configuration: CVRP-1000 with PPO
+problem: cvrp
+n_node: 1000
+k_sparse: 32
+n_ants: 100
+H: 10
+mini_H: 100
+epochs: 100
+algo: ppo
+rho: 0.5
+lr: 0.000005
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+min_new_edges: 12
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+edge_feature_set: compact3
+
+val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
+val_size: 128
+baseline: none
+
+multi_head: true
+num_heads: 8
+head_zdim: 128
+head_router: static
+
+# Experiment metadata
+experiment_name: cvrp_n1000_lr_100
+description: "Baseline CVRP-1K with PPO, 3 dynamic features"
+author: "DyNACO Team"
+
+# W&B
+use_wandb: true
+wandb_project: "dyanco"
+wandb_entity: null
+
+head_decoder_type: deep_lora
+lora_rank: 8
+head_adapter_init: random

@@ -34,6 +34,11 @@ class UnifiedEntrypointTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             train.parse_args(["--problem", "tsp", "--capacity", "150"])
 
+    def test_train_accepts_robust_capacity_for_base_cvrp(self):
+        parsed = train.parse_args(["--problem", "cvrp", "--robust-capacity"])
+
+        self.assertTrue(parsed.robust_capacity)
+
     def test_test_dispatches_extended_problem_to_base_extended_path(self):
         parsed = argparse.Namespace(problem="mkp", checkpoint="dummy.pt")
 

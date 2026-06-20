@@ -62,6 +62,8 @@ from extended_common import (
 BASE_PROBLEMS = {"tsp", "cvrp"}
 EXTENDED_PROBLEMS = {"bpp", "mkp", "op"}
 _REPLAY_MAGIC_MASK_CACHE: Dict[Tuple[str, int, int], torch.Tensor] = {}
+ROBUST_CVRP_1K_ROUTE_SIZES = (6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 28.0, 40.0)
+ROBUST_CVRP_1K_DEMAND_MODES = ("small", "medium", "large", "skewed", "bimodal")
 
 
 def _replay_magic_mask(k: int, device: torch.device) -> torch.Tensor:
@@ -77,6 +79,59 @@ def _head_ant_range(head_counts: List[int], head_idx: int) -> Tuple[int, int]:
     start = int(sum(int(c) for c in head_counts[:head_idx]))
     end = start + int(head_counts[head_idx])
     return start, end
+
+
+def resolve_cvrp_generation_capacity(args: argparse.Namespace) -> Optional[float]:
+    """Return the raw CVRP capacity used before demand normalization."""
+    if not getattr(args, "robust_capacity", False):
+        return getattr(args, "capacity_override", None)
+    if getattr(args, "problem", None) != "cvrp":
+        return getattr(args, "capacity_override", None)
+    if int(getattr(args, "n_node", 0)) != 1000:
+        raise ValueError("--robust-capacity is currently supported only for CVRP n_node=1000")
+    if getattr(args, "capacity_override", None) is not None:
+        raise ValueError("--robust-capacity cannot be combined with --capacity_override")
+    return None
+
+
+def _sample_robust_cvrp_raw_demands(n: int, device: Union[str, torch.device]) -> torch.Tensor:
+    mode = random.choice(ROBUST_CVRP_1K_DEMAND_MODES)
+    if mode == "small":
+        return torch.randint(1, 10, size=(n,), device=device).to(torch.float32)
+    if mode == "medium":
+        return torch.randint(3, 31, size=(n,), device=device).to(torch.float32)
+    if mode == "large":
+        return torch.randint(10, 101, size=(n,), device=device).to(torch.float32)
+    if mode == "skewed":
+        demand = torch.distributions.Gamma(
+            torch.tensor(2.0, device=device),
+            torch.tensor(0.18, device=device),
+        ).sample((n,))
+        return torch.clamp(torch.round(demand), min=1, max=100).to(torch.float32)
+
+    low = torch.randint(1, 11, size=(n,), device=device).to(torch.float32)
+    high = torch.randint(20, 101, size=(n,), device=device).to(torch.float32)
+    high_mask = torch.rand(size=(n,), device=device) < 0.2
+    return torch.where(high_mask, high, low)
+
+
+def gen_robust_cvrp_1k_instance(n: int, device: Union[str, torch.device]) -> Tuple[torch.Tensor, torch.Tensor, float]:
+    """Generate CVRP-1K with natural demand/capacity domain randomization."""
+    if int(n) != 1000:
+        raise ValueError("--robust-capacity is currently supported only for CVRP n_node=1000")
+
+    coords = torch.rand(size=(n + 1, 2), device=device)
+    raw_demand = _sample_robust_cvrp_raw_demands(n, device)
+    route_size = float(random.choice(ROBUST_CVRP_1K_ROUTE_SIZES))
+    jitter = float(torch.empty((), device=device).uniform_(0.75, 1.35).item())
+    capacity = max(
+        float(raw_demand.max().item()),
+        float(raw_demand.mean().item()) * route_size * jitter,
+    )
+    capacity = max(1.0, round(capacity))
+    normalized_demand = raw_demand / capacity
+    all_demands = torch.cat((torch.zeros((1,), device=device), normalized_demand))
+    return coords, all_demands, 1.0
 
 
 def save_experiment_config(args, exp_dir: Path):
@@ -1232,6 +1287,121 @@ def _multi_head_js_diversity_metrics(priors: torch.Tensor) -> Dict[str, float]:
     }
 
 
+def _solution_edge_set(solution: Any) -> set[tuple[int, int]]:
+    arr = np.asarray(solution, dtype=object)
+    vals: List[int] = []
+
+    def visit(x: Any) -> None:
+        if x is None:
+            return
+        if isinstance(x, (list, tuple, np.ndarray)):
+            for item in x:
+                visit(item)
+            return
+        try:
+            v = int(x)
+        except Exception:
+            return
+        if v >= 0:
+            vals.append(v)
+
+    visit(arr.tolist() if hasattr(arr, "tolist") else solution)
+    if len(vals) < 2:
+        return set()
+    return {
+        (int(vals[i]), int(vals[i + 1]))
+        for i in range(len(vals) - 1)
+        if vals[i] != vals[i + 1]
+    }
+
+
+def _head_selected_edge_overlap(flats: Any, costs: Any, head_counts: List[int]) -> Optional[float]:
+    if flats is None or costs is None or not head_counts:
+        return None
+    try:
+        costs_np = np.asarray(costs, dtype=float)
+        flats_list = list(flats)
+    except Exception:
+        return None
+    if len(flats_list) < int(sum(head_counts)) or costs_np.size < int(sum(head_counts)):
+        return None
+
+    edge_sets: List[set[tuple[int, int]]] = []
+    start = 0
+    for count in head_counts:
+        count = int(count)
+        end = start + count
+        if count <= 0:
+            start = end
+            continue
+        local = costs_np[start:end]
+        if local.size == 0:
+            start = end
+            continue
+        best_local = int(np.argmin(local))
+        edges = _solution_edge_set(flats_list[start + best_local])
+        if edges:
+            edge_sets.append(edges)
+        start = end
+
+    overlaps = []
+    for i in range(len(edge_sets)):
+        for j in range(i + 1, len(edge_sets)):
+            union = edge_sets[i] | edge_sets[j]
+            if union:
+                overlaps.append(len(edge_sets[i] & edge_sets[j]) / len(union))
+    if not overlaps:
+        return None
+    return float(np.mean(overlaps))
+
+
+def _head_selected_trace_edge_overlap(traces: Any, costs: Any, head_counts: List[int]) -> Optional[float]:
+    if traces is None or costs is None or not head_counts:
+        return None
+    try:
+        starts = np.asarray(traces.starts, dtype=np.int64)
+        curr_nodes = np.asarray(traces.curr_nodes, dtype=np.int64)
+        chosen_nodes = np.asarray(traces.chosen_nodes, dtype=np.int64)
+        costs_np = np.asarray(costs, dtype=float)
+    except Exception:
+        return None
+    if starts.size < int(sum(head_counts)) + 1 or costs_np.size < int(sum(head_counts)):
+        return None
+
+    edge_sets: List[set[tuple[int, int]]] = []
+    start_ant = 0
+    for count in head_counts:
+        count = int(count)
+        end_ant = start_ant + count
+        if count <= 0:
+            start_ant = end_ant
+            continue
+        local = costs_np[start_ant:end_ant]
+        if local.size == 0:
+            start_ant = end_ant
+            continue
+        ant = start_ant + int(np.argmin(local))
+        lo, hi = int(starts[ant]), int(starts[ant + 1])
+        edges = {
+            (int(a), int(b))
+            for a, b in zip(curr_nodes[lo:hi], chosen_nodes[lo:hi])
+            if int(a) >= 0 and int(b) >= 0 and int(a) != int(b)
+        }
+        if edges:
+            edge_sets.append(edges)
+        start_ant = end_ant
+
+    overlaps = []
+    for i in range(len(edge_sets)):
+        for j in range(i + 1, len(edge_sets)):
+            union = edge_sets[i] | edge_sets[j]
+            if union:
+                overlaps.append(len(edge_sets[i] & edge_sets[j]) / len(union))
+    if not overlaps:
+        return None
+    return float(np.mean(overlaps))
+
+
 def _copy_single_head_weights_into_multi_head(model: Net, checkpoint_path: str, device: str) -> None:
     """Initialize a multi-head model from a trained single-head decoder."""
     if not isinstance(model, MultiHeadNet):
@@ -1267,13 +1437,34 @@ def _copy_single_head_weights_into_multi_head(model: Net, checkpoint_path: str, 
     with torch.no_grad():
         if isinstance(model, MultiHeadNet):
             par = model.par_net_heu
-            par.hidden[0].weight.copy_(state_dict[f"{single_prefix}0.weight"])
-            par.hidden[0].bias.copy_(state_dict[f"{single_prefix}0.bias"])
-            par.hidden[1].weight.copy_(state_dict[f"{single_prefix}1.weight"])
-            par.hidden[1].bias.copy_(state_dict[f"{single_prefix}1.bias"])
-            par.out.base.weight.copy_(state_dict[f"{single_prefix}2.weight"])
-            par.out.base.bias.copy_(state_dict[f"{single_prefix}2.bias"])
-            par.out.lora_B.zero_()
+            decoder_type = getattr(model, "head_decoder_type", "lora")
+            if decoder_type in {"lora", "deep_lora"}:
+                for idx in range(2):
+                    layer = par.hidden[idx]
+                    target = layer.base if hasattr(layer, "base") else layer
+                    target.weight.copy_(state_dict[f"{single_prefix}{idx}.weight"])
+                    target.bias.copy_(state_dict[f"{single_prefix}{idx}.bias"])
+                    if hasattr(layer, "lora_B"):
+                        layer.lora_B.zero_()
+                par.out.base.weight.copy_(state_dict[f"{single_prefix}2.weight"])
+                par.out.base.bias.copy_(state_dict[f"{single_prefix}2.bias"])
+                par.out.lora_B.zero_()
+            elif decoder_type == "film":
+                par.input.weight.copy_(state_dict[f"{single_prefix}0.weight"])
+                par.input.bias.copy_(state_dict[f"{single_prefix}0.bias"])
+                par.hidden[0].weight.copy_(state_dict[f"{single_prefix}1.weight"])
+                par.hidden[0].bias.copy_(state_dict[f"{single_prefix}1.bias"])
+                par.output.weight.copy_(state_dict[f"{single_prefix}2.weight"])
+                par.output.bias.copy_(state_dict[f"{single_prefix}2.bias"])
+            elif decoder_type == "per_head_mlp":
+                for decoder in par.heads:
+                    for idx in range(3):
+                        decoder.lins[idx].weight.copy_(state_dict[f"{single_prefix}{idx}.weight"])
+                        decoder.lins[idx].bias.copy_(state_dict[f"{single_prefix}{idx}.bias"])
+            elif decoder_type == "lowrank":
+                for idx in range(3):
+                    par.base.lins[idx].weight.copy_(state_dict[f"{single_prefix}{idx}.weight"])
+                    par.base.lins[idx].bias.copy_(state_dict[f"{single_prefix}{idx}.bias"])
         else:
             for decoder in model.par_net_heu:
                 decoder.lins[0].weight.copy_(state_dict[f"{single_prefix}0.weight"])
@@ -1961,11 +2152,17 @@ def train_epoch(
         if args.problem == 'tsp':
             instance_data = np.random.rand(args.n_node, 2).astype(np.float32)
         else:
-            coords_t, demand_t, capacity = gen_func(
-                args.n_node,
-                device=args.device,
-                capacity=args.capacity_override,
-            )
+            if getattr(args, "robust_capacity", False):
+                coords_t, demand_t, capacity = gen_robust_cvrp_1k_instance(
+                    args.n_node,
+                    device=args.device,
+                )
+            else:
+                coords_t, demand_t, capacity = gen_func(
+                    args.n_node,
+                    device=args.device,
+                    capacity=resolve_cvrp_generation_capacity(args),
+                )
             instance_data = (
                 coords_t.detach().cpu().numpy().astype(np.float32),
                 demand_t.detach().cpu().numpy().astype(np.float32),
@@ -2203,9 +2400,9 @@ def infer_instance(
                     guidance_head_counts = utils.head_counts_for_router(
                         args, int(current_prior.shape[0]), args.n_ants, head_router
                     )
-                costs, flats, _, _, _, costs_raw, _, new_edges, survival = aco.sample_mixed_priors(
+                costs, flats, _, _, traces, costs_raw, _, new_edges, survival = aco.sample_mixed_priors(
                     current_prior,
-                    require_prob=False,
+                    require_prob=collect_metrics,
                     parallel_traced=True,
                     head_counts=guidance_head_counts,
                 )
@@ -2243,6 +2440,11 @@ def infer_instance(
                         metrics_log.setdefault(f"head_improvement_{h}", []).append(
                             float(incumbent_before - head_best)
                         )
+                selected_overlap = _head_selected_trace_edge_overlap(traces, costs, guidance_head_counts)
+                if selected_overlap is None:
+                    selected_overlap = _head_selected_edge_overlap(flats, costs, guidance_head_counts)
+                if selected_overlap is not None:
+                    metrics_log.setdefault("head_selected_edge_overlap", []).append(selected_overlap)
                 utils.update_head_router(
                     head_router,
                     guidance_head_counts,
@@ -2847,14 +3049,20 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--head_zdim", type=int, default=16,
                         help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
-                        choices=["lora", "lowrank"], default="lora",
-                        help="Multi-head decoder type: true LoRA final layer, or legacy head-code low-rank residual")
+                        choices=["lora", "deep_lora", "film", "per_head_mlp", "lowrank"], default="lora",
+                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent MLP heads, or legacy low-rank residual")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
                         help="LoRA scaling alpha; the adapter scale is alpha / lora_rank")
     parser.add_argument("--freeze_lora_base", "--freeze-lora-base", dest="freeze_lora_base", action="store_true",
                         help="Freeze the shared final decoder linear layer and train only LoRA adapters there")
+    parser.add_argument("--head_adapter_init", "--head-adapter-init", dest="head_adapter_init",
+                        choices=["anchored", "zero", "small", "random"], default="anchored",
+                        help="Initialization for head-specific adapters; random gives every head a normal random start")
+    parser.add_argument("--head_adapter_init_std", "--head-adapter-init-std", dest="head_adapter_init_std",
+                        type=float, default=0.02,
+                        help="Standard deviation for nonzero head-adapter initialization")
     parser.add_argument("--log_best_head", "--log-best-head", dest="log_best_head", action="store_true",
                         help="Log expensive multi-head diagnostics, including JS diversity, to WandB")
     parser.add_argument("--loss_js", "--loss-js", dest="loss_js", type=float, default=0.0,
@@ -2909,8 +3117,16 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Path to save generated validation dataset")
     parser.add_argument("--capacity_override", type=float, default=None,
                         help="Override CVRP capacity during train/validation generation")
+    parser.add_argument("--robust_capacity", "--robust-capacity", action="store_true",
+                        help="For CVRP-1K, use natural raw-demand and capacity domain randomization")
     parser.add_argument("--val_H", type=int, default=None)
     parser.add_argument("--val_mini_H", type=int, default=None)
+    parser.add_argument(
+        "--selection_metric",
+        choices=["val_cost", "val_gap"],
+        default="val_cost",
+        help="Metric used to save the best checkpoint; val_gap requires validation baselines",
+    )
 
     
     # Warmup and annealing
@@ -2987,6 +3203,8 @@ def build_model_name(args: argparse.Namespace) -> str:
             f"_mne{args.min_new_edges}_{args.algo}_lr{args.lr}")
     if args.problem == 'cvrp' and args.capacity_override is not None:
         name += f"_cap{args.capacity_override:g}"
+    if args.problem == 'cvrp' and getattr(args, "robust_capacity", False):
+        name += "_robustcap"
     
     if args.train_anneal:
         name += f"_anneal_g{args.gamma}_mg{args.min_gamma}"
@@ -3024,8 +3242,12 @@ def build_model_name(args: argparse.Namespace) -> str:
         name += f"_{args.edge_feature_set}"
     if _multi_head_enabled(args):
         name += f"_mh{args.num_heads}_polynet"
-        if getattr(args, "head_decoder_type", "lora") == "lora":
+        if getattr(args, "head_decoder_type", "lora") in {"lora", "deep_lora"}:
             name += f"_lora_r{int(getattr(args, 'lora_rank', 8))}"
+        if getattr(args, "head_decoder_type", "lora") != "lora":
+            name += f"_{getattr(args, 'head_decoder_type')}"
+        if getattr(args, "head_adapter_init", "anchored") != "anchored":
+            name += f"_hi{getattr(args, 'head_adapter_init')}"
         if getattr(args, "head_ant_weights", None):
             alloc = str(args.head_ant_weights).replace(",", "-").replace(" ", "")
             name += f"_ha{alloc}"
@@ -3067,7 +3289,7 @@ def load_validation_data(args: argparse.Namespace, logger: Logger):
             baseline_runs=args.baseline_runs,
             time_limit=args.baseline_time_limit,
             device='cpu',
-            capacity_override=args.capacity_override if args.problem == 'cvrp' else None,
+            capacity_override=resolve_cvrp_generation_capacity(args) if args.problem == 'cvrp' else None,
         )
     elif args.val_dataset:
         logger.info(f"Loading validation dataset from {args.val_dataset}...")
@@ -3152,8 +3374,11 @@ def _generate_fallback_dataset(args: argparse.Namespace):
     for _ in range(16):
         if args.problem == 'tsp':
             val_dataset.append(torch.from_numpy(gen_fn(args.n_node)))
+        elif getattr(args, "robust_capacity", False):
+            c, d, cap = gen_robust_cvrp_1k_instance(args.n_node, device='cpu')
+            val_dataset.append((c.cpu(), d.cpu(), cap))
         else:
-            c, d, cap = gen_fn(args.n_node, device='cpu', capacity=args.capacity_override)
+            c, d, cap = gen_fn(args.n_node, device='cpu', capacity=resolve_cvrp_generation_capacity(args))
             val_dataset.append((c.cpu(), d.cpu(), cap))
     
     return val_dataset
@@ -3262,6 +3487,11 @@ def main(argv: Optional[List[str]] = None):
 
     if args.problem is None:
         raise ValueError("Problem must be specified via --problem or the YAML config")
+    if args.problem == "cvrp" and getattr(args, "robust_capacity", False):
+        if int(args.n_node) != 1000:
+            raise ValueError("--robust-capacity is currently supported only for CVRP n_node=1000")
+        if args.capacity_override is not None:
+            raise ValueError("--robust-capacity cannot be combined with --capacity_override")
     if (
         _multi_head_enabled(args)
         and getattr(args, "head_decoder_type", "lora") == "lowrank"
@@ -3318,7 +3548,9 @@ def main(argv: Optional[List[str]] = None):
     # Auto-set min_new_edges for CVRP based on capacity
     if args.problem == 'cvrp' and args.min_new_edges is None:
         # Use same capacity logic as utils.gen_cvrp_instance
-        if args.capacity_override is not None:
+        if getattr(args, "robust_capacity", False):
+            capacity = 250
+        elif args.capacity_override is not None:
             capacity = float(args.capacity_override)
         elif args.n_node >= 50000:
             capacity = 2000
@@ -3412,6 +3644,8 @@ def main(argv: Optional[List[str]] = None):
             lora_alpha=args.lora_alpha,
             freeze_lora_base=args.freeze_lora_base,
             head_decoder_type=args.head_decoder_type,
+            head_adapter_init=args.head_adapter_init,
+            head_adapter_init_std=args.head_adapter_init_std,
         )
         print(
             f"Using {args.head_decoder_type} multi-head decoder: heads={args.num_heads}, rank={args.lora_rank}, ant-group routing"
@@ -3597,6 +3831,8 @@ def main(argv: Optional[List[str]] = None):
     
     if baseline_values is not None:
         logger.info("Using baseline costs from dataset.")
+    if args.selection_metric == "val_gap" and baseline_values is None:
+        raise ValueError("--selection_metric val_gap requires validation baselines")
 
     # Training loop
     global_step = 0
@@ -3645,9 +3881,11 @@ def main(argv: Optional[List[str]] = None):
                 net_model, val_dataset, args, baseline_values
             )
 
+            selection_value = avg_gap if args.selection_metric == "val_gap" else avg_best
+
             # Track and save best model
-            if avg_best < best_val_cost:
-                best_val_cost = avg_best
+            if selection_value < best_val_cost:
+                best_val_cost = selection_value
                 best_saved = True
                 best_model_state = {
                     "model_state_dict": net_model.state_dict(),
@@ -3655,6 +3893,8 @@ def main(argv: Optional[List[str]] = None):
                     "epoch": epoch,
                     "val_cost": avg_best,
                     "val_gap": avg_gap,
+                    "selection_metric": args.selection_metric,
+                    "selection_value": selection_value,
                     "config": _serializable_args(args),
                     "total_params": total_params,
                     "trainable_params": trainable_params,

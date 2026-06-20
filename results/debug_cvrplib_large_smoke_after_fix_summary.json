@@ -1,0 +1,403 @@
+{
+  "checkpoint": "pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_compact3_mh8_polynet_lora_r8_deep_lora_hirandom_hrlearned_alcoef1_alent0.01_alt1_best.pt",
+  "dataset": "data/CVRP/data/test_set/CVRPlib_scale_larger_than1000_Li_X_XXL_n14.txt",
+  "grouped_mean_gap_pct": {
+    "Mix(anneal)": {
+      "buckets": {
+        "<1K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        ">=10K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        "[1K,10K)": {
+          "count": 1,
+          "mean_gap_pct": 17.454004187517047,
+          "std_gap_pct": 0.0
+        }
+      },
+      "ref": "opt"
+    },
+    "Model(anneal)": {
+      "buckets": {
+        "<1K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        ">=10K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        "[1K,10K)": {
+          "count": 1,
+          "mean_gap_pct": 17.454004187517047,
+          "std_gap_pct": 0.0
+        }
+      },
+      "ref": "opt"
+    }
+  },
+  "methods": {
+    "mix_anneal": {
+      "avg_ant_after_ls": 38567.875,
+      "avg_ant_before_ls": 46772.0,
+      "avg_incumbent_after_aco": 37283.0,
+      "best_head": {
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "events": [
+          {
+            "head": 6,
+            "iter": null,
+            "source": "head_best_after",
+            "step_index": 0,
+            "value": 37283.0
+          }
+        ],
+        "fractions": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "most_frequent_head": 6,
+        "total": 1
+      },
+      "final_ant_after_ls": 38567.875,
+      "final_ant_before_ls": 46772.0,
+      "final_incumbent_after_aco": 37283.0,
+      "gap_pct": 17.454004187517047,
+      "gap_std_pct": 0.0,
+      "guidance_diagnostics": {
+        "enhance": 0.17598463594913483,
+        "head_best_after": [
+          37852.0,
+          38318.0,
+          38849.0,
+          38647.0,
+          39337.0,
+          38721.0,
+          37283.0,
+          39536.0
+        ],
+        "head_best_before": [
+          49446.0,
+          42034.0,
+          49878.0,
+          40724.0,
+          50922.0,
+          47743.0,
+          44150.0,
+          49279.0
+        ],
+        "head_best_fraction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "head_best_iteration_distribution": {
+          "counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0
+          ],
+          "fractions": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          "most_frequent_head": 6,
+          "total": 1
+        },
+        "head_enhance": [
+          0.17579250037670135,
+          0.17829009890556335,
+          0.17521613836288452,
+          0.17752161622047424,
+          0.17579250037670135,
+          0.17636887729167938,
+          0.1761767566204071,
+          0.17387127876281738
+        ],
+        "head_improvement_fraction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "head_logit_corr": 0.9982718825340271,
+        "head_mean_after": [
+          37852.0,
+          38318.0,
+          38849.0,
+          38647.0,
+          39337.0,
+          38721.0,
+          37283.0,
+          39536.0
+        ],
+        "head_mean_before": [
+          49446.0,
+          42034.0,
+          49878.0,
+          40724.0,
+          50922.0,
+          47743.0,
+          44150.0,
+          49279.0
+        ],
+        "head_rebellion": [
+          0.17579250037670135,
+          0.17829009890556335,
+          0.17521613836288452,
+          0.17752161622047424,
+          0.17579250037670135,
+          0.17636887729167938,
+          0.1761767566204071,
+          0.17387127876281738
+        ],
+        "head_selected_edge_overlap": 0.0114504685178916,
+        "head_suppression": [
+          0.09529298543930054,
+          0.09029778838157654,
+          0.09183476865291595,
+          0.09682996571063995,
+          0.08837656676769257,
+          0.08722382038831711,
+          0.09029778838157654,
+          0.09356387704610825
+        ],
+        "head_topk_overlap": 0.9635564135564135,
+        "num_heads": 8,
+        "rebellion": 0.17598463594913483,
+        "suppression": 0.09164265543222427
+      },
+      "mean_cost": 37283.0,
+      "mean_guidance": -6.88318395614624,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.27999091148376465,
+      "pheromone_correlation": null,
+      "std_cost": 0.0,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.0,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 0.27999091148376465
+    },
+    "model_anneal": {
+      "avg_ant_after_ls": 38567.875,
+      "avg_ant_before_ls": 46772.0,
+      "avg_incumbent_after_aco": 37283.0,
+      "best_head": {
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "events": [
+          {
+            "head": 6,
+            "iter": null,
+            "source": "head_best_after",
+            "step_index": 0,
+            "value": 37283.0
+          }
+        ],
+        "fractions": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "most_frequent_head": 6,
+        "total": 1
+      },
+      "final_ant_after_ls": 38567.875,
+      "final_ant_before_ls": 46772.0,
+      "final_incumbent_after_aco": 37283.0,
+      "gap_pct": 17.454004187517047,
+      "gap_std_pct": 0.0,
+      "guidance_diagnostics": {
+        "enhance": 0.17598463594913483,
+        "head_best_after": [
+          37852.0,
+          38318.0,
+          38849.0,
+          38647.0,
+          39337.0,
+          38721.0,
+          37283.0,
+          39536.0
+        ],
+        "head_best_before": [
+          49446.0,
+          42034.0,
+          49878.0,
+          40724.0,
+          50922.0,
+          47743.0,
+          44150.0,
+          49279.0
+        ],
+        "head_best_fraction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "head_best_iteration_distribution": {
+          "counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0
+          ],
+          "fractions": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          "most_frequent_head": 6,
+          "total": 1
+        },
+        "head_enhance": [
+          0.17579250037670135,
+          0.17829009890556335,
+          0.17521613836288452,
+          0.17752161622047424,
+          0.17579250037670135,
+          0.17636887729167938,
+          0.1761767566204071,
+          0.17387127876281738
+        ],
+        "head_improvement_fraction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "head_logit_corr": 0.9982718825340271,
+        "head_mean_after": [
+          37852.0,
+          38318.0,
+          38849.0,
+          38647.0,
+          39337.0,
+          38721.0,
+          37283.0,
+          39536.0
+        ],
+        "head_mean_before": [
+          49446.0,
+          42034.0,
+          49878.0,
+          40724.0,
+          50922.0,
+          47743.0,
+          44150.0,
+          49279.0
+        ],
+        "head_rebellion": [
+          0.17579250037670135,
+          0.17829009890556335,
+          0.17521613836288452,
+          0.17752161622047424,
+          0.17579250037670135,
+          0.17636887729167938,
+          0.1761767566204071,
+          0.17387127876281738
+        ],
+        "head_selected_edge_overlap": 0.0114504685178916,
+        "head_suppression": [
+          0.09529298543930054,
+          0.09029778838157654,
+          0.09183476865291595,
+          0.09682996571063995,
+          0.08837656676769257,
+          0.08722382038831711,
+          0.09029778838157654,
+          0.09356387704610825
+        ],
+        "head_topk_overlap": 0.9635564135564135,
+        "num_heads": 8,
+        "rebellion": 0.17598463594913483,
+        "suppression": 0.09164265543222427
+      },
+      "mean_cost": 37283.0,
+      "mean_guidance": -6.88318395614624,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 1.085860013961792,
+      "pheromone_correlation": null,
+      "std_cost": 0.0,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.0,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 1.085860013961792
+    }
+  },
+  "n_node": 1000,
+  "problem": "cvrp",
+  "seed": 1234
+}

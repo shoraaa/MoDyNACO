@@ -1,0 +1,2 @@
+variant,decoder,rank,loss_js,train_rc,eval_rc,gap_pct,mean_cost,mean_time_s,head_logit_corr,head_topk_overlap,head_selected_edge_overlap,head_best_fraction,head_improvement_fraction,checkpoint,summary_json
+deep_lora_r4,deep_lora,4,0.0,0,,,,,,,,,,,results/multihead_decoder_sweep/smoke_dryrun/deep_lora_r4_summary.json

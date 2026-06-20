@@ -1,0 +1,52 @@
+{
+  "checkpoint": "pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_best.pt",
+  "dataset": "data/CVRP/data/test_set/CVRPlib_scale_larger_than1000_Li_X_XXL_n14.txt",
+  "grouped_mean_gap_pct": {
+    "Model(anneal)": {
+      "buckets": {
+        "<1K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        ">=10K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        "[1K,10K)": {
+          "count": 1,
+          "mean_gap_pct": 7.908483905131599,
+          "std_gap_pct": 0.0
+        }
+      },
+      "ref": "opt"
+    }
+  },
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 36167.725,
+      "avg_ant_before_ls": 40796.8875,
+      "avg_incumbent_after_aco": 35399.0,
+      "final_ant_after_ls": 34877.09375,
+      "final_ant_before_ls": 38732.53125,
+      "final_incumbent_after_aco": 34253.0,
+      "gap_pct": 7.908483905131599,
+      "gap_std_pct": 0.0,
+      "guidance_diagnostics": {},
+      "mean_cost": 34253.0,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.18859076499938965,
+      "pheromone_correlation": null,
+      "std_cost": 0.0,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.0,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 0.18859076499938965
+    }
+  },
+  "n_node": 1000,
+  "problem": "cvrp",
+  "seed": 1234
+}

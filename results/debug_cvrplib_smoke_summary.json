@@ -1,0 +1,93 @@
+{
+  "checkpoint": "pretrained/cvrp/n1000/cvrp_n1000_k32_ants100_H10_miniH100_rho0.5_mne12_ppo_lr5e-06_compact3_mh8_polynet_lora_r8_deep_lora_hirandom_hrlearned_alcoef1_alent0.01_alt1_best.pt",
+  "dataset": "../STAR/survey/NRS/Construction/single-stage/appending/1_BQ/data/CVRPlib_survey_instances_converted.txt",
+  "grouped_mean_gap_pct": {
+    "Mix(anneal)": {
+      "buckets": {
+        "<1K": {
+          "count": 1,
+          "mean_gap_pct": 19.86517342611721,
+          "std_gap_pct": 0.0
+        },
+        ">=10K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        "[1K,10K)": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        }
+      },
+      "ref": "opt"
+    },
+    "Model(anneal)": {
+      "buckets": {
+        "<1K": {
+          "count": 1,
+          "mean_gap_pct": 19.86517342611721,
+          "std_gap_pct": 0.0
+        },
+        ">=10K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        "[1K,10K)": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        }
+      },
+      "ref": "opt"
+    }
+  },
+  "methods": {
+    "mix_anneal": {
+      "avg_ant_after_ls": 33890.25,
+      "avg_ant_before_ls": 37157.75,
+      "avg_incumbent_after_aco": 33072.0,
+      "final_ant_after_ls": 33890.25,
+      "final_ant_before_ls": 37157.75,
+      "final_incumbent_after_aco": 33072.0,
+      "gap_pct": 19.86517342611721,
+      "gap_std_pct": 0.0,
+      "guidance_diagnostics": {},
+      "mean_cost": 33072.0,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.6188595294952393,
+      "pheromone_correlation": null,
+      "std_cost": 0.0,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.0,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 0.6188595294952393
+    },
+    "model_anneal": {
+      "avg_ant_after_ls": 33890.25,
+      "avg_ant_before_ls": 37157.75,
+      "avg_incumbent_after_aco": 33072.0,
+      "final_ant_after_ls": 33890.25,
+      "final_ant_before_ls": 37157.75,
+      "final_incumbent_after_aco": 33072.0,
+      "gap_pct": 19.86517342611721,
+      "gap_std_pct": 0.0,
+      "guidance_diagnostics": {},
+      "mean_cost": 33072.0,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.3445754051208496,
+      "pheromone_correlation": null,
+      "std_cost": 0.0,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.0,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 0.3445754051208496
+    }
+  },
+  "n_node": 1000,
+  "problem": "cvrp",
+  "seed": 1234
+}

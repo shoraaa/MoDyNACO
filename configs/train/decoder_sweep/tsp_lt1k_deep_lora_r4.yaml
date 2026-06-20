@@ -1,0 +1,46 @@
+problem: tsp
+n_node: 1000
+k_sparse: 32
+algo: ppo
+alg: faco
+
+n_ants: 100
+H: 10
+mini_H: 10
+epochs: 20
+steps_per_epoch: 32
+ppo_epochs: 4
+ppo_clip: 0.1
+ppo_lr: 5.0e-6
+lr: null
+
+rho: 0.1
+min_new_edges: 12
+alpha: 1.0
+beta: 1.0
+gamma: 1.0
+min_gamma: 0.0
+train_anneal: false
+warmup: true
+train_warmup: false
+warmup_ratio: 0.5
+
+multi_head: true
+num_heads: 4
+head_zdim: 16
+head_decoder_type: deep_lora
+lora_rank: 4
+lora_alpha: 1.0
+head_adapter_init: random
+loss_js: 0.0
+
+val_dataset: data/TSP/data/test_set/STAR_TSP_lt1000.txt
+val_size: 69
+baseline: none
+baseline_runs: 1
+baseline_time_limit: 0.5
+
+device: cuda:0
+seed: 1234
+save_dir: results/multihead_decoder_configs/checkpoints
+run_tag: deep_lora_r4

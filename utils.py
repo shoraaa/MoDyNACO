@@ -2149,6 +2149,57 @@ def _append_head_similarity_metrics(
         metrics_log["head_rebellion"].append([m["rebellion"] for m in per_head])
         metrics_log["head_suppression"].append([m["suppression"] for m in per_head])
 
+
+def _head_selected_trace_edge_overlap(
+    traces: Any,
+    costs: Any,
+    head_counts: Optional[List[int]],
+) -> Optional[float]:
+    if traces is None or costs is None or not head_counts:
+        return None
+    try:
+        starts = np.asarray(traces.starts, dtype=np.int64)
+        curr_nodes = np.asarray(traces.curr_nodes, dtype=np.int64)
+        chosen_nodes = np.asarray(traces.chosen_nodes, dtype=np.int64)
+        costs_np = _tensor_to_numpy_1d(costs)
+    except Exception:
+        return None
+    if starts.size < int(sum(head_counts)) + 1 or costs_np.size < int(sum(head_counts)):
+        return None
+
+    edge_sets: List[set[tuple[int, int]]] = []
+    start_ant = 0
+    for count in head_counts:
+        count = int(count)
+        end_ant = start_ant + count
+        if count <= 0:
+            start_ant = end_ant
+            continue
+        local = costs_np[start_ant:end_ant]
+        if local.size == 0:
+            start_ant = end_ant
+            continue
+        ant = start_ant + int(np.argmin(local))
+        lo, hi = int(starts[ant]), int(starts[ant + 1])
+        edges = {
+            (int(a), int(b))
+            for a, b in zip(curr_nodes[lo:hi], chosen_nodes[lo:hi])
+            if int(a) >= 0 and int(b) >= 0 and int(a) != int(b)
+        }
+        if edges:
+            edge_sets.append(edges)
+        start_ant = end_ant
+
+    overlaps = []
+    for i in range(len(edge_sets)):
+        for j in range(i + 1, len(edge_sets)):
+            union = edge_sets[i] | edge_sets[j]
+            if union:
+                overlaps.append(len(edge_sets[i] & edge_sets[j]) / len(union))
+    if not overlaps:
+        return None
+    return float(np.mean(overlaps))
+
 def generate_and_save_dataset(problem, n_node, n_instances, save_path, baseline_solver='lkh', 
                                baseline_runs=1, time_limit=300.0, device='cpu', capacity_override=None):
     """
@@ -2362,10 +2413,6 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
             'euc_2d_cost': bool(getattr(args, 'euc_2d_cost', False)),
         }
 
-    aco = aco_class(**kwargs)
-    if seed is not None and hasattr(aco, 'seed_rng'):
-        aco.seed_rng(seed)
-
     # Normalize coordinates for model input (scale to [0, 1] while preserving aspect ratio)
     norm_coords = coords
     if model is not None:
@@ -2411,11 +2458,10 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
     
     
     aco = aco_class(**kwargs)
-    
-    # Seeding C++ backend
-    # We generate a unique seed for this instance from the global numpy state
-    # This ensures determinism if global seed is set, but uniqueness across instances
-    instance_seed = np.random.randint(0, 2**63 - 1)
+
+    # Seeding C++ backend. Prefer the caller-provided deterministic seed so
+    # baseline/model method comparisons use the same random stream per instance.
+    instance_seed = seed if seed is not None else np.random.randint(0, 2**63 - 1)
     if hasattr(aco, 'seed_rng'):
         aco.seed_rng(instance_seed)
 
@@ -2430,7 +2476,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                                    "enhance", "rebellion", "suppression", "prior_mean", "prior_std",
                                    "head_best", "head_improvement", "head_mean_after", "head_best_after",
                                    "head_mean_before", "head_best_before", "head_counts",
-                                   "head_logit_corr", "head_topk_overlap", "head_enhance",
+                                   "head_logit_corr", "head_topk_overlap", "head_selected_edge_overlap", "head_enhance",
                                    "head_rebellion", "head_suppression",
                                    "head_pairwise_jsd", "head_jsd_to_mean",
                                    "head_router_entropy", "head_router_min_ants",
@@ -2587,9 +2633,10 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     and current_prior.dim() == 3
                     and hasattr(aco, "sample_mixed_priors")
                 ):
-                    prior_head_counts = head_counts_for_router(
-                        args, int(current_prior.shape[0]), n_ants, head_router
-                    )
+                    if prior_head_counts is None:
+                        prior_head_counts = head_counts_for_router(
+                            args, int(current_prior.shape[0]), n_ants, head_router
+                        )
                     incumbent_before = best_seen
                     costs_t, flats, _, _, traces, costs_raw, flats_raw, new_edges, survival = aco.sample_mixed_priors(
                         current_prior,
@@ -2658,6 +2705,13 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                         best_idx,
                         improved_best,
                     )
+                    selected_overlap = _head_selected_trace_edge_overlap(
+                        traces,
+                        costs_t,
+                        prior_head_counts,
+                    )
+                    if selected_overlap is not None:
+                        metrics_log["head_selected_edge_overlap"].append(selected_overlap)
                 
                 if problem == 'tsp':
                     aco._update_pheromone_from_flat(flats[best_idx], best_cost)

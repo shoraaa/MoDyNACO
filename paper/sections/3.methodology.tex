@@ -8,12 +8,18 @@
 
 % Standard ACO constructs solutions using transition probabilities $p(j \mid i) \propto [\tau_{ij}]^\alpha [\eta_{ij}]^\beta$, relying on an evolving pheromone matrix $\tau_{ij}$ but a strictly static heuristic visibility $\eta_{ij}$. 
 % Based on the notation introduced in Section~\ref{sec:prelim}, we present \DyNACO{}, a dynamic neural-guided ACO framework that periodically observes the evolving search state and emits trajectory-aware edge guidance for the next block of ACO iterations.
-% This section presents \DyNACO{}, 
-Based on the notation introduced in Section~\ref{sec:prelim}, we present the method in the same progression used by the search system itself. We first define \DyNACO{}, Dynamic Neural Ant Colony Optimization: one state-aware policy repeatedly observes the evolving ACO state and emits guidance over the full search trajectory rather than committing to a one-shot heatmap. We then build \DyNACS{}, Dynamic Neural Ant Colony Search, on top of this base model by giving different ant groups complementary trajectory distributions within a shared colony. Finally, we describe the scalable search environment shared by both models: a perturbation-based ACO backend with scope-restricted refinement that makes the conceptual policy interface trainable and scalable. We instantiate the framework for Euclidean \TSP{} on $N$ nodes, seeking a tour $\pi$ that minimizes total cost $C(\pi)$, and for \CVRP{}, where we use a capacity-aware perturbation backend for feasibility handling.
+% Present \DyNACO{} as the dynamic guidance stage.
+\subsection{Static Neural ACO}
+\label{sec:static-mismatch}
 
-\subsection{Semi-MDP Formulation}
+Neural-guided ACO begins with the transition rule in Eq.~\eqref{eq:aco_transition}: pheromone records search experience, heuristic information supplies a fixed prior, and ants sample feasible successors from the resulting distribution. Existing neural-ACO methods usually insert learning into this rule by predicting one heatmap from the input graph before the ACO loop begins. The learned signal is then held fixed while pheromones, incumbents, and sampled solution distributions evolve.
+
+\DyNACO{} replaces this one-shot heatmap with a state-aware policy that repeatedly observes the ACO state and updates edge guidance during search. The policy receives the current pheromone field and incumbent solution, emits guidance for the next block of ACO iterations, and is trained on the cost trajectory induced by those repeated interactions. Dynamic guidance therefore changes the role of the neural model: it no longer initializes the search once, but participates in the same iterative process that updates pheromones and incumbents.
+
+\subsection{Dynamic Guidance as a Semi-MDP}
 \label{sec:mdp}
-Prior neural-guided ACO methods~\cite{deepaco,gfacs,gtgaco} treat guidance as a \emph{one-shot prediction}: a network observes the instance graph and emits a static heatmap, trained from a single pheromone-free sample of ants, after which the solver runs a full ACO loop with pheromone dynamics to completion without further interaction. The model is therefore trained without pheromone dynamics. We address this mismatch by formalizing \DyNACO{} as a two-level hierarchy in which a neural \emph{meta-policy} $\pi_\theta$ repeatedly observes the macro-state and emits updated guidance, while the ACO backend executes $S$ iterations between observations. The policy follows the evolving ACO state rather than a fixed inference horizon, so it can be evaluated under longer ACO budgets by continuing to observe the current macro-state. Such a semi-MDP formulation enables:
+Prior neural-guided ACO methods~\cite{deepaco,gfacs,gtgaco} treat guidance as a \emph{one-shot prediction}: a network observes the instance graph and emits a static heatmap, trained from a single pheromone-free sample of ants, after which the solver runs a full ACO loop with pheromone dynamics to completion without further interaction. The learned signal is therefore trained without the state variables that later govern the search.
+\DyNACO{} formalizes dynamic guidance as a two-level hierarchy in which a neural \emph{meta-policy} $\pi_\theta$ repeatedly observes the macro-state and emits updated guidance, while the ACO backend executes $S$ iterations between observations. The policy follows the evolving ACO state rather than a fixed inference horizon, so it can be evaluated under longer ACO budgets by continuing to observe the current macro-state. This semi-MDP formulation enables:
 
 \begin{enumerate}
 \item \emph{Amortized policy updates.} The neural policy outputs actions only once every $S$ iterations and remains fixed during this interval. This amortizes overhead and effectively reduces variance during policy-gradient training.
@@ -32,13 +38,12 @@ Formally, we model this as a \emph{semi-MDP with fixed-duration macro-actions} a
 % ======================================================================
 % 3.3 State-Aware Policy and Training
 % ======================================================================
-\subsection{State-Aware Policy and Trajectory-Aware Training}
+\subsection{State Representation: Geometry, Pheromone, and Incumbent}
 \label{sec:agent}
 
 
-\smallskip\noindent\textbf{State-Aware Representation.}
 \label{sec:state}
-Prior neural-ACO methods condition solely on \emph{static} instance geometry, yielding guidance that cannot adapt to the solver's evolving state. The semi-MDP state $\mathcal{S}_h = (G,\, \tau^{(h,0)},\, b^{(h)})$ defined in Section~\ref{sec:mdp} isolates the two quantities that evolve between guidance updates: the pheromone field~$\tau$ and the incumbent solution~$b$. These are precisely the signals inherent to the ACO process; conditioning on them enables the semi-MDP formulation and renders the guidance \emph{dynamic}. We retain the static node features used by DeepACO~\cite{deepaco} for each problem and add three sparse edge channels on the $K$-NN graph: scale-normalized distance, local pheromone concentration, and an incumbent-edge indicator. The dynamic channels are recomputed at every outer step, remain bounded by $\mathcal{O}(N \cdot K)$, and are processed by a 12-layer GNN encoder~\cite{deepaco} with interleaved node and edge message passing. Appendix~\ref{app:features} gives the exact feature definitions.
+Prior neural-ACO methods condition solely on \emph{static} instance geometry, yielding guidance that cannot adapt to the solver's evolving state. The semi-MDP state $\mathcal{S}_h = (G,\, \tau^{(h,0)},\, b^{(h)})$ defined in Section~\ref{sec:mdp} isolates the two quantities that change between guidance updates: the pheromone field~$\tau$ and the incumbent solution~$b$. Conditioning on these ACO signals makes the guidance dynamic. We retain the static node features used by DeepACO~\cite{deepaco} for each problem and add three sparse edge channels on the $K$-NN graph: scale-normalized distance, local pheromone concentration, and an incumbent-edge indicator. The dynamic channels are recomputed at every outer step, remain bounded by $\mathcal{O}(N \cdot K)$, and are processed by a 12-layer GNN encoder~\cite{deepaco} with interleaved node and edge message passing. Appendix~\ref{app:features} gives the exact feature definitions.
 
 The \DyNACO{} policy outputs a scalar guidance score $z_{ij}$ for each candidate edge via a 3-layer MLP decoder.
 The shaped transition kernel adds these logits in log-space (Eq.~\ref{eq:held-logits}), corresponding to a KL-regularized policy where $p^\theta(\cdot\mid i) \propto q(j\mid i)\exp(z_{ij})$.
@@ -72,7 +77,7 @@ Because $\tau_{\min} > 0$ and logits remain finite, every candidate retains posi
 
 
 
-\smallskip\noindent\textbf{Trajectory-Aware Training.}
+\subsection{Trajectory-Aware Training}
 \label{sec:training}
 Prior methods~\cite{deepaco,gfacs,gtgaco} optimize a \emph{single-step} objective: $\min_\theta \mathbb{E}_{\pi \sim p_\theta(\cdot \mid G)} [ C(\pi) ]$, where ants sample once from the neural heuristic alone.
 At inference, however, the same static heatmap is inserted into a full ACO loop where pheromone fields evolve over hundreds of iterations.
@@ -83,7 +88,7 @@ Let $\hat{\pi}_{a,s} = \mathrm{LS}(\pi_{a,s})$ denote the tour produced by ant $
 \begin{equation}
 J(\theta) = \mathbb{E} \left[ \frac{1}{I} \sum_{h=1}^H \sum_{s=1}^S \frac{1}{m} \sum_{a=1}^m C(\hat{\pi}_{a,s}) \right].
 \end{equation}
-This \emph{trajectory-aware} objective averages cost over all $I = H \times S$ iterations, training the policy to remain effective from early exploration through late exploitation and minimizing the area under the cost curve rather than a single endpoint.
+This \emph{trajectory-aware} objective averages cost over all $I = H \times S$ iterations, training the policy to remain effective from early exploration through late exploitation and optimizing the full cost trajectory instead of a single endpoint.
 
 Under perturbative sampling each ant modifies at most $M$ edges, and the log-probability of its trajectory is the sum over stochastic edge choices.
 Because the number of stochastic decisions $T_a$ varies across ants (deterministic steps with a single feasible candidate contribute $\log p = 0$), we normalize by decision count: $\bar{\ell}_{a,s} = \frac{1}{T_a} \sum_{t=1}^{T_a} \log p^\theta(v_t \mid u_t)$.
@@ -174,15 +179,16 @@ After collecting trajectories for $S$ sampling iterations under $\pi_{\theta_{\t
 \hat{A}_{a,s}\big)\Big].
 \end{multline}
 where $r_{a,s}(\theta) = \pi_\theta(\pi_{a,s} | \mathcal{S}_h) / \pi_{\theta_{\text{old}}}(\pi_{a,s} | \mathcal{S}_h)$, $\epsilon=0.1$, and $\hat{A}_{a,s}$ is the normalized advantage.
-The semi-MDP interface makes this replay memory-efficient. For each outer step, we store the incumbent successor array needed to reconstruct incumbent-derived edge features. For each inner iteration, we store the sparse pheromone snapshot, the stochastic action trace of each ant, the feasible-candidate mask at each stochastic decision, and the post-refinement costs. These quantities are sufficient to recompute PPO log-probabilities under the current policy because the transition probability depends only on the shaped kernel and the stored feasible set; deterministic steps with a single feasible candidate contribute zero log-probability. Thus, \DyNACO{} can recompute importance ratios without storing the full GNN computation graph, while all state features remain on the sparse $K$-NN graph with $\mathcal{O}(nK)$ memory.
-The full procedure for the dynamic base model is given in Algorithm~\ref{alg:train}. \DyNACO{} resolves the static-heatmap limitation by making guidance state-aware and trajectory-trained. However, it still applies one behavior to the whole ant population. The next section addresses this remaining limitation by extending the single-behavior policy into trajectory-diverse guidance.
+Replay remains memory-efficient at the macro-step level. For each outer step, we store the incumbent successor array needed to reconstruct incumbent-derived edge features. For each inner iteration, we store the sparse pheromone snapshot, the stochastic action trace of each ant, the feasible-candidate mask at each stochastic decision, and the post-refinement costs. These quantities are sufficient to recompute PPO log-probabilities under the current policy because the transition probability depends only on the shaped kernel and the stored feasible set; deterministic steps with a single feasible candidate contribute zero log-probability. \DyNACO{} can therefore recompute importance ratios without storing the full GNN computation graph, while all state features remain on the sparse $K$-NN graph with $\mathcal{O}(nK)$ memory.
+The full procedure for the dynamic base model is given in Algorithm~\ref{alg:train}. With \DyNACO{}, guidance changes with pheromone and incumbent information instead of remaining fixed from initialization. Within each macro-step, however, all ants still follow the same learned edge preference. \DyNACS{} keeps the same dynamic state representation and lets different ant groups follow complementary state-conditioned priors.
 
 
 \section{Trajectory-Diverse Neural Ant Colony Search}
 \label{sec:multi-trajectory}
-The previous section defines \DyNACO{} as the dynamic base model: one state-aware policy observes the evolving ACO macro-state and emits one guidance field for the next search interval. This resolves the static-heatmap limitation, but it still leaves the colony with only one learned behavior. ACO is a population-based optimizer, and its strength comes partly from maintaining several compatible ways of exploring the same search state. A single neural guidance field imposes one ordering of candidate perturbations on the whole ant population, which can be restrictive when pheromone has concentrated or when an out-of-distribution instance admits several plausible continuation modes.
 
-Motivated by recent NCO work on learned strategy diversity~\cite{mdam,poppy,polynet}, we introduce \DyNACS{}, which builds on \DyNACO{} by learning a mixture of trajectory distributions. Each behavior guides a subset of ants, while all ants still interact through the same incumbent solution and pheromone field. This design forms a closed-loop trajectory-diverse search process. First, the policy maps the current ACO state to complementary edge-level guidance. Second, these behaviors generate heterogeneous perturbation trajectories that are evaluated under the same refinement operator. Third, successful perturbations are written back to shared search memory and influence the distributions used in later steps. Finally, online behavior routing assigns search effort according to recent refined-solution quality, adapting the mixture to the current instance without gradient updates.
+\DyNACO{} makes neural guidance responsive to the current ACO state, but the policy still emits one guidance field for the whole colony. All ants therefore share the same learned ordering of candidate perturbations at each macro-step, even though a population-based search process may need several useful continuations from the same pheromone state. The limitation becomes more pronounced after pheromone has concentrated around a narrow region or when an out-of-distribution instance presents several plausible search modes.
+
+\DyNACS{} introduces trajectory diversity within the dynamic colony. From the same encoded macro-state, the policy produces several behavior-conditioned guidance fields and assigns ant groups to them. The groups sample different perturbation trajectories, pass through the same refinement operator, and write successful perturbations back to the shared incumbent solution and pheromone field. A learned allocation policy assigns search effort across behaviors from the current state, allowing the colony to change its composition while preserving one shared search memory.
 
 \begin{figure}[t]
     \centering
@@ -198,7 +204,7 @@ Motivated by recent NCO work on learned strategy diversity~\cite{mdam,poppy,poly
     \label{fig:multi-head-lora-gnn}
 \end{figure}
 
-\subsection{Mixture-Based Trajectory Guidance}
+\subsection{Behavior-Conditioned Ant Groups}
 \label{sec:tdg-formulation}
 
 We extend the semi-MDP in Section~\ref{sec:mdp} by augmenting dynamic guidance with a discrete behavior index. At macro-step $h$, the state remains
@@ -219,7 +225,7 @@ Each behavior $r$ defines a trajectory distribution for ants assigned to that be
 + \gamma z_{ij}^{(r)}(\mathcal{S}_h).
 \label{eq:multi-trajectory-kernel}
 \end{equation}
-Thus, \DyNACS{} does not run $R$ independent solvers. It defines $R$ behavior-conditioned distributions over perturbation trajectories while preserving the same macro-state, incumbent solution, pheromone update, and SRR projection.
+The $R$ behavior-conditioned distributions define perturbation trajectories inside one shared solver state, preserving the same macro-state, incumbent solution, pheromone update, and SRR projection.
 
 Let $\mathcal{A}_r^{(h,s)}$ be the ants assigned to behavior $r$ at inner iteration $s$. The transition cost for a macro-step is still measured over the combined population,
 \begin{equation}
@@ -229,11 +235,10 @@ C_h =
 \end{equation}
 but each trajectory log-probability is evaluated under its assigned behavior,
 \begin{equation}
-\log \pi_\theta(\pi_{a,s}, r\mid\mathcal{S}_h)
-= \log \omega_r^{(h)}
-+ \sum_{t=1}^{T_a}\log p_r^\theta(v_t\mid u_t;h,s),
+\log \pi_\theta(\pi_{a,s}\mid r,\mathcal{S}_h)
+= \sum_{t=1}^{T_a}\log p_r^\theta(v_t\mid u_t;h,s),
 \end{equation}
-where $\omega_r^{(h)}$ is the routing weight for behavior $r$. This formulation turns neural guidance from one homogeneous transition bias into a mixture of trajectory distributions: each behavior is evaluated through the quality of its refined trajectories, while all behaviors cooperate through the shared colony state.
+where the behavior index is fixed by the allocation policy for that ant group. Neural guidance is thereby represented as a mixture of trajectory distributions: each behavior is evaluated through the quality of its refined trajectories, while all behaviors cooperate through the shared colony state.
 
 \subsection{Behavior-Conditioned Guidance Generation}
 \label{sec:tdg-policy}
@@ -245,71 +250,80 @@ The mixture model shares the state representation used by \DyNACO{} and learns m
 \operatorname{GNN}_{\theta}
 \bigl(G,\tau^{(h,0)},b^{(h)}\bigr)
 \end{equation}
-denote the sparse edge embeddings produced from the current macro-state. A shared guidance map $g_0$ captures common preferences over candidate edges, while $R$ behavior-conditioned residual maps $\{\Delta_r\}_{r=1}^{R}$ specialize this representation into distinct trajectory biases:
+denote the sparse edge embeddings produced from the current macro-state. A behavior-conditioned decoder family maps these embeddings to $R$ sparse guidance fields:
 \begin{equation}
 z_{ij}^{(r)}(\mathcal{S}_h)
-= g_0(e_{ij}^{(h)}) + \Delta_r(e_{ij}^{(h)}),
+= D_{\theta,r}(e_{ij}^{(h)}),
 \qquad r=1,\ldots,R,
 \label{eq:multi-trajectory-logit}
 \end{equation}
-This parameterization makes the behavior-conditioned distributions comparable because they are grounded in the same encoded search state, while the residual maps let them express different edge-ordering preferences. In this sense, the mixture is not a collection of independent policies; it is a structured factorization of one state-aware policy into a shared search representation and multiple behavior-conditioned guidance maps.
+Because all behavior-conditioned distributions are grounded in the same encoded search state, their differences reflect behavior-specific edge-ordering preferences under a common colony state. The mixture factorizes one dynamic policy into a shared search representation and multiple behavior-conditioned guidance maps.
 
-We use a low-rank parameterization for the residual behavior maps to keep the mixture lightweight. In one equivalent form, the behavior-specific map is
+We use low-rank behavior conditioning to keep this policy family lightweight. For decoder layer $\ell$, behavior $r$ uses
 \begin{equation}
-W_r = W_0 + \frac{\alpha_{\mathrm{L}}}{d_{\mathrm{L}}}B_rA_r,
+W_{\ell}^{(r)}
+= W_{\ell}
++ \frac{\alpha_{\mathrm{L}}}{d_{\mathrm{L}}}B_{\ell,r}A_{\ell,r},
+\qquad
+h_{\ell}^{(r)}
+= \sigma\!\left(W_{\ell}^{(r)}h_{\ell-1}^{(r)}+b_{\ell}\right),
+\label{eq:behavior-decoder}
 \end{equation}
-where $W_0$ is shared, $A_r$ and $B_r$ are behavior-specific low-rank factors, and $d_{\mathrm{L}}$ is the adapter rank. Equivalently, the residual map can be written as
-\begin{equation}
-\Delta_r(e_{ij}^{(h)})
-= \phi(e_{ij}^{(h)})^\top \psi_r + c_r,
-\end{equation}
-with an edge factor $\phi(\cdot)$ and a behavior code $\psi_r$. Both forms preserve the main computational property: the GNN is evaluated once per macro-state, and the mixture adds only lightweight behavior-specific maps. The resulting output is a sparse tensor in $\mathbb{R}^{R\times N\times K}$, matching the candidate graph used by the ACO backend.
+where $W_{\ell}$ and $b_{\ell}$ are shared, $A_{\ell,r}$ and $B_{\ell,r}$ are behavior-specific low-rank factors, $d_{\mathrm{L}}$ is the rank, and $\alpha_{\mathrm{L}}$ controls the scale of the deviation. The same form is used for the output transformation that produces the scalar edge logit. Applying behavior conditioning inside the decoder lets different search modes transform the shared edge representation before ranking candidate perturbations, so intensifying and diversifying moves can emerge from the same pheromone state. Low-rank deviations provide this distributed conditioning while retaining shared statistical strength and keeping the additional cost small relative to the shared GNN encoder. The resulting output is a sparse tensor in $\mathbb{R}^{R\times N\times K}$, matching the candidate graph used by the ACO backend.
 
-\subsection{Shared Search Memory}
+\subsection{Shared Pheromone and Incumbent Memory}
 \label{sec:tdg-shared-colony}
 
-At each inner ACO iteration, the ant population is partitioned into groups $\{\mathcal{A}_r\}_{r=1}^R$. Ants in group $r$ sample perturbation trajectories under $p_r^\theta$, but all groups start from the same reference solution and contribute to the same post-SRR candidate pool. The best refined trajectory among the combined population updates the incumbent, and the shared pheromone field is updated from that incumbent. The next macro-state therefore aggregates the effect of all behavior-conditioned distributions:
+At each inner ACO iteration, the ant population is partitioned into groups $\{\mathcal{A}_r\}_{r=1}^R$. Ants in group $r$ sample perturbation trajectories under $p_r^\theta$, but all groups start from the same reference solution and contribute to the same post-SRR candidate pool. The best refined trajectory among the combined population updates the incumbent, and the shared pheromone field is updated from that incumbent. The next macro-state aggregates the effect of all behavior-conditioned distributions:
 \begin{equation}
 \mathcal{S}_{h+1}
 =
 \mathcal{T}_{\mathrm{ACO}}
 \bigl(\mathcal{S}_h,\{z_\theta^{(r)}(\mathcal{S}_h)\}_{r=1}^{R}\bigr).
 \end{equation}
-This coupling is the key difference between trajectory-diverse guidance and independent multi-start search. Independent colonies would maintain separate pheromone fields and exchange information only through final solution selection. In \DyNACS{}, the behaviors interact through shared search memory at every inner iteration: a behavior that discovers a useful perturbation can reinforce the common colony state, while other behaviors can later exploit or counteract that reinforcement.
+The shared transition couples the behavior-conditioned distributions at every inner iteration. A useful perturbation found by one behavior reinforces the common colony state, and the other behaviors later respond through the same pheromone field and incumbent solution.
 
-\subsection{Online Behavior Routing}
+\subsection{Learned Behavior Allocation}
 \label{sec:tdg-allocation}
 
-The simplest trajectory-diverse variant routes ants uniformly across behaviors. We also use an online routing rule that shifts ant budget toward behaviors that have recently produced stronger refined trajectories. The rule keeps inference lightweight: it updates only running utilities and integer ant counts, without changing network parameters or maintaining separate solver states. Let $u_r^{(h)}$ denote the running utility for behavior $r$ at macro-step $h$, where larger values indicate better recent performance. Given the refined costs from ants assigned to behavior $r$, we form a per-step score
+Trajectory-diverse guidance also needs a rule for assigning ant mass across behaviors. We learn a state-conditioned allocator from the same encoded macro-state used to produce the guidance fields. Let
 \begin{equation}
-s_r^{(h)}
-= -\operatorname{TopQMean}_{a\in\mathcal{A}_r}
-\!\left[C(\hat{\pi}_{a,h})\right],
-\label{eq:trajectory-prior-score}
-\end{equation}
-where the top-$Q$ mean reduces sensitivity to a single lucky ant and becomes the negative best cost when $Q=1$. Scores are normalized across behaviors and accumulated with an exponential moving average,
-\begin{equation}
-u_r^{(h+1)}
-= (1-\mu)u_r^{(h)}+\mu\,\operatorname{Norm}(s_r^{(h)}).
-\end{equation}
-The next routing weights are
-\begin{equation}
-w_r^{(h+1)}
+\bar e^{(h)}
 =
-\frac{\exp(u_r^{(h+1)}/\lambda)}
-{\sum_{r'=1}^{R}\exp(u_{r'}^{(h+1)}/\lambda)}.
-\label{eq:trajectory-prior-weights}
+\frac{1}{|G|}
+\sum_{(i,j)\in G} e_{ij}^{(h)}
 \end{equation}
-We then project $m w_r^{(h+1)}$ to integer ant counts $m_r^{(h+1)}$ with $\sum_r m_r^{(h+1)}=m$ and at least one ant for each active behavior. Uniform routing is recovered by fixing $w_r=1/R$. The rule changes only which behavior each ant follows; it does not create separate pheromone states or separate local-search procedures.
+be a pooled summary of the current sparse edge representation. The allocator emits behavior logits
+\begin{equation}
+q^{(h)} = a_{\theta}(\bar e^{(h)}),
+\qquad
+\omega_r^{(h)}
+=
+\frac{\exp(q_r^{(h)}/\lambda)}
+{\sum_{r'=1}^{R}\exp(q_{r'}^{(h)}/\lambda)},
+\label{eq:learned-allocation}
+\end{equation}
+where $\lambda$ is the allocation temperature. The weights $\omega^{(h)}$ define the population composition used by the shared colony. Given $m$ ants, each active behavior receives a small floor allocation and the remaining ants are assigned according to $\omega^{(h)}$:
+\begin{multline}
+m_r^{(h)}
+= m_{\min}+\tilde m_r^{(h)},
+\qquad
+\sum_{r=1}^{R}m_r^{(h)}=m, \\
+\qquad
+\tilde m^{(h)} \sim
+\operatorname{Multinomial}\!\left(m-Rm_{\min},\omega^{(h)}\right).
+\label{eq:learned-ant-counts}
+\end{multline}
+At deployment, these weights determine how many ants follow each behavior in the mixed colony. Search effort moves with the encoded ACO state while all behaviors continue to share one pheromone field and one local-refinement procedure. The floor allocation keeps each behavior represented, and the learned weights move additional ants toward behaviors favored by the current state.
 
 \subsection{Training and Inference}
 \label{sec:tdg-training}
 
-Training \DyNACS{} uses the same trajectory-aware PPO interface as \DyNACO{}, but conditions the trajectory likelihood on the assigned behavior. During training, the mixture acts as a strategy-discovery mechanism: all behaviors are evaluated through the shared colony, and the policy update is formed from the strongest behavior-conditioned trajectory group in that rollout. During inference, the learned behavior-conditioned maps are fixed and only the routing weights change online, allowing the search to adapt to the current instance without gradient updates. Let
+\DyNACS{} is trained with the same trajectory-aware PPO procedure as \DyNACO{}, with trajectory likelihoods conditioned on the assigned behavior and allocation updates derived from the same refined rollout outcomes. During training, the mixture discovers complementary search modes through the shared colony. All behaviors affect the transition, and the guidance update is taken from the behavior group that produced the strongest refined trajectories in the rollout. Let $s_r^{(h)}$ be the refined-cost score of behavior $r$ at macro-step $h$, computed from the ants assigned to that behavior, with larger values denoting better refined trajectories. The selected behavior is
 \begin{equation}
 r_h^\star = \operatorname*{arg\,max}_{r\in\{1,\ldots,R\}} s_r^{(h)}
 \end{equation}
-denote the behavior with the best refined trajectory score at macro-step $h$. For an ant assigned to this behavior, the PPO ratio is
+which denotes the behavior with the best refined trajectory score at macro-step $h$. For an ant assigned to this behavior, the PPO ratio is
 \begin{equation}
 \rho_{a,s}^{(r_h^\star)}(\theta)
 =
@@ -327,18 +341,28 @@ where $\bar{\ell}_{a,s}^{(r_h^\star)}$ is the per-decision normalized log-probab
 \operatorname{clip}(\rho_{a,s}^{(r_h^\star)}(\theta),1-\epsilon,1+\epsilon)
 \hat{A}_{a,s}\big)\Big].
 \end{multline}
-The other behaviors are still part of the search transition because their refined trajectories can update the shared incumbent, pheromone field, and future routing utilities. Optionally, a small information-theoretic diversity regularizer can be applied to the mixture by maximizing the Jensen divergence among the row-wise transition distributions induced by $\{z^{(r)}\}_{r=1}^R$. This regularizer is not a separate solver objective; it only discourages all behaviors from collapsing to the same transition distribution.
+All behaviors remain part of the search transition because their refined trajectories can update the shared incumbent and pheromone field. The allocation weights are learned from the same macro-state representation used for guidance. If $\mathcal{R}_{\mathrm{alloc}}^{(h)}$ is the reward assigned to the sampled allocation, using the best refined cost in the mixed population, its clipped objective is
+\begin{multline}
+\mathcal{L}_{\mathrm{alloc}}(\theta)
+= -\mathbb{E}_{h}\Big[
+\min\big(
+\rho_{\mathrm{alloc}}^{(h)}(\theta)\hat A_{\mathrm{alloc}}^{(h)},\\
+\operatorname{clip}(\rho_{\mathrm{alloc}}^{(h)}(\theta),1-\epsilon,1+\epsilon)
+\hat A_{\mathrm{alloc}}^{(h)}\big)\Big]
+-\lambda_{\mathrm{ent}}\mathcal{H}(\omega^{(h)}),
+\end{multline}
+where $\rho_{\mathrm{alloc}}^{(h)}$ is the likelihood ratio of the sampled allocation under the new and old allocator policies. The full update combines behavior-conditioned trajectory learning with allocation learning and, optionally, a small information-theoretic diversity regularizer that maximizes the Jensen divergence among the row-wise transition distributions induced by $\{z^{(r)}\}_{r=1}^R$. The regularizer keeps behavior distributions separated while the optimization objective remains the refined trajectory cost.
 
 \begin{algorithm}[t]
-\caption{Trajectory-diverse guidance with online behavior routing for \DyNACS{}.}
+\caption{Trajectory-diverse guidance with learned behavior allocation for \DyNACS{}.}
 \label{alg:trajectory-diverse}
 \begin{algorithmic}[1]
-\REQUIRE $\theta$ (shared encoder and behavior-conditioned maps), $R$ (behaviors), $m$ (ants), $H$ (outer steps), $S$ (inner steps)
-\STATE Initialize $\tau^{(1,0)} \gets \tau_{\max}$, $b^{(1)} \gets \textsc{Greedy}(x)$, and routing utilities $\{u_r^{(1)}\}_{r=1}^R$
+\REQUIRE $\theta$ (shared encoder, behavior-conditioned decoder, allocator), $R$ (behaviors), $m$ (ants), $H$ (outer steps), $S$ (inner steps)
+\STATE Initialize $\tau^{(1,0)} \gets \tau_{\max}$ and $b^{(1)} \gets \textsc{Greedy}(x)$
 \FOR{$h = 1 \to H$}
     \STATE Encode $\mathcal{S}_h=(G,\tau^{(h,0)},b^{(h)})$
-    \STATE Emit behavior-conditioned guidance fields $\{z_\theta^{(r)}(\mathcal{S}_h)\}_{r=1}^R$
-    \STATE Route ants $\{m_r^{(h)}\}_{r=1}^R$ using uniform weights or Eqs.~\eqref{eq:trajectory-prior-score}--\eqref{eq:trajectory-prior-weights}
+    \STATE Emit behavior-conditioned guidance fields $\{z_\theta^{(r)}(\mathcal{S}_h)\}_{r=1}^R$ and allocation weights $\omega^{(h)}$
+    \STATE Assign ant counts $\{m_r^{(h)}\}_{r=1}^R$ from the learned allocation policy
     \FOR{$s = 1 \to S$}
         \FOR{$r = 1 \to R$}
             \STATE Sample $m_r^{(h)}$ perturbation trajectories under $p_r^\theta(\cdot \mid \mathcal{S}_h,\tau^{(h,s)})$
@@ -346,25 +370,34 @@ The other behaviors are still part of the search transition because their refine
         \STATE Apply SRR to all sampled trajectories
         \STATE Update $b^{(h)}$ with the best refined trajectory from the combined population
         \STATE Update $\tau^{(h,s+1)}$ using the shared incumbent
-        \STATE Update routing utilities $\{u_r\}_{r=1}^R$ from refined trajectory costs
+        \STATE Record refined costs for trajectory and allocation-policy updates during training
     \ENDFOR
     \STATE $\tau^{(h+1,0)} \gets \tau^{(h,S)}$; \, $b^{(h+1)} \gets b^{(h)}$
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
 
+After \DyNACS{} assigns ant groups to behavior-conditioned priors, the sampled actions must remain local, cheap, and trainable on large routing instances. The search backend provides this execution layer by turning \DyNACS{} guidance into sparse perturbation and refinement steps.
+
 
 % ======================================================================
 % 3.2 The Perturbative Environment
 % ======================================================================
-\section{Scalable Search Environment}
+\section{Scalable Search Backend}
 \label{sec:computational-alignment}
 \label{sec:backend}
 
-The previous two sections define what the policy observes and how one or several guidance fields shape search behavior. We now give the search environment through which those policy outputs affect the solver. This environment is shared by \DyNACO{} and \DyNACS{}: it converts edge-level guidance into short stochastic perturbation trajectories, then projects those trajectories back to locally consistent solutions before rewards are assigned. Its role is to keep the neural decision horizon short enough for policy learning while preserving the refinement quality expected from ACO\@. We realize this environment with two mechanisms: \emph{perturbative sampling}, which changes the action object from a full tour to a small set of edge interventions, and \emph{Scope-Restricted Refinement (SRR)}, which performs local projection around the affected region so that rewards remain causally tied to the sampled interventions.
+The previous two sections define what the policy observes and how one or several guidance fields shape search behavior. We now describe the backend that runs this policy at large scale. The backend is shared by \DyNACO{} and \DyNACS{}: it stores search state on a sparse candidate graph, converts edge-level guidance into short stochastic perturbation trajectories, and projects those trajectories back to locally consistent solutions before rewards are assigned. Its role is to keep the neural decision horizon short enough for policy learning while preserving the refinement quality expected from ACO\@.
 
-\smallskip\noindent\textbf{Perturbative Sampling.}
-In prior neural-guided ACO frameworks~\cite{deepaco,gfacs,gtgaco}, each ant constructs a tour from scratch. This makes the policy responsible for a sequence of $N$ edge decisions, which becomes expensive at large scales and exposes learning to sequential error accumulation. It also leaves no explicit reference state around which a post-processing step can preserve credit assignment. We instead use the current incumbent as a reference trajectory and let each ant modify only a small subset of candidate edges on a sparse $K$-nearest-neighbor graph. For \TSP{}, this perturbation interface follows~\cite{faco}; for \CVRP{}, we instantiate the same interface with capacity-aware feasibility checks (Appendix~\ref{app:backend}).
+\subsection{Sparse Candidate Graph}
+\label{sec:sparse-candidate-graph}
+
+All neural inference, pheromone storage, and action tracing are performed on a sparse $K$-nearest-neighbor candidate graph. The graph supplies the feasible candidate list used by the transition kernel and bounds the neural output to $\mathbb{R}^{N\times K}$ for \DyNACO{} and $\mathbb{R}^{R\times N\times K}$ for \DyNACS{}. Sparse graph storage lets the learned state representation use the same edge set as the ACO backend and avoids dense heatmap storage on large instances.
+
+\subsection{Perturbation-Based ACO}
+\label{sec:perturbation-aco}
+
+In prior neural-guided ACO frameworks~\cite{deepaco,gfacs,gtgaco}, each ant constructs a tour from scratch. Full construction makes the policy responsible for a sequence of $N$ edge decisions, which becomes expensive at large scales and exposes learning to sequential error accumulation. It also leaves no explicit reference state around which a post-processing step can preserve credit assignment. We instead use the current incumbent as a reference trajectory and let each ant modify only a small subset of candidate edges on the sparse candidate graph.
 
 At sampling iteration $s$ of guidance update $h$, transition probabilities combine pheromones, heuristics, and neural guidance via a \emph{guidance weight} $\gamma$:
 \begin{equation}
@@ -378,11 +411,11 @@ Formally, each ant initializes from the incumbent solution $b^{(h)}$ and execute
 \log \pi_\theta(\pi_{a,s} \mid \mathcal{S}_h) = \sum_{t=1}^{T_a} \log p^\theta(v_t \mid u_t; h, s),
 \label{eq:logp-trajectory}
 \end{equation}
-where $T_a \le M$ denotes the number of stochastic interventions, i.e., steps at which multiple candidates were feasible. This formulation changes the learning problem from constructing all $N$ tour edges to selecting a small intervention set of size at most $M \ll N$. Consequently, the decision horizon is bounded by $M$ rather than $N$, preventing the error accumulation inherent in $\mathcal{O}(N)$-length sequential construction and stabilizing policy learning at scale. The localized intervention set also defines the region on which refinement should be allowed to affect the reward.
+where $T_a \le M$ denotes the number of stochastic interventions, i.e., steps at which multiple candidates were feasible. The learning problem changes from constructing all $N$ tour edges to selecting a small intervention set of size at most $M \ll N$. The decision horizon is therefore bounded by $M$ rather than $N$, which reduces sequential error accumulation and stabilizes policy learning at scale. The localized intervention set also defines the region on which refinement should be allowed to affect the reward.
 
-\smallskip\noindent\textbf{Scope-Restricted Refinement.}
+\subsection{Scope-Restricted Refinement}
 \label{sec:localized-ls}
-In neural-guided ACO~\cite{deepaco,gfacs,gtgaco}, refinement is part of the training environment: the post-refinement cost is the reward signal used for policy-gradient updates. This creates a projection-credit trade-off. If refinement is too weak, sampled trajectories remain under-refined and rewards are noisy. If refinement is too strong and unconstrained, it can rewrite most of the sampled intervention, so the final cost reflects the refinement heuristic rather than the neural decision. We refer to this failure mode as \emph{gradient washout}.
+In neural-guided ACO~\cite{deepaco,gfacs,gtgaco}, refinement is part of the training environment: the post-refinement cost is the reward signal used for policy-gradient updates. Refinement therefore creates a projection-credit trade-off. If refinement is too weak, sampled trajectories remain under-refined and rewards are noisy. If refinement is too strong and unconstrained, it can rewrite most of the sampled intervention, so the final cost reflects the refinement heuristic instead of the neural decision. We refer to this failure mode as \emph{gradient washout}.
 
 Figure~\ref{fig:credit_assignment} illustrates this trade-off using DeepACO on TSP-200 under three refinement strategies. With \emph{Full 2-opt} (red), the policy fails to converge because the local search heavily rewrites the sampled tour and severs the causal link between actions and rewards. \emph{Limited 2-opt} (orange) preserves more of the learning signal by stopping after $N/4$ swaps, but this early stopping bottlenecks solution quality. \emph{Neural Local Search}~\cite{deepaco} (blue) improves quality by using the neural policy to score candidate swaps, but it is not scalable because it requires neural evaluations inside the refinement loop.
 
@@ -393,9 +426,9 @@ Figure~\ref{fig:credit_assignment} illustrates this trade-off using DeepACO on T
     \label{fig:credit_assignment}
 \end{figure}
 
-Scalability imposes an additional constraint. Standard 2-opt costs $\mathcal{O}(N^2)$ per tour, which is prohibitive when refinement must be applied to every ant at every iteration. Classical large-scale ACO methods~\cite{partialACO, P-ACO} reduce this cost by applying local search only occasionally or only to elite ants. This is unsuitable for policy-gradient training, where per-ant advantages require post-refinement costs for all sampled ants. Thus, the refinement operator must satisfy three requirements simultaneously: it must preserve the causal link between policy actions and rewards, refine tours to convergence rather than stop at an arbitrary budget, and have cost independent of the full instance size.
+Scalability imposes an additional constraint. Standard 2-opt costs $\mathcal{O}(N^2)$ per tour, which is prohibitive when refinement must be applied to every ant at every iteration. Classical large-scale ACO methods~\cite{partialACO, P-ACO} reduce this cost by applying local search only occasionally or only to elite ants. Policy-gradient training instead requires post-refinement costs for all sampled ants, because every ant contributes an advantage estimate. The refinement operator must therefore preserve the causal link between policy actions and rewards, refine tours to convergence rather than stop at an arbitrary budget, and have cost independent of the full instance size.
 
-We satisfy these requirements using Scope-Restricted Refinement (SRR), inspired by~\cite{faco}. The key observation is that perturbation-based ants start from an incumbent solution that is already locally optimized under the candidate graph. Since an ant modifies only a small set of edges, any newly introduced sub-optimality is localized around those interventions. SRR therefore acts as a local projection operator: it initializes a checklist with the endpoints of the perturbed edges and repeatedly applies improving candidate-graph refinement moves involving checked nodes, reactivating affected neighbors after each accepted move. In routing, these refinement moves are instantiated with candidate-limited 2-opt for \TSP{} and capacity-preserving relocate/swap/2-opt* operators for \CVRP{}; Appendix~\ref{app:setup} gives the algorithmic details. Conceptually, SRR propagates repair outward from the intervention region until no improving move remains within its scope.
+Scope-Restricted Refinement (SRR), inspired by~\cite{faco}, provides these properties. Perturbation-based ants start from an incumbent solution that is already locally optimized under the candidate graph. Since an ant modifies only a small set of edges, any newly introduced sub-optimality is localized around those interventions. SRR therefore acts as a local projection operator: it initializes a checklist with the endpoints of the perturbed edges and repeatedly applies improving candidate-graph refinement moves involving checked nodes, reactivating affected neighbors after each accepted move. Conceptually, SRR propagates repair outward from the intervention region until no improving move remains within its scope.
 
 Specifically, SRR provides the three properties required for training. First, because refinement is restricted to the neighborhood of the policy's perturbations, the post-refinement cost remains causally tied to the sampled actions, preserving credit assignment. Second, unlike truncated local search, SRR runs to convergence within its scope; assuming the incumbent was already candidate-graph 2-opt optimal, this restores candidate-graph 2-opt optimality after the perturbation. Third, the refinement cost scales with the perturbation size, $\mathcal{O}(M \cdot K)$, rather than the instance size, $\mathcal{O}(N^2)$, allowing SRR to be applied to every ant at every iteration even at $N{=}100$K.
 
@@ -422,16 +455,21 @@ Specifically, SRR provides the three properties required for training. First, be
 % \end{enumerate}
 % SRR thus combines the efficiency of truncated LS with the credit-assignment benefit of NLS: by guaranteeing that unperturbed regions remain locally optimal, convergent refinement within the perturbation scope is both sufficient and inexpensive (formal optimality argument in Section~\ref{app:credit}).
 
-\smallskip\noindent\textbf{Stabilized Pheromone Dynamics.}
+\subsection{Instantiation for \TSP{} and \CVRP{}}
+\label{sec:routing-instantiation}
+
+The backend above is problem-generic at the level of state-conditioned perturbation and local projection. For \TSP{}, perturbation follows~\cite{faco}: ants start from the incumbent tour, add at most $M$ candidate edges under the shaped transition kernel, and SRR applies candidate-limited 2-opt around the affected endpoints. For \CVRP{}, the same procedure uses capacity-aware feasibility masks, depot handling, and a multi-route incumbent representation. The local projection uses capacity-preserving relocate, swap, and 2-opt* moves, again restricted to the neighborhood activated by the sampled perturbations. Appendix~\ref{app:setup} gives the implementation details for both problem families.
+
+\subsection{Stabilized Pheromone Dynamics}
 \label{sec:smoothed-mmas}
-\MMAS{}~\cite{maxmin} bounds pheromones to $[\tau_{\min}, \tau_{\max}]$ to prevent premature convergence, but couples these bounds to solution cost, creating non-stationary input distributions for the state-aware policy. We instead adopt fixed bounds ($\tau_{\max}{=}1$, $\tau_{\min}{=}1/K$) and update via convex interpolation:
+\MMAS{}~\cite{maxmin} bounds pheromones to $[\tau_{\min}, \tau_{\max}]$ to prevent premature convergence, but its cost-dependent bounds create non-stationary input distributions for the state-aware policy. We adopt fixed bounds ($\tau_{\max}{=}1$, $\tau_{\min}{=}1/K$) and update via convex interpolation:
 \begin{equation}
 \tau^{(h,s+1)}_{ij} \leftarrow (1-\rho)\tau^{(h,s)}_{ij} + \rho \cdot \mathcal{T}_{ij},
 \label{eq:smoothed-mmas}
 \end{equation}
 where $\mathcal{T}_{ij} = \tau_{\max}$ if $(i,j)$ is in the best solution, else $\tau_{\min}$.
-This yields scale-invariant state representations and stabilizes training.
-While this simplification may reduce the solution quality of the \emph{unguided} solver compared to highly tuned \MMAS{} dynamics, our ablations (Section~\ref{sec:ablations}) show that \DyNACO{} with stabilized bounds outperforms both (i)~unguided ACO with standard \MMAS{} updates and (ii)~neural-guided ACO retaining the original update rule.
+The update yields scale-invariant state representations and stabilizes training.
+Fixed bounds give the policy a stable pheromone channel for dynamic guidance, and the ablations in Section~\ref{sec:ablations} show that this stabilized state representation improves both the unguided backend and \DyNACO{}.
 
 \subsection{Inference Controls}
 \label{sec:inference}
@@ -439,9 +477,9 @@ We use constant guidance ($\gamma{=}1$) during training, with no annealing or ph
 At inference, the guidance weight~$\gamma$ (Eq.~\ref{eq:held-logits}) can be modulated via two strategies: \emph{guidance annealing}, which linearly decays $\gamma \to 0$ across inner iterations; and \emph{phased injection}, which withholds neural guidance for the first fraction of outer steps.
 The specific configuration varies by problem and scale: for TSP, we apply annealing at all scales and additionally enable phased injection at TSP-1K; for CVRP, we apply phased injection only at longer iteration budgets ($I{\geq}5000$) and never anneal.
 
-\subsection{Cost and Memory Scaling}
+\subsection{Complexity and Overhead}
 \label{sec:complexity}
 
 The computational cost separates into sparse neural inference and ACO operations based on perturbations. The GNN encoder runs once per outer step on the $K$-NN graph, giving $\mathcal{O}(H L n K d)$ neural cost for $H$ guidance updates, $L$ layers, $n$ nodes, $K$ candidates, and hidden dimension $d$. During the ACO search, each of the $m$ ants performs at most $M$ stochastic interventions, and SRR scans only the affected candidate neighborhoods. Over $T=H S$ inner iterations, this gives $\mathcal{O}(T m M K)$ sampling and local projection cost.
 
-The learned state and replay buffers are also sparse. Pheromone snapshots, edge features, feasible masks, and action traces are stored on the candidate graph, requiring $\mathcal{O}(nK)$ memory rather than $\mathcal{O}(n^2)$ dense heatmaps. The extension from \DyNACO{} to \DyNACS{} reuses the same encoder and adds only lightweight behavior maps. This cost profile is what allows neural guidance to remain active during large search runs instead of being used only as an initialization heuristic.
+The learned state and replay buffers are also sparse. Pheromone snapshots, edge features, feasible masks, and action traces are stored on the candidate graph, requiring $\mathcal{O}(nK)$ memory rather than $\mathcal{O}(n^2)$ dense heatmaps. \DyNACS{} reuses the \DyNACO{} encoder and adds lightweight behavior maps, so neural guidance can remain active during large search runs instead of serving only as an initialization heuristic.

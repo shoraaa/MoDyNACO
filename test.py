@@ -6,6 +6,7 @@ import random
 import sys
 import time
 import os
+import gc
 import psutil
 from pathlib import Path
 from tqdm import tqdm
@@ -611,14 +612,20 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--head_zdim", type=int, default=16,
                         help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
-                        choices=["lora", "lowrank"], default="lora",
-                        help="Multi-head decoder type: true LoRA final layer, or legacy head-code low-rank residual")
+                        choices=["lora", "deep_lora", "film", "per_head_mlp", "lowrank"], default="lora",
+                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent MLP heads, or legacy low-rank residual")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
                         help="LoRA scaling alpha; the adapter scale is alpha / lora_rank")
     parser.add_argument("--freeze_lora_base", "--freeze-lora-base", dest="freeze_lora_base", action="store_true",
                         help="Freeze the shared final decoder linear layer and train only LoRA adapters there")
+    parser.add_argument("--head_adapter_init", "--head-adapter-init", dest="head_adapter_init",
+                        choices=["anchored", "zero", "small", "random"], default="anchored",
+                        help="Initialization for head-specific adapters; random gives every head a normal random start")
+    parser.add_argument("--head_adapter_init_std", "--head-adapter-init-std", dest="head_adapter_init_std",
+                        type=float, default=0.02,
+                        help="Standard deviation for nonzero head-adapter initialization")
     parser.add_argument("--head_ant_weights", type=str, default=None,
                         help="Comma-delimited ant allocation weights/counts for PolyNet ant groups, e.g. 50,20,15,15")
     parser.add_argument("--head_router", choices=["static", "ema", "learned"], default="static",
@@ -687,6 +694,8 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--val_size", type=int, default=None, help="Limit validation set size")
     parser.add_argument("--val_start", type=int, default=0,
                         help="Start validation from this zero-based instance offset")
+    parser.add_argument("--last_size", "--last-size", dest="last_size", type=int, default=None,
+                        help="Evaluate only the final N loaded validation instances, useful for rerunning the large tail after an interruption")
     parser.add_argument("--log", action="store_true", help="Enable logging to file (auto-named)")
     parser.add_argument("--no_baseline", "--no-baseline", dest="no_baseline", action="store_true",
                         help="Skip pure MFACO baseline calculation")
@@ -705,8 +714,14 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--stage_metrics", action="store_true", help="Collect pre-LS and post-update stage metrics during evaluation")
     parser.add_argument("--collect_guidance_metrics", action="store_true",
                         help="Collect mean guidance and pheromone correlation metrics for executed neural methods")
+    parser.add_argument("--metrics_last_only", "--metrics-last-only", dest="metrics_last_only", action="store_true",
+                        help="When collecting guidance metrics, collect traced metrics only on the final outer iteration")
     parser.add_argument("--log_best_head", "--log-best-head", dest="log_best_head", action="store_true",
                         help="For multi-head evaluation, log best-head attribution, per-iteration head-win distribution, and head-output diversity when available")
+    parser.add_argument("--decode_chunk_edges", "--decode-chunk-edges", dest="decode_chunk_edges", type=int, default=None,
+                        help="Enable chunked multi-head decoder evaluation with this many edges per chunk; disabled by default")
+    parser.add_argument("--clear_cuda_cache", "--clear-cuda-cache", dest="clear_cuda_cache", action="store_true",
+                        help="Run gc.collect() and torch.cuda.empty_cache() after each evaluated instance")
     parser.add_argument("--summary_json", type=str, default=None, help="Optional path to write structured evaluation summary JSON")
     parser.add_argument("--verbose_config", "--verbose-config", dest="verbose_config", action="store_true",
                         help="Print the full flattened config table instead of the compact grouped console summary")
@@ -768,6 +783,11 @@ def main(argv: Optional[List[str]] = None):
     ):
         args.lora_rank = 16
 
+    if args.decode_chunk_edges is not None:
+        if args.decode_chunk_edges < 0:
+            raise ValueError("--decode_chunk_edges must be non-negative")
+        os.environ["DYNACO_DECODE_CHUNK_EDGES"] = str(int(args.decode_chunk_edges))
+
 
 
     # Args setup
@@ -824,7 +844,7 @@ def main(argv: Optional[List[str]] = None):
             "checkpoint", "device", "dataset", "visualize", "visualize_output", 
             "timed", "verify", "baseline", "baseline_runs", "baseline_time_limit", 
             "threads", "seed", "save_dir", "wandb_project", "wandb_entity", "no_wandb", "warmup", "no_baseline",
-            "val_size",
+            "val_size", "last_size", "decode_chunk_edges", "metrics_last_only", "clear_cuda_cache",
             "head_deploy", "head_index", "head_training",
             "head_gamma", "head_score_mode", "head_topq", "head_diversity_coef",
             "head_complement_coef", "head_anchor_checkpoint", "head_anchor_coef",
@@ -1068,11 +1088,28 @@ def main(argv: Optional[List[str]] = None):
             # Save for reuse
             utils.save_val_dataset(val_list, args.n_node, problem=args.problem)
 
+    if args.last_size is not None and args.val_start:
+        raise ValueError("--last_size cannot be combined with --val_start")
+    if args.last_size is not None and args.val_size is not None:
+        raise ValueError("--last_size cannot be combined with --val_size")
+
     # Slice validation set if requested. Keep the original offset for deterministic seeds.
     eval_seed_offset = int(getattr(args, "val_start", 0) or 0)
     if eval_seed_offset < 0:
         raise ValueError("--val_start must be non-negative")
-    if eval_seed_offset and val_list is not None:
+    if args.last_size is not None and val_list is not None:
+        if args.last_size < 0:
+            raise ValueError("--last_size must be non-negative")
+        if isinstance(val_list, (list, tuple)) or torch.is_tensor(val_list):
+            original_len = len(val_list)
+            n_last = min(int(args.last_size), original_len)
+            eval_seed_offset = original_len - n_last
+            val_list = val_list[eval_seed_offset:]
+            print(
+                f"Selected last {n_last} validation instances: "
+                f"offset {eval_seed_offset}, {original_len} -> {len(val_list)} instances."
+            )
+    elif eval_seed_offset and val_list is not None:
         if isinstance(val_list, (list, tuple)) or torch.is_tensor(val_list):
             original_len = len(val_list)
             val_list = val_list[eval_seed_offset:]
@@ -1211,6 +1248,10 @@ def main(argv: Optional[List[str]] = None):
                 args.lora_alpha = float(config.get("lora_alpha", args.lora_alpha))
             if "--freeze_lora_base" not in sys.argv and "--freeze-lora-base" not in sys.argv:
                 args.freeze_lora_base = bool(config.get("freeze_lora_base", args.freeze_lora_base))
+            if "--head_adapter_init" not in sys.argv and "--head-adapter-init" not in sys.argv:
+                args.head_adapter_init = config.get("head_adapter_init", args.head_adapter_init)
+            if "--head_adapter_init_std" not in sys.argv and "--head-adapter-init-std" not in sys.argv:
+                args.head_adapter_init_std = float(config.get("head_adapter_init_std", args.head_adapter_init_std))
             if "--head_ant_weights" not in sys.argv and "--head-ant-weights" not in sys.argv:
                 args.head_ant_weights = config.get("head_ant_weights", args.head_ant_weights)
             if "--head_input_transform" not in sys.argv and "--head-input-transform" not in sys.argv:
@@ -1241,6 +1282,8 @@ def main(argv: Optional[List[str]] = None):
                 lora_alpha=args.lora_alpha,
                 freeze_lora_base=args.freeze_lora_base,
                 head_decoder_type=args.head_decoder_type,
+                head_adapter_init=args.head_adapter_init,
+                head_adapter_init_std=args.head_adapter_init_std,
             )
         model = model_cls(
             feats=feats,
@@ -2097,7 +2140,7 @@ def main(argv: Optional[List[str]] = None):
                     args,
                     use_heuristic_only=True,
                     collect_metrics=args.visualize,
-                    metrics_every_step=args.visualize,
+                    metrics_every_step=args.visualize and not args.metrics_last_only,
                     seed=args.seed + eval_seed_offset + i
                 )
                 tb1 = time.time()
@@ -2179,6 +2222,7 @@ def main(argv: Optional[List[str]] = None):
               args_anneal = _clone_args(args, no_anneal=False)
               args_noanneal = _clone_args(args, no_anneal=True)
               collect_guidance_metrics = bool(args.visualize or args.collect_guidance_metrics or args.log_best_head)
+              metrics_every_step = collect_guidance_metrics and not args.metrics_last_only
 
               # Model (anneal ON)
               if run_model_anneal:
@@ -2189,7 +2233,7 @@ def main(argv: Optional[List[str]] = None):
                       args_anneal,
                       use_heuristic_only=False,
                       collect_metrics=collect_guidance_metrics,
-                      metrics_every_step=collect_guidance_metrics,
+                      metrics_every_step=metrics_every_step,
                       seed=args.seed + eval_seed_offset + i,
                       ablation_pheromone=args.ablation_pheromone_features,
                       ablation_incumbent=args.ablation_incumbent_features
@@ -2243,7 +2287,7 @@ def main(argv: Optional[List[str]] = None):
                       args_noanneal,
                       use_heuristic_only=False,
                       collect_metrics=collect_guidance_metrics,
-                      metrics_every_step=collect_guidance_metrics,
+                      metrics_every_step=metrics_every_step,
                       seed=args.seed + eval_seed_offset + i,
                       ablation_pheromone=args.ablation_pheromone_features,
                       ablation_incumbent=args.ablation_incumbent_features
@@ -2298,7 +2342,7 @@ def main(argv: Optional[List[str]] = None):
                           args_anneal,
                           use_heuristic_only=False,
                           collect_metrics=collect_guidance_metrics,
-                          metrics_every_step=collect_guidance_metrics,
+                          metrics_every_step=metrics_every_step,
                           inject_step=inject_step,
                           seed=args.seed + eval_seed_offset + i,
                           ablation_pheromone=args.ablation_pheromone_features,
@@ -2348,7 +2392,7 @@ def main(argv: Optional[List[str]] = None):
                           args_noanneal,
                           use_heuristic_only=False,
                           collect_metrics=collect_guidance_metrics,
-                          metrics_every_step=collect_guidance_metrics,
+                          metrics_every_step=metrics_every_step,
                           inject_step=inject_step,
                           seed=args.seed + eval_seed_offset + i,
                           ablation_pheromone=args.ablation_pheromone_features,
@@ -2547,6 +2591,11 @@ def main(argv: Optional[List[str]] = None):
                  row_dict[f"mix_no_anneal_time_I{itr}"] = _get_val(f"mix_no_anneal_time_I{itr}", i)
 
             per_instance_rows.append(row_dict)
+
+        if args.clear_cuda_cache:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     if iter_csv_f is not None:
         try:
@@ -3169,6 +3218,7 @@ def main(argv: Optional[List[str]] = None):
             "suppression",
             "head_logit_corr",
             "head_topk_overlap",
+            "head_selected_edge_overlap",
             "head_router_entropy",
             "head_router_min_ants",
             "head_router_max_ants",
