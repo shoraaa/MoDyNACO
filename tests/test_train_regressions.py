@@ -374,6 +374,97 @@ class TrainRegressionTests(unittest.TestCase):
 
         self.assertEqual(DummyACO.recorded_head_counts, [7, 1])
 
+    def test_iter_stats_include_outer_step_time(self):
+        class DummyACO:
+            def __init__(self, **kwargs):
+                self.n = 3
+                self.k = 2
+                self.n_ants = int(kwargs["n_ants"])
+                self.nn_torch = torch.tensor([[1, 2], [0, 2], [0, 1]])
+                self.pheromone_sparse = torch.ones(self.n, self.k)
+
+            def seed_rng(self, seed):
+                self.seed = seed
+
+            def reset_timings(self):
+                pass
+
+            def sample(self, require_prob=False, prior=None, parallel_traced=True):
+                costs = torch.arange(1, self.n_ants + 1, dtype=torch.float32)
+                flats = [torch.tensor([0, 1, 2, 0]) for _ in range(self.n_ants)]
+                survival = torch.ones(self.n_ants)
+                return costs, flats, None, None, None, None, None, 0, survival
+
+            def _update_pheromone_from_flat(self, best_route, best_cost):
+                pass
+
+        def build_fn(aco, coords, device, **kwargs):
+            return Data(
+                x=torch.zeros(3, 4),
+                edge_index=torch.zeros(2, 6, dtype=torch.long),
+                edge_attr=torch.zeros(6, 3),
+            )
+
+        args = Namespace(
+            disable_heuristic=False,
+            no_local_search=True,
+            rho=0.5,
+            device="cpu",
+            no_smooth_mmas=True,
+            min_new_edges=1,
+            no_extend_ls=True,
+            no_normalized_heuristic=True,
+            L=0,
+            ls_scope="localized",
+            ls_budget="truncated",
+            ls_max_opt=0,
+            euc_2d_cost=False,
+            no_dynamic_feats=False,
+            head_router="static",
+            multi_head=False,
+            num_heads=1,
+            n_ants=4,
+            head_router_min_frac=0.0,
+            allocator_temperature=1.0,
+            head_ant_weights=None,
+            head_input_transform="none",
+            edge_feature_set="compact3",
+            no_anneal=True,
+            mini_H=2,
+            H=2,
+            gamma=1.0,
+            min_gamma=0.0,
+            iter_log=True,
+            iter_print=False,
+            stage_metrics=False,
+            runtime_limit=None,
+            verify=False,
+            verify_final_only=False,
+            timed=False,
+        )
+
+        _, _, _, extra = utils.infer_instance(
+            "tsp",
+            DummyACO,
+            build_fn,
+            model=None,
+            instance_data=torch.zeros(3, 2),
+            k_sparse=2,
+            n_ants=4,
+            dynamic=True,
+            args=args,
+            use_heuristic_only=True,
+            seed=1234,
+        )
+
+        iter_stats = extra["iter_stats"]
+        self.assertEqual(len(iter_stats), 4)
+        self.assertEqual([row["outer_step_done"] for row in iter_stats], [0, 1, 0, 1])
+        self.assertTrue(all(row["elapsed_s"] >= 0.0 for row in iter_stats))
+        self.assertTrue(all(row["outer_elapsed_s"] >= 0.0 for row in iter_stats))
+        self.assertLessEqual(iter_stats[0]["outer_elapsed_s"], iter_stats[1]["outer_elapsed_s"])
+        self.assertLessEqual(iter_stats[2]["outer_elapsed_s"], iter_stats[3]["outer_elapsed_s"])
+
 
 if __name__ == "__main__":
     unittest.main()

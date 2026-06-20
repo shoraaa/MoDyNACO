@@ -2520,6 +2520,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
     
     with torch.no_grad():
         for t in range(args.H):
+            outer_step_start = time.time()
             if runtime_limit is not None and (time.time() - t_start_total_infer) >= runtime_limit:
                 timed_out = True
                 break
@@ -2729,10 +2730,17 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
 
                 if collect_iter_stats:
                     iter_idx = t * int(args.mini_H) + int(mini_t)
+                    now = time.time()
+                    elapsed_s = now - t_start_total_infer
+                    outer_elapsed_s = now - outer_step_start
+                    outer_step_done = int(mini_t == int(args.mini_H) - 1)
                     iter_stats.append({
                         "iter": int(iter_idx),
                         "t": int(t),
                         "mini_t": int(mini_t),
+                        "elapsed_s": float(elapsed_s),
+                        "outer_elapsed_s": float(outer_elapsed_s),
+                        "outer_step_done": outer_step_done,
                         "mean": float(avg_last),
                         "best": float(best_seen),
                         "mean_before_ls": float(avg_raw),
