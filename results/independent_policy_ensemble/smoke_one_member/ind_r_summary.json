@@ -1,0 +1,18 @@
+{
+  "aggregation": "best cost per instance across independently trained single-head policies",
+  "ants_per_policy": 2,
+  "gap_pct": 8.79352276141827,
+  "gap_std_pct": 0.0,
+  "instances": 1,
+  "mean_cost": 7241.296875,
+  "mean_time_s": null,
+  "member_count": 1,
+  "member_win_fraction": [
+    1.0
+  ],
+  "method": "Ind-1",
+  "per_instance_csv": "results/independent_policy_ensemble/smoke_one_member/ind_r_per_instance.csv",
+  "std_cost": 0.0,
+  "total_eval_ants": 2,
+  "total_time_s": null
+}

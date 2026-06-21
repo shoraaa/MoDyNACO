@@ -34,11 +34,13 @@ class MultiHeadDecoderTests(unittest.TestCase):
 
     def test_decoder_variants_return_edges_by_heads(self):
         pyg = tiny_pyg()
-        for decoder_type in ["lora", "deep_lora", "film", "per_head_mlp", "lowrank"]:
+        for decoder_type in ["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank"]:
             with self.subTest(decoder_type=decoder_type):
                 model = self._model(decoder_type)
                 out = model(pyg)
                 self.assertEqual(tuple(out.shape), (pyg.edge_attr.shape[0], 3))
+                if decoder_type == "per_head_mlp":
+                    self.assertEqual(model.head_decoder_type, "multi_decoder")
 
     def test_deep_lora_anchored_init_keeps_head0_base_but_perturbs_others(self):
         layer = net.MultiHeadLoRALinear(

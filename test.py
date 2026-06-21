@@ -55,6 +55,75 @@ from extended_common import (
 BASE_PROBLEMS = {"tsp", "cvrp"}
 EXTENDED_PROBLEMS = {"bpp", "mkp", "op"}
 
+class PolicyEnsemble(torch.nn.Module):
+    """Stack independently trained single-head policies as test-time heads."""
+
+    def __init__(self, models: List[torch.nn.Module]):
+        super().__init__()
+        if not models:
+            raise ValueError("PolicyEnsemble requires at least one model")
+        self.models = torch.nn.ModuleList(models)
+
+    def forward(self, pyg):
+        outputs = []
+        for model in self.models:
+            out = model(pyg)
+            if out.dim() != 1:
+                raise ValueError(
+                    "Independent-policy ensemble members must be single-head models; "
+                    f"got output shape {tuple(out.shape)}"
+                )
+            outputs.append(out)
+        return torch.stack(outputs, dim=1)
+
+
+def _checkpoint_state_and_config(ckpt: Any) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
+    state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+    return state_dict, config
+
+
+def _single_head_model_from_checkpoint(
+    ckpt_path: str,
+    args: argparse.Namespace,
+    *,
+    feats_default: int,
+    edge_feats_default: int,
+) -> torch.nn.Module:
+    ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=False)
+    state_dict, config = _checkpoint_state_and_config(ckpt)
+    if bool(config.get("multi_head", False) or config.get("num_heads", 1) > 1):
+        raise ValueError(f"Expected a single-head checkpoint for Ind-R member, got multi-head config: {ckpt_path}")
+    if any(key.startswith("par_net_heu.out.lora_") or "head_codes" in key for key in state_dict):
+        raise ValueError(f"Expected a single-head checkpoint for Ind-R member, got multi-head weights: {ckpt_path}")
+
+    feats = feats_default
+    if "emb_net.v_lin0.weight" in state_dict:
+        feats = int(state_dict["emb_net.v_lin0.weight"].shape[1])
+
+    edge_feats = edge_feats_default
+    if "emb_net.e_lin0.weight" in state_dict:
+        edge_feats = int(state_dict["emb_net.e_lin0.weight"].shape[1])
+        if edge_feats == 3 and getattr(args, "edge_feature_set", "full") == "full":
+            print(f"Ensemble checkpoint has 3 edge features; using edge_feature_set=compact3 ({ckpt_path})")
+            args.edge_feature_set = "compact3"
+
+    model = Net(
+        feats=feats,
+        edge_feats=edge_feats,
+        logit_net=not args.no_logit_net,
+    ).to(args.device)
+    load_result = net.load_multihead_state_dict(model, state_dict)
+    if getattr(load_result, "missing_keys", None) or getattr(load_result, "unexpected_keys", None):
+        print(
+            f"Ensemble checkpoint loaded with architecture migration ({ckpt_path}): "
+            f"missing={list(load_result.missing_keys)}, "
+            f"unexpected={list(load_result.unexpected_keys)}"
+        )
+    model.eval()
+    return model
+
+
 class Logger(object):
     def __init__(self, filename):
         self.terminal = sys.stdout
@@ -189,7 +258,7 @@ def _resolve_method_plan(args: argparse.Namespace) -> list[str]:
     if not args.no_baseline:
         methods.append("base")
 
-    if args.no_model or args.checkpoint == "none":
+    if args.no_model or (args.checkpoint == "none" and not getattr(args, "ensemble_checkpoints", None)):
         return methods
 
     run_model_anneal = args.run_model_anneal
@@ -586,6 +655,14 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--alg", choices=["faco", "mmas"], default="faco", help="Algorithm type")
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default="none")
+    parser.add_argument(
+        "--ensemble_checkpoints",
+        "--ensemble-checkpoints",
+        dest="ensemble_checkpoints",
+        nargs="+",
+        default=None,
+        help="Load independently trained single-head checkpoints and evaluate them as policy heads in one ACO rollout.",
+    )
     parser.add_argument("--n_ants", type=int, default=100)
     parser.add_argument("--H", type=int, default=10)
     parser.add_argument("--mini_H", type=int, default=100)
@@ -612,8 +689,8 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--head_zdim", type=int, default=16,
                         help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
-                        choices=["lora", "deep_lora", "film", "per_head_mlp", "lowrank"], default="lora",
-                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent MLP heads, or legacy low-rank residual")
+                        choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank"], default="lora",
+                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent full decoders, or legacy low-rank residual")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
@@ -794,7 +871,7 @@ def main(argv: Optional[List[str]] = None):
     ckpt = None
     
     # Auto-load checkpoint if not provided and --no_model not set
-    if args.checkpoint == "none" and not args.no_model:
+    if args.checkpoint == "none" and not args.no_model and not args.ensemble_checkpoints:
         # Build expected checkpoint filename based on current args
         # Pattern: {problem}_n{n_node}_k{k_sparse}_ants{n_ants}_H{H}_miniH{mini_H}_rho{rho}_mne{min_new_edges}_ppo_lr{lr}_best.pt
         import glob
@@ -819,7 +896,14 @@ def main(argv: Optional[List[str]] = None):
             print(f"Warning: Pretrained directory {pretrained_dir} not found, running without model")
             args.no_model = True
     
-    if args.checkpoint != "none" and not args.no_model:
+    if args.ensemble_checkpoints and not args.no_model:
+        args.multi_head = True
+        args.num_heads = len(args.ensemble_checkpoints)
+        _print_kv_section(
+            "Policy Ensemble",
+            [("members", args.num_heads), ("checkpoints", ", ".join(map(str, args.ensemble_checkpoints)))],
+        )
+    elif args.checkpoint != "none" and not args.no_model:
         print(f"Loading {args.checkpoint}...")
         ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
         config = ckpt.get("config", {})
@@ -1200,7 +1284,22 @@ def main(argv: Optional[List[str]] = None):
 
     # Model
     model = None
-    if ckpt is not None and not args.no_model:
+    if args.ensemble_checkpoints and not args.no_model:
+        args.multi_head = True
+        args.num_heads = len(args.ensemble_checkpoints)
+        print(f"Loading Ind-{args.num_heads} policy ensemble...")
+        models = [
+            _single_head_model_from_checkpoint(
+                str(path),
+                args,
+                feats_default=2 if args.problem == "tsp" else 4,
+                edge_feats_default=6,
+            )
+            for path in args.ensemble_checkpoints
+        ]
+        model = PolicyEnsemble(models).to(args.device)
+        model.eval()
+    elif ckpt is not None and not args.no_model:
         state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
         
         # Override args from config logic omitted for brevity, similar to original but using unified flags

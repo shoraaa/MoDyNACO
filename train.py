@@ -1456,7 +1456,7 @@ def _copy_single_head_weights_into_multi_head(model: Net, checkpoint_path: str, 
                 par.hidden[0].bias.copy_(state_dict[f"{single_prefix}1.bias"])
                 par.output.weight.copy_(state_dict[f"{single_prefix}2.weight"])
                 par.output.bias.copy_(state_dict[f"{single_prefix}2.bias"])
-            elif decoder_type == "per_head_mlp":
+            elif decoder_type in {"per_head_mlp", "multi_decoder"}:
                 for decoder in par.heads:
                     for idx in range(3):
                         decoder.lins[idx].weight.copy_(state_dict[f"{single_prefix}{idx}.weight"])
@@ -3049,8 +3049,8 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--head_zdim", type=int, default=16,
                         help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
-                        choices=["lora", "deep_lora", "film", "per_head_mlp", "lowrank"], default="lora",
-                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent MLP heads, or legacy low-rank residual")
+                        choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank"], default="lora",
+                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent full decoders, or legacy low-rank residual")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,

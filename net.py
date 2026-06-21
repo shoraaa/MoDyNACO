@@ -704,8 +704,8 @@ class ParNetCondDeepLoRA(nn.Module):
         return torch.cat(outs, dim=0)
 
 
-class ParNetMultiMLP(nn.Module):
-    """Independent small decoder per head over the shared GNN embedding."""
+class ParNetMultiDecoder(nn.Module):
+    """Independent full decoder per head over the shared GNN embedding."""
 
     def __init__(
         self,
@@ -724,6 +724,10 @@ class ParNetMultiMLP(nn.Module):
 
     def forward(self, emb):
         return torch.stack([head(emb) for head in self.heads], dim=1)
+
+
+ParNetMultiMLP = ParNetMultiDecoder
+
 
 class MultiHeadNet(Net):
     """DyNACO edge-prior model with a shared trunk and multi-head LoRA decoder."""
@@ -753,7 +757,11 @@ class MultiHeadNet(Net):
             self.head_decoder_type = "deep_lora"
         if self.head_decoder_type in {"per-head-mlp", "perhead_mlp", "perhead"}:
             self.head_decoder_type = "per_head_mlp"
-        valid_decoders = {"lora", "deep_lora", "film", "per_head_mlp", "lowrank"}
+        if self.head_decoder_type in {"multi-decoder", "multidecoder", "multi_mlp", "stacked_decoder"}:
+            self.head_decoder_type = "multi_decoder"
+        if self.head_decoder_type == "per_head_mlp":
+            self.head_decoder_type = "multi_decoder"
+        valid_decoders = {"lora", "deep_lora", "film", "multi_decoder", "lowrank"}
         if self.head_decoder_type not in valid_decoders:
             raise ValueError(f"head_decoder_type must be one of {sorted(valid_decoders)}")
         super().__init__(*args, logit_net=True, **kwargs)
@@ -813,8 +821,8 @@ class MultiHeadNet(Net):
                 init_std=head_adapter_init_std,
                 freeze_base=freeze_lora_base,
             )
-        elif self.head_decoder_type == "per_head_mlp":
-            self.par_net_heu = ParNetMultiMLP(
+        elif self.head_decoder_type == "multi_decoder":
+            self.par_net_heu = ParNetMultiDecoder(
                 units=units,
                 num_heads=num_heads,
                 logit_net=logit_net,

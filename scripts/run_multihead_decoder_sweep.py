@@ -37,7 +37,7 @@ VARIANTS = [
     Variant("deep_lora_r4", "deep_lora", rank=4, loss_js=0.0),
     Variant("deep_lora_r4_js", "deep_lora", rank=4, loss_js=0.01),
     Variant("film_js", "film", rank=4, loss_js=0.01),
-    Variant("per_head_mlp_js", "per_head_mlp", rank=4, loss_js=0.01),
+    Variant("multi_decoder_js", "multi_decoder", rank=4, loss_js=0.01),
 ]
 
 

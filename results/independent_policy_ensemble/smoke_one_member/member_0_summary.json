@@ -1,0 +1,52 @@
+{
+  "checkpoint": "results/independent_policy_ensemble/smoke_one_member/checkpoints/tsp/n100/tsp_n100_k8_ants2_H1_miniH1_rho0.1_mne4_ppo_lr5e-06_compact3_ind_r_m0_seed1234_best.pt",
+  "dataset": "data/TSP/data/test_set/STAR_TSP_lt1000.txt",
+  "grouped_mean_gap_pct": {
+    "Model(anneal)": {
+      "buckets": {
+        "<1K": {
+          "count": 1,
+          "mean_gap_pct": 8.79352276141827,
+          "std_gap_pct": 0.0
+        },
+        ">=10K": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        },
+        "[1K,10K)": {
+          "count": 0,
+          "mean_gap_pct": null,
+          "std_gap_pct": null
+        }
+      },
+      "ref": "opt"
+    }
+  },
+  "methods": {
+    "model_anneal": {
+      "avg_ant_after_ls": 7383.025390625,
+      "avg_ant_before_ls": 8478.9521484375,
+      "avg_incumbent_after_aco": 7241.296875,
+      "final_ant_after_ls": 7383.025390625,
+      "final_ant_before_ls": 8478.9521484375,
+      "final_incumbent_after_aco": 7241.296875,
+      "gap_pct": 8.79352276141827,
+      "gap_std_pct": 0.0,
+      "guidance_diagnostics": {},
+      "mean_cost": 7241.296875,
+      "mean_guidance": null,
+      "mean_neural_time_s": 0.0,
+      "mean_time_s": 0.004941701889038086,
+      "pheromone_correlation": null,
+      "std_cost": 0.0,
+      "std_neural_time_s": 0.0,
+      "std_time_s": 0.0,
+      "total_neural_time_s": 0.0,
+      "total_time_s": 0.004941701889038086
+    }
+  },
+  "n_node": 100,
+  "problem": "tsp",
+  "seed": 1234
+}
