@@ -327,7 +327,8 @@ public:
       bool require_prob,
       py::array_t<float, py::array::c_style | py::array::forcecast>
           head_priors,
-      bool parallel_traced = false, py::object head_counts_obj = py::none()) {
+      bool parallel_traced = false, py::object head_counts_obj = py::none(),
+      float prior_scale = 1.0f) {
     auto buf = head_priors.request();
     if (buf.ndim != 3 || buf.shape[0] < 1 ||
         buf.shape[0] > solver->n_ants || buf.shape[1] != solver->n ||
@@ -354,7 +355,8 @@ public:
     {
       py::gil_scoped_release release;
       solver->sample_head_priors(require_prob, prior_ptr, n_heads, result,
-                                 parallel_traced, head_counts_ptr);
+                                 parallel_traced, head_counts_ptr,
+                                 prior_scale);
     }
     return result_to_tuple(result, require_prob);
   }
@@ -401,6 +403,8 @@ public:
     auto buf = pheromone.request();
     solver->set_pheromone(static_cast<const float *>(buf.ptr));
   }
+
+  void refresh_log_heuristic() { solver->refresh_log_heuristic(); }
 
   void sync_pheromone_to_torch() {
     // No-op
@@ -593,7 +597,8 @@ public:
       py::array_t<float, py::array::c_style | py::array::forcecast>
           head_priors,
       bool parallel_traced = false, bool return_decoded = false,
-      py::object head_counts_obj = py::none()) {
+      py::object head_counts_obj = py::none(),
+      float prior_scale = 1.0f) {
     auto hbuf = head_priors.request();
     if (hbuf.ndim != 3 || hbuf.shape[0] < 1 ||
         hbuf.shape[0] > solver->n_ants || hbuf.shape[1] != solver->n ||
@@ -621,7 +626,8 @@ public:
     {
       py::gil_scoped_release release;
       solver->sample_head_priors(require_prob, prior_ptr, n_heads, result,
-                                 parallel_traced, head_counts_ptr);
+                                 parallel_traced, head_counts_ptr,
+                                 prior_scale);
     }
 
     py::array_t<float> costs(solver->n_ants);
@@ -723,6 +729,7 @@ public:
   }
 
   void reset_timings() { solver->reset_timings(); }
+  void refresh_log_heuristic() { solver->refresh_log_heuristic(); }
   py::dict get_timings() {
     py::dict d;
     d["time_ant"] = solver->time_ant;
@@ -1114,11 +1121,13 @@ PYBIND11_MODULE(faco_opt, m) {
       .def("sample_head_priors", &PyMFACO_TSP::sample_head_priors,
            py::arg("require_prob"), py::arg("head_priors"),
            py::arg("parallel_traced") = false,
-           py::arg("head_counts") = py::none())
+           py::arg("head_counts") = py::none(),
+           py::arg("prior_scale") = 1.0f)
       .def("_update_pheromone_from_flat",
            &PyMFACO_TSP::update_pheromone_from_flat)
       .def("load_snapshot", &PyMFACO_TSP::load_snapshot)
       .def("set_pheromone", &PyMFACO_TSP::set_pheromone)
+      .def("refresh_log_heuristic", &PyMFACO_TSP::refresh_log_heuristic)
       .def("sync_pheromone_to_torch", &PyMFACO_TSP::sync_pheromone_to_torch);
 
   // MFACO_CVRP
@@ -1167,9 +1176,11 @@ PYBIND11_MODULE(faco_opt, m) {
            py::arg("require_prob"), py::arg("head_priors"),
            py::arg("parallel_traced") = false,
            py::arg("return_decoded") = false,
-           py::arg("head_counts") = py::none())
+           py::arg("head_counts") = py::none(),
+           py::arg("prior_scale") = 1.0f)
       .def("update_pheromone_from_route",
            &PyMFACO_CVRP::update_pheromone_from_route)
+      .def("refresh_log_heuristic", &PyMFACO_CVRP::refresh_log_heuristic)
       .def_property(
           "use_relocate",
           [](PyMFACO_CVRP &self) { return self.solver->use_relocate; },

@@ -2608,19 +2608,36 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     if do_metrics:
                         priors.append(prior_for_metrics.detach().cpu().clone())
 
+            prior_sample_mat = prior_mat
+            if (
+                prior_mat is not None
+                and torch.is_tensor(prior_mat)
+                and prior_mat.dim() == 3
+                and hasattr(aco, "sample_mixed_priors")
+            ):
+                prior_sample_mat = prior_mat.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy()
+
             for mini_t in range(args.mini_H):
                 if runtime_limit is not None and (time.time() - t_start_total_infer) >= runtime_limit:
                     timed_out = True
                     break
                 # Annealing
-                current_prior = prior_mat
+                current_prior = prior_sample_mat
+                prior_scale = 1.0
                 if not args.no_anneal and prior_mat is not None:
                      if args.mini_H > 1:
                         ratio = mini_t / (args.mini_H - 1)
                         factor = args.gamma * (1.0 - ratio) + args.min_gamma * ratio
                      else:
                         factor = args.gamma
-                     current_prior = prior_mat * factor
+                     if (
+                         prior_sample_mat is not None
+                         and getattr(prior_sample_mat, "ndim", None) == 3
+                         and hasattr(aco, "sample_mixed_priors")
+                     ):
+                         prior_scale = float(factor)
+                     else:
+                         current_prior = prior_mat * factor
 
                 # Sample
                 return_decoded = verify_requested and not verify_final_only
@@ -2630,8 +2647,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                 if (
                     problem in ('tsp', 'cvrp')
                     and current_prior is not None
-                    and torch.is_tensor(current_prior)
-                    and current_prior.dim() == 3
+                    and getattr(current_prior, "ndim", None) == 3
                     and hasattr(aco, "sample_mixed_priors")
                 ):
                     if prior_head_counts is None:
@@ -2644,6 +2660,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                         require_prob=sample_require_prob,
                         parallel_traced=True,
                         head_counts=prior_head_counts,
+                        prior_scale=prior_scale,
                     )
                 elif problem == 'tsp':
                     prior_arg = current_prior.cpu().numpy() if (current_prior is not None and torch.is_tensor(current_prior)) else current_prior

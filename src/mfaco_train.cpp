@@ -441,7 +441,8 @@ void MFACO_TSP::sample_ant_priors(bool require_prob, const float *ant_priors,
 void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
                                    int32_t n_heads, SampleResult &result,
                                    bool parallel_traced,
-                                   const int32_t *head_counts) {
+                                   const int32_t *head_counts,
+                                   float prior_scale) {
   if (head_priors == nullptr) {
     sample(require_prob, nullptr, result, parallel_traced);
     return;
@@ -460,6 +461,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
   const int64_t prior_stride = static_cast<int64_t>(n) * static_cast<int64_t>(k);
 
   std::vector<int32_t> ant_head(n_ants);
+  std::vector<uint8_t> head_active(static_cast<size_t>(n_heads), 0);
   int32_t ant = 0;
   if (head_counts != nullptr) {
     int32_t total = 0;
@@ -469,6 +471,9 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
         throw std::runtime_error("head_counts must be non-negative");
       }
       total += count;
+      if (count > 0) {
+        head_active[static_cast<size_t>(hidx)] = 1;
+      }
       for (int32_t j = 0; j < count; ++j) {
         if (ant >= n_ants) {
           throw std::runtime_error("sum(head_counts) exceeds n_ants");
@@ -484,21 +489,68 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
     int32_t rem = n_ants % n_heads;
     for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
       int32_t count = base + (hidx < rem ? 1 : 0);
+      if (count > 0) {
+        head_active[static_cast<size_t>(hidx)] = 1;
+      }
       for (int32_t j = 0; j < count; ++j) {
         ant_head[static_cast<size_t>(ant++)] = hidx;
       }
     }
   }
 
+  std::vector<int32_t> active_heads;
+  active_heads.reserve(static_cast<size_t>(n_heads));
+  for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+    if (head_active[static_cast<size_t>(hidx)]) {
+      active_heads.push_back(hidx);
+    }
+  }
+  if (active_heads.size() == 1 && prior_scale == 1.0f) {
+    const float *prior_h =
+        head_priors + static_cast<int64_t>(active_heads[0]) * prior_stride;
+    sample(require_prob, prior_h, result, parallel_traced);
+    return;
+  }
+
   std::vector<float> probmats(static_cast<size_t>(n_heads) *
                               static_cast<size_t>(prior_stride));
-  std::vector<float> head_probmat;
-  for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
-    const float *prior_h =
-        head_priors + static_cast<int64_t>(hidx) * prior_stride;
-    compute_probmat(prior_h, head_probmat);
-    std::copy(head_probmat.begin(), head_probmat.end(),
-              probmats.begin() + static_cast<int64_t>(hidx) * prior_stride);
+  std::vector<float> base_logits(static_cast<size_t>(prior_stride));
+  const float eps = EPS;
+#pragma omp parallel for schedule(static)
+  for (int32_t u = 0; u < n; ++u) {
+    for (int32_t j = 0; j < k; ++j) {
+      const int64_t idx = static_cast<int64_t>(u) * k + j;
+      float logit = alpha * std::log(pheromone_sparse[idx] + eps);
+      if (!disable_heuristic) {
+        logit += log_heuristic_sparse[idx];
+      }
+      base_logits[idx] = logit;
+    }
+  }
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int32_t active_idx = 0; active_idx < static_cast<int32_t>(active_heads.size()); ++active_idx) {
+    for (int32_t u = 0; u < n; ++u) {
+      const int32_t hidx = active_heads[static_cast<size_t>(active_idx)];
+      const int64_t h_off = static_cast<int64_t>(hidx) * prior_stride;
+      const int64_t row_off = static_cast<int64_t>(u) * k;
+      const float *prior_h = head_priors + h_off;
+      float *prob_h = probmats.data() + h_off;
+      float max_logit = -std::numeric_limits<float>::infinity();
+      float logits[MAX_CAND_LIST_SIZE];
+
+      for (int32_t j = 0; j < k; ++j) {
+        const int64_t idx = row_off + j;
+        float logit = base_logits[idx] + prior_scale * prior_h[idx];
+        logits[j] = logit;
+        if (logit > max_logit)
+          max_logit = logit;
+      }
+
+      for (int32_t j = 0; j < k; ++j) {
+        const int64_t idx = row_off + j;
+        prob_h[idx] = std::max(std::exp(logits[j] - max_logit), eps);
+      }
+    }
   }
 
   std::vector<int32_t> start_nodes(n_ants);
@@ -826,6 +878,7 @@ void MFACO_TSP::build_heuristic() {
   heuristic_sparse.resize(n * k);
   if (disable_heuristic) {
     std::fill(heuristic_sparse.begin(), heuristic_sparse.end(), 1.0f);
+    refresh_log_heuristic();
     return;
   }
   for (int32_t u = 0; u < n; ++u) {
@@ -834,6 +887,17 @@ void MFACO_TSP::build_heuristic() {
       float d = dist(u, v);
       heuristic_sparse[u * k + j] = (d > 0) ? (1.0f / d) : 1.0f;
     }
+  }
+  refresh_log_heuristic();
+}
+
+void MFACO_TSP::refresh_log_heuristic() {
+  log_heuristic_sparse.resize(heuristic_sparse.size());
+  const float eps = EPS;
+#pragma omp parallel for schedule(static)
+  for (int64_t idx = 0; idx < static_cast<int64_t>(heuristic_sparse.size()); ++idx) {
+    log_heuristic_sparse[static_cast<size_t>(idx)] =
+        std::log(heuristic_sparse[static_cast<size_t>(idx)] + eps);
   }
 }
 
@@ -947,14 +1011,12 @@ void MFACO_TSP::compute_probmat(const float *prior_ptr,
       int32_t idx = u * k + j;
 
       float tau = pheromone_sparse[idx];
-      float eta = heuristic_sparse[idx]; // currently 1/d or 1 if disabled
-
       // Base: alpha*log(tau)
       float logit = alpha * std::log(tau + eps);
 
       // Heuristic: beta*log(eta)  (if disabled, eta==1 => log=0)
       if (!disable_heuristic) {
-        logit += beta * std::log(eta + eps);
+        logit += beta * log_heuristic_sparse[idx];
       }
 
       // Prior logits: gamma * normalized_z
@@ -1892,6 +1954,7 @@ void MFACO_CVRP::build_heuristic() {
   heuristic_sparse.resize(n * k);
   if (disable_heuristic) {
     std::fill(heuristic_sparse.begin(), heuristic_sparse.end(), 1.0f);
+    refresh_log_heuristic();
     return;
   }
   for (int32_t u = 0; u < n; ++u) {
@@ -1904,6 +1967,17 @@ void MFACO_CVRP::build_heuristic() {
       d = d0 + d1 - d;
       heuristic_sparse[u * k + j] = d;
     }
+  }
+  refresh_log_heuristic();
+}
+
+void MFACO_CVRP::refresh_log_heuristic() {
+  log_heuristic_sparse.resize(heuristic_sparse.size());
+  const float eps = EPS;
+#pragma omp parallel for schedule(static)
+  for (int64_t idx = 0; idx < static_cast<int64_t>(heuristic_sparse.size()); ++idx) {
+    log_heuristic_sparse[static_cast<size_t>(idx)] =
+        std::log(heuristic_sparse[static_cast<size_t>(idx)] + eps);
   }
 }
 
@@ -2096,14 +2170,12 @@ void MFACO_CVRP::compute_probmat(const float *prior_ptr,
       int32_t idx = u * k + j;
 
       float tau = pheromone_sparse[idx];
-      float eta = heuristic_sparse[idx];
-
       // Base: alpha*log(tau)
       float logit = alpha * std::log(tau + eps);
 
       // Heuristic: beta*log(eta)  (if disabled, eta==1 => log=0)
       if (!disable_heuristic) {
-        logit += beta * std::log(eta + eps);
+        logit += beta * log_heuristic_sparse[idx];
       }
 
       // Prior logits: gamma * normalized_z
@@ -2354,7 +2426,8 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
                                     const float *head_priors, int32_t n_heads,
                                     SampleResult &result,
                                     bool parallel_traced,
-                                    const int32_t *head_counts) {
+                                    const int32_t *head_counts,
+                                    float prior_scale) {
   if (head_priors == nullptr) {
     sample(require_prob, nullptr, result, parallel_traced);
     return;
@@ -2387,6 +2460,7 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
   const int64_t prior_stride = static_cast<int64_t>(n) * static_cast<int64_t>(k);
 
   std::vector<int32_t> ant_head(n_ants);
+  std::vector<uint8_t> head_active(static_cast<size_t>(n_heads), 0);
   int32_t ant = 0;
   if (head_counts != nullptr) {
     int32_t total = 0;
@@ -2396,6 +2470,9 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         throw std::runtime_error("head_counts must be non-negative");
       }
       total += count;
+      if (count > 0) {
+        head_active[static_cast<size_t>(hidx)] = 1;
+      }
       for (int32_t j = 0; j < count; ++j) {
         if (ant >= n_ants) {
           throw std::runtime_error("sum(head_counts) exceeds n_ants");
@@ -2411,21 +2488,68 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
     int32_t rem = n_ants % n_heads;
     for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
       int32_t count = base + (hidx < rem ? 1 : 0);
+      if (count > 0) {
+        head_active[static_cast<size_t>(hidx)] = 1;
+      }
       for (int32_t j = 0; j < count; ++j) {
         ant_head[static_cast<size_t>(ant++)] = hidx;
       }
     }
   }
 
+  std::vector<int32_t> active_heads;
+  active_heads.reserve(static_cast<size_t>(n_heads));
+  for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
+    if (head_active[static_cast<size_t>(hidx)]) {
+      active_heads.push_back(hidx);
+    }
+  }
+  if (active_heads.size() == 1 && prior_scale == 1.0f) {
+    const float *prior_h =
+        head_priors + static_cast<int64_t>(active_heads[0]) * prior_stride;
+    sample(require_prob, prior_h, result, parallel_traced);
+    return;
+  }
+
   std::vector<float> probmats(static_cast<size_t>(n_heads) *
                               static_cast<size_t>(prior_stride));
-  std::vector<float> head_probmat;
-  for (int32_t hidx = 0; hidx < n_heads; ++hidx) {
-    const float *prior_h =
-        head_priors + static_cast<int64_t>(hidx) * prior_stride;
-    compute_probmat(prior_h, head_probmat);
-    std::copy(head_probmat.begin(), head_probmat.end(),
-              probmats.begin() + static_cast<int64_t>(hidx) * prior_stride);
+  std::vector<float> base_logits(static_cast<size_t>(prior_stride));
+  const float eps = EPS;
+#pragma omp parallel for schedule(static)
+  for (int32_t u = 0; u < n; ++u) {
+    for (int32_t j = 0; j < k; ++j) {
+      const int64_t idx = static_cast<int64_t>(u) * k + j;
+      float logit = alpha * std::log(pheromone_sparse[idx] + eps);
+      if (!disable_heuristic) {
+        logit += log_heuristic_sparse[idx];
+      }
+      base_logits[idx] = logit;
+    }
+  }
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int32_t active_idx = 0; active_idx < static_cast<int32_t>(active_heads.size()); ++active_idx) {
+    for (int32_t u = 0; u < n; ++u) {
+      const int32_t hidx = active_heads[static_cast<size_t>(active_idx)];
+      const int64_t h_off = static_cast<int64_t>(hidx) * prior_stride;
+      const int64_t row_off = static_cast<int64_t>(u) * k;
+      const float *prior_h = head_priors + h_off;
+      float *prob_h = probmats.data() + h_off;
+      float max_logit = -std::numeric_limits<float>::infinity();
+      float logits[MAX_CAND_LIST_SIZE];
+
+      for (int32_t j = 0; j < k; ++j) {
+        const int64_t idx = row_off + j;
+        float logit = base_logits[idx] + prior_scale * prior_h[idx];
+        logits[j] = logit;
+        if (logit > max_logit)
+          max_logit = logit;
+      }
+
+      for (int32_t j = 0; j < k; ++j) {
+        const int64_t idx = row_off + j;
+        prob_h[idx] = std::max(std::exp(logits[j] - max_logit), eps);
+      }
+    }
   }
 
   std::vector<int32_t> start_nodes(n_ants);

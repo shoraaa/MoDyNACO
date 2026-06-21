@@ -1206,6 +1206,8 @@ class MFACO_TSP(_BaseMFACO):
             row_sums = h.sum(axis=1, keepdims=True)
             h_norm = h / (row_sums + 1e-12)
             np.copyto(h, h_norm)
+            if hasattr(self._cpp, "refresh_log_heuristic"):
+                self._cpp.refresh_log_heuristic()
 
         # Torch buffers
         self._init_torch_buffers(device)
@@ -1281,6 +1283,7 @@ class MFACO_TSP(_BaseMFACO):
         require_prob: bool = False,
         parallel_traced: bool = True,
         head_counts=None,
+        prior_scale: float = 1.0,
     ):
         """AlphaAnt-style mixed-ant deployment for sparse DyNACO priors.
 
@@ -1309,7 +1312,7 @@ class MFACO_TSP(_BaseMFACO):
             if int(counts_arr.sum()) != self.n_ants:
                 raise ValueError(f"head_counts must sum to n_ants ({self.n_ants})")
         return self._cpp.sample_head_priors(
-            require_prob, prior_arr, parallel_traced, counts_arr
+            require_prob, prior_arr, parallel_traced, counts_arr, float(prior_scale)
         )
 
     @property
@@ -1653,6 +1656,8 @@ class MFACO_CVRP(_BaseMFACO):
             row_sums = h.sum(axis=1, keepdims=True)
             h_norm = h / (row_sums + 1e-12)
             np.copyto(h, h_norm)
+            if hasattr(self._cpp, "refresh_log_heuristic"):
+                self._cpp.refresh_log_heuristic()
         
         # Torch buffers (matching MFACO_TSP naming)
         self._init_torch_buffers(device)
@@ -1740,6 +1745,7 @@ class MFACO_CVRP(_BaseMFACO):
         parallel_traced: bool = True,
         return_decoded: bool = False,
         head_counts=None,
+        prior_scale: float = 1.0,
     ):
         """Mixed-ant deployment for sparse CVRP head or per-ant priors."""
         prior_arr = _as_numpy(priors, np.float32)
@@ -1761,7 +1767,7 @@ class MFACO_CVRP(_BaseMFACO):
             if int(counts_arr.sum()) != self.n_ants:
                 raise ValueError(f"head_counts must sum to n_ants ({self.n_ants})")
         return self._cpp.sample_head_priors(
-            require_prob, prior_arr, parallel_traced, return_decoded, counts_arr
+            require_prob, prior_arr, parallel_traced, return_decoded, counts_arr, float(prior_scale)
         )
 
     def update_pheromone(self, best_route, best_cost: float) -> None:

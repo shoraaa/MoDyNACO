@@ -244,6 +244,7 @@ public:
       pheromone_sparse; // (n, k) row-major: pheromone on candidate edges
   std::vector<float>
       heuristic_sparse;        // (n, k) row-major: 1/dist for candidate edges
+  std::vector<float> log_heuristic_sparse; // log heuristic for probability rows
   std::vector<int32_t> nn_pos; // REMOVED to save memory
 
   // Solution state
@@ -318,7 +319,9 @@ public:
   void sample_head_priors(bool require_prob, const float *head_priors,
                           int32_t n_heads, SampleResult &result,
                           bool parallel_traced = false,
-                          const int32_t *head_counts = nullptr);
+                          const int32_t *head_counts = nullptr,
+                          float prior_scale = 1.0f);
+  void refresh_log_heuristic();
 
   /**
    * Update pheromone: evaporate + deposit on best route.
@@ -568,6 +571,7 @@ public:
   std::vector<int32_t> backup_list; // (n,bl)
   // std::vector<int32_t> nn_pos;         // REMOVED
   std::vector<float> heuristic_sparse; // (n,k)
+  std::vector<float> log_heuristic_sparse; // log heuristic for probability rows
 
   std::vector<float> pheromone_sparse; // (n,k)
   float tau_min = 0.0f;
@@ -610,7 +614,9 @@ public:
   void sample_head_priors(bool require_prob, const float *head_priors,
                           int32_t n_heads, SampleResult &result,
                           bool parallel_traced = false,
-                          const int32_t *head_counts = nullptr);
+                          const int32_t *head_counts = nullptr,
+                          float prior_scale = 1.0f);
+  void refresh_log_heuristic();
 
   void reset_timings();
 

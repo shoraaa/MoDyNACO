@@ -280,6 +280,7 @@ class TrainRegressionTests(unittest.TestCase):
 
         class DummyACO:
             recorded_head_counts = None
+            recorded_prior_scale = None
 
             def __init__(self, **kwargs):
                 self.n = 3
@@ -302,8 +303,10 @@ class TrainRegressionTests(unittest.TestCase):
                 parallel_traced=True,
                 return_decoded=False,
                 head_counts=None,
+                prior_scale=1.0,
             ):
                 DummyACO.recorded_head_counts = list(head_counts)
+                DummyACO.recorded_prior_scale = float(prior_scale)
                 costs = torch.arange(1, self.n_ants + 1, dtype=torch.float32)
                 routes = [torch.tensor([0, 1, 0, 2, 0]) for _ in range(self.n_ants)]
                 survival = torch.ones(self.n_ants)
@@ -373,6 +376,7 @@ class TrainRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(DummyACO.recorded_head_counts, [7, 1])
+        self.assertIsNotNone(DummyACO.recorded_prior_scale)
 
     def test_iter_stats_include_outer_step_time(self):
         class DummyACO:
