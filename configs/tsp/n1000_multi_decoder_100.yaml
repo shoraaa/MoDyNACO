@@ -21,7 +21,7 @@ edge_feature_set: compact3
 
 val_dataset: data/TSP/data/validation_set/validation_TSP1000_n128.txt
 test_dataset: data/TSP/data/test_set/STAR_TSP_lt1000.txt
-val_size: 128
+val_size: 16
 baseline: none
 
 multi_head: true

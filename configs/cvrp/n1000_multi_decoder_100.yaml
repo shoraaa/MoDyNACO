@@ -21,7 +21,7 @@ edge_feature_set: compact3
 
 val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
 test_dataset: data/CVRP/data/test_set/STAR_CVRPlib_lt1000.txt
-val_size: 128
+val_size: 16
 baseline: none
 
 multi_head: true
