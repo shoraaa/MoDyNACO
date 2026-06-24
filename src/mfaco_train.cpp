@@ -512,15 +512,9 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
     return;
   }
 
-  // Build per-head ant index lists
-  std::vector<std::vector<int32_t>> head_ants(static_cast<size_t>(n_heads));
-  for (int32_t a = 0; a < n_ants; ++a) {
-    head_ants[static_cast<size_t>(ant_head[static_cast<size_t>(a)])].push_back(a);
-  }
-
-  // Compute base logits (pheromone + heuristic, shared across heads)
-  std::vector<float> base_logits(static_cast<size_t>(prior_stride));
+  // Compute base logits once (pheromone + heuristic, shared across all heads)
   const float eps = EPS;
+  std::vector<float> base_logits(static_cast<size_t>(prior_stride));
 #pragma omp parallel for schedule(static)
   for (int32_t u = 0; u < n; ++u) {
     for (int32_t j = 0; j < k; ++j) {
@@ -533,69 +527,67 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
     }
   }
 
-  // Helper: compute probmat for one head into a pre-allocated buffer
-  auto compute_head_probmat = [&](int32_t hidx, float *probmat_out) {
-    const float *prior_h = head_priors + static_cast<int64_t>(hidx) * prior_stride;
-#pragma omp parallel for schedule(static)
-    for (int32_t u = 0; u < n; ++u) {
-      const int64_t row_off = static_cast<int64_t>(u) * k;
-      float max_logit = -std::numeric_limits<float>::infinity();
-      float logits[MAX_CAND_LIST_SIZE];
-      for (int32_t j = 0; j < k; ++j) {
-        const int64_t idx = row_off + j;
-        float logit = base_logits[idx] + prior_scale * prior_h[idx];
-        logits[j] = logit;
-        if (logit > max_logit)
-          max_logit = logit;
-      }
-      for (int32_t j = 0; j < k; ++j) {
-        const int64_t idx = row_off + j;
-        probmat_out[idx] = std::max(std::exp(logits[j] - max_logit), eps);
-      }
-    }
-  };
-
-  // Single reusable probmat buffer (n*k instead of n_heads*n*k)
-  std::vector<float> probmat(static_cast<size_t>(prior_stride));
+  // Per-ant prior pointers
+  std::vector<const float *> ant_prior(static_cast<size_t>(n_ants));
+  for (int32_t a = 0; a < n_ants; ++a) {
+    ant_prior[static_cast<size_t>(a)] =
+        head_priors +
+        static_cast<int64_t>(ant_head[static_cast<size_t>(a)]) * prior_stride;
+  }
 
   std::vector<int32_t> start_nodes(n_ants);
   for (int32_t a = 0; a < n_ants; ++a) {
     start_nodes[a] = rng_.next_uint(n);
   }
 
-  std::vector<uint64_t> ant_seeds;
-  auto ensure_ant_seeds = [&]() {
-    if (!ant_seeds.empty())
-      return;
-    ant_seeds.resize(static_cast<size_t>(n_ants));
-    for (int32_t a = 0; a < n_ants; ++a) {
-      uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
-      uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
-      ant_seeds[static_cast<size_t>(a)] =
-          (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
-    }
-  };
+  std::vector<uint64_t> ant_seeds(static_cast<size_t>(n_ants));
+  for (int32_t a = 0; a < n_ants; ++a) {
+    uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
+    uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
+    ant_seeds[static_cast<size_t>(a)] =
+        (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
+  }
+
+  // All parallel paths below compute probmat rows on-the-fly via
+  // compute_probmat_row(), so all 100 ants run in a single OMP region
+  // with no pre-allocated (n,k) probmat — identical parallelism to sample().
 
   if (require_prob) {
     result.logps.resize(n_ants);
     if (!parallel_traced) {
-      // Sequential traced: ants are contiguous by head, recompute on head change
+      // Sequential traced: compute rows on demand per ant
       result.traces.reserve(n_ants, n * n_ants);
       result.traces.starts.push_back(0);
-
-      std::vector<int32_t> checklist;
-      checklist.reserve(n);
       result.routes_raw.resize(n_ants);
 
+      // Need a full probmat for sequential traced since ants share rng_
+      // and sample_ant_traced reads probmat[curr*k] at each step.
+      // Compute lazily per head (ants are contiguous by head).
+      std::vector<float> probmat(static_cast<size_t>(prior_stride));
+      std::vector<int32_t> checklist;
+      checklist.reserve(n);
       int32_t current_head = -1;
+
       for (int32_t a = 0; a < n_ants; ++a) {
         int32_t hidx = ant_head[static_cast<size_t>(a)];
         if (hidx != current_head) {
-          compute_head_probmat(hidx, probmat.data());
+          const float *prior_h = head_priors + static_cast<int64_t>(hidx) * prior_stride;
+#pragma omp parallel for schedule(static)
+          for (int32_t u = 0; u < n; ++u) {
+            const int64_t row_off = static_cast<int64_t>(u) * k;
+            float max_logit = -std::numeric_limits<float>::infinity();
+            float logits_buf[MAX_CAND_LIST_SIZE];
+            for (int32_t j = 0; j < k; ++j) {
+              float logit = base_logits[row_off + j] + prior_scale * prior_h[row_off + j];
+              logits_buf[j] = logit;
+              if (logit > max_logit) max_logit = logit;
+            }
+            for (int32_t j = 0; j < k; ++j) {
+              probmat[row_off + j] = std::max(std::exp(logits_buf[j] - max_logit), eps);
+            }
+          }
           current_head = hidx;
         }
-        const float *prior_h =
-            head_priors + static_cast<int64_t>(hidx) * prior_stride;
         result.routes[a].resize(n);
         result.routes_raw[a].resize(n);
         MFACOTrace trace;
@@ -607,7 +599,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
         float cost = sample_ant_traced(
             probmat.data(), start_nodes[a], result.routes[a],
             result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
-            trace, rng_, logp_sum, surv_out, prior_h);
+            trace, rng_, logp_sum, surv_out, ant_prior[static_cast<size_t>(a)]);
         result.new_edges_count[a] = mne_out;
         result.edge_survival[a] = surv_out;
         result.costs[a] = cost;
@@ -626,23 +618,34 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
             static_cast<int32_t>(result.traces.curr_nodes.size()));
       }
     } else {
-      // Parallel traced: process one head at a time for cache locality
-      ensure_ant_seeds();
+      // Parallel traced: single parallel region, heads sequential inside
       std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
       result.routes_raw.resize(n_ants);
 
-      for (int32_t hidx : active_heads) {
-        compute_head_probmat(hidx, probmat.data());
-        const float *prior_h =
-            head_priors + static_cast<int64_t>(hidx) * prior_stride;
-        const auto &ants = head_ants[static_cast<size_t>(hidx)];
+      std::vector<std::vector<int32_t>> head_ants(static_cast<size_t>(n_heads));
+      for (int32_t a = 0; a < n_ants; ++a) {
+        head_ants[static_cast<size_t>(ant_head[static_cast<size_t>(a)])].push_back(a);
+      }
+      std::vector<float> probmat(static_cast<size_t>(prior_stride));
 
 #pragma omp parallel
-        {
-          std::vector<int32_t> checklist;
-          checklist.reserve(n);
+      {
+        std::vector<int32_t> checklist;
+        checklist.reserve(n);
 
-#pragma omp for schedule(static, 1)
+        for (size_t hi = 0; hi < active_heads.size(); ++hi) {
+          int32_t hidx = active_heads[hi];
+          const float *prior_h =
+              head_priors + static_cast<int64_t>(hidx) * prior_stride;
+          const auto &ants = head_ants[static_cast<size_t>(hidx)];
+
+#pragma omp for schedule(static)
+          for (int32_t u = 0; u < n; ++u) {
+            compute_probmat_row(u, base_logits.data(), prior_h, prior_scale,
+                                &probmat[static_cast<size_t>(u) * k]);
+          }
+
+#pragma omp for schedule(dynamic, 1)
           for (int32_t i = 0; i < static_cast<int32_t>(ants.size()); ++i) {
             int32_t a = ants[static_cast<size_t>(i)];
             result.routes[a].resize(n);
@@ -666,7 +669,7 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
         }
       }
 
-      // Merge traces in ant index order (deterministic)
+      // Merge traces in ant index order
       result.traces.clear();
       result.traces.starts.resize(static_cast<size_t>(n_ants) + 1);
       result.traces.start_nodes.resize(static_cast<size_t>(n_ants));
@@ -690,46 +693,33 @@ void MFACO_TSP::sample_head_priors(bool require_prob, const float *head_priors,
         const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
         int32_t off = result.traces.starts[static_cast<size_t>(a)];
         for (size_t i = 0; i < t.curr_nodes.size(); ++i) {
-          result.traces.curr_nodes[static_cast<size_t>(off) + i] =
-              t.curr_nodes[i];
-          result.traces.chosen_nodes[static_cast<size_t>(off) + i] =
-              t.chosen_nodes[i];
-          result.traces.is_stochastic[static_cast<size_t>(off) + i] =
-              t.is_stochastic[i];
+          result.traces.curr_nodes[static_cast<size_t>(off) + i] = t.curr_nodes[i];
+          result.traces.chosen_nodes[static_cast<size_t>(off) + i] = t.chosen_nodes[i];
+          result.traces.is_stochastic[static_cast<size_t>(off) + i] = t.is_stochastic[i];
           result.traces.pick_j[static_cast<size_t>(off) + i] = t.pick_j[i];
-          result.traces.valid_mask[static_cast<size_t>(off) + i] =
-              t.valid_mask[i];
-          result.traces.is_new_edge[static_cast<size_t>(off) + i] =
-              t.is_new_edge[i];
+          result.traces.valid_mask[static_cast<size_t>(off) + i] = t.valid_mask[i];
+          result.traces.is_new_edge[static_cast<size_t>(off) + i] = t.is_new_edge[i];
         }
       }
     }
   } else {
-    // Fast path: process one head at a time for cache locality
-    ensure_ant_seeds();
-    for (int32_t hidx : active_heads) {
-      compute_head_probmat(hidx, probmat.data());
-      const float *prior_h =
-          head_priors + static_cast<int64_t>(hidx) * prior_stride;
-      const auto &ants = head_ants[static_cast<size_t>(hidx)];
-
+    // Fast path: all 100 ants in one parallel region, each computes
+    // only ~12-15 probmat rows on-the-fly during construction.
+    // No probmat allocation, no head serialization, full parallelism.
 #pragma omp parallel
-      {
-        std::vector<int32_t> checklist;
-        checklist.reserve(n);
+    {
+      std::vector<int32_t> checklist;
+      checklist.reserve(n);
 
-#pragma omp for schedule(static, 1)
-        for (int32_t i = 0; i < static_cast<int32_t>(ants.size()); ++i) {
-          int32_t a = ants[static_cast<size_t>(i)];
-          result.routes[a].resize(n);
-          Xoshiro128Plus rng_local;
-          rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
-          result.costs[a] =
-              sample_ant_fast(probmat.data(), start_nodes[a], result.routes[a],
-                              result.costs_raw[a],
-                              result.new_edges_count[a], checklist, rng_local,
-                              prior_h);
-        }
+#pragma omp for schedule(dynamic, 1)
+      for (int32_t a = 0; a < n_ants; ++a) {
+        result.routes[a].resize(n);
+        Xoshiro128Plus rng_local;
+        rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+        result.costs[a] = sample_ant_fast_lazy(
+            base_logits.data(), ant_prior[static_cast<size_t>(a)], prior_scale,
+            start_nodes[a], result.routes[a], result.costs_raw[a],
+            result.new_edges_count[a], checklist, rng_local);
       }
     }
   }
@@ -1135,6 +1125,83 @@ float MFACO_TSP::sample_ant_fast(const float *probmat, int32_t start_node,
   }
 
   // Copy result
+  route_out = route;
+  return get_route_cost(route);
+}
+
+float MFACO_TSP::sample_ant_fast_lazy(
+    const float *base_logits_ptr, const float *prior_h, float prior_scale_,
+    int32_t start_node, std::vector<int32_t> &route_out, float &cost_raw_out,
+    int32_t &new_edges_out, std::vector<int32_t> &checklist,
+    Xoshiro128Plus &rng) {
+  std::vector<int32_t> route = source_route;
+  std::vector<int32_t> positions(n);
+  for (int32_t i = 0; i < n; ++i) {
+    positions[route[i]] = i;
+  }
+
+  std::vector<uint8_t> visited(n, 0);
+  visited[start_node] = 1;
+  int32_t visited_count = 1;
+
+  checklist.clear();
+  checklist.push_back(start_node);
+  std::vector<uint8_t> in_checklist(n, 0);
+  in_checklist[start_node] = 1;
+
+  int32_t new_edges = 0;
+  int32_t steps = 0;
+  int32_t curr = start_node;
+  float row_buf[MAX_CAND_LIST_SIZE];
+
+  while (true) {
+    if (fixed_steps > 0) {
+      if (steps >= fixed_steps)
+        break;
+    } else {
+      if (new_edges >= min_new_edges || visited_count >= n)
+        break;
+    }
+    if (visited_count >= n)
+      break;
+    int16_t pick_j = -1;
+    uint64_t valid_mask = 0;
+    compute_probmat_row(curr, base_logits_ptr, prior_h, prior_scale_, row_buf);
+    auto [chosen, is_stoch, used_unif] =
+        select_next_node(curr, row_buf, visited.data(), rng, pick_j, valid_mask);
+
+    if (!contains_edge(curr, chosen, positions)) {
+      ++new_edges;
+      if (!in_checklist[curr]) {
+        checklist.push_back(curr);
+        in_checklist[curr] = 1;
+      }
+      if (!in_checklist[chosen]) {
+        checklist.push_back(chosen);
+        in_checklist[chosen] = 1;
+      }
+      int32_t chosen_pred = get_pred(chosen, route, positions);
+      if (!in_checklist[chosen_pred]) {
+        checklist.push_back(chosen_pred);
+        in_checklist[chosen_pred] = 1;
+      }
+    }
+
+    relocate_node(curr, chosen, route, positions);
+
+    visited[chosen] = 1;
+    ++visited_count;
+    ++steps;
+    curr = chosen;
+  }
+
+  new_edges_out = new_edges;
+  cost_raw_out = get_route_cost(route);
+
+  if (use_local_search && !checklist.empty()) {
+    apply_local_search(route, positions, checklist, prior_h);
+  }
+
   route_out = route;
   return get_route_cost(route);
 }
@@ -2529,15 +2596,9 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
     return;
   }
 
-  // Build per-head ant index lists
-  std::vector<std::vector<int32_t>> head_ants(static_cast<size_t>(n_heads));
-  for (int32_t a = 0; a < n_ants; ++a) {
-    head_ants[static_cast<size_t>(ant_head[static_cast<size_t>(a)])].push_back(a);
-  }
-
   // Compute base logits (pheromone + heuristic, shared across heads)
-  std::vector<float> base_logits(static_cast<size_t>(prior_stride));
   const float eps = EPS;
+  std::vector<float> base_logits(static_cast<size_t>(prior_stride));
 #pragma omp parallel for schedule(static)
   for (int32_t u = 0; u < n; ++u) {
     for (int32_t j = 0; j < k; ++j) {
@@ -2572,45 +2633,45 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
     }
   };
 
-  // Single reusable probmat buffer (n*k instead of n_heads*n*k)
-  std::vector<float> probmat(static_cast<size_t>(prior_stride));
+  // Per-ant prior pointers
+  std::vector<const float *> ant_prior(static_cast<size_t>(n_ants));
+  for (int32_t a = 0; a < n_ants; ++a) {
+    ant_prior[static_cast<size_t>(a)] =
+        head_priors +
+        static_cast<int64_t>(ant_head[static_cast<size_t>(a)]) * prior_stride;
+  }
 
   std::vector<int32_t> start_nodes(n_ants);
   for (int32_t a = 0; a < n_ants; ++a) {
     start_nodes[a] = 1 + static_cast<int32_t>(rng_.next_uint(static_cast<uint32_t>(m)));
   }
 
-  std::vector<uint64_t> ant_seeds;
-  auto ensure_ant_seeds = [&]() {
-    if (!ant_seeds.empty())
-      return;
-    ant_seeds.resize(static_cast<size_t>(n_ants));
-    for (int32_t a = 0; a < n_ants; ++a) {
-      uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
-      uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
-      ant_seeds[static_cast<size_t>(a)] =
-          (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
-    }
-  };
+  std::vector<uint64_t> ant_seeds(static_cast<size_t>(n_ants));
+  for (int32_t a = 0; a < n_ants; ++a) {
+    uint64_t hi = static_cast<uint64_t>(rng_.next_u32());
+    uint64_t lo = static_cast<uint64_t>(rng_.next_u32());
+    ant_seeds[static_cast<size_t>(a)] =
+        (hi << 32) ^ lo ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(a));
+  }
 
   if (require_prob) {
     if (!parallel_traced) {
-      // Sequential traced: ants are contiguous by head, recompute on head change
+      // Sequential traced: lazy per-head probmat (ants contiguous by head)
       result.traces.reserve(n_ants, n_ants * min_new_edges * 2);
       result.traces.starts.push_back(0);
 
+      std::vector<float> probmat(static_cast<size_t>(prior_stride));
       std::vector<int32_t> checklist;
       checklist.reserve(m);
-
       int32_t current_head = -1;
+
       for (int32_t a = 0; a < n_ants; ++a) {
         int32_t hidx = ant_head[static_cast<size_t>(a)];
         if (hidx != current_head) {
           compute_head_probmat(hidx, probmat.data());
           current_head = hidx;
         }
-        const float *prior_h =
-            head_priors + static_cast<int64_t>(hidx) * prior_stride;
+        const float *prior_h = ant_prior[static_cast<size_t>(a)];
         result.decoded_routes[a].clear();
         MFACOTrace trace;
         trace.reserve(min_new_edges * 2);
@@ -2619,9 +2680,10 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         int32_t mne_out = 0;
         float surv_out = 0.0f;
         (void)sample_ant_direct_traced(
-            probmat.data(), start_nodes[a], result.decoded_routes[a],
-            result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
-            trace, rng_, logp_sum, surv_out, prior_h);
+            probmat.data(), start_nodes[a],
+            result.decoded_routes[a], result.routes_raw[a],
+            result.costs_raw[a], mne_out, checklist, trace, rng_, logp_sum,
+            surv_out, prior_h);
         result.new_edges_count[a] = mne_out;
         result.edge_survival[a] = surv_out;
         result.logps[a] = logp_sum;
@@ -2653,22 +2715,33 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
             static_cast<int32_t>(result.traces.curr_nodes.size()));
       }
     } else {
-      // Parallel traced: process one head at a time for cache locality
-      ensure_ant_seeds();
+      // Parallel traced: single parallel region, heads sequential inside
       std::vector<MFACOTrace> traces_per_ant(static_cast<size_t>(n_ants));
 
-      for (int32_t hidx : active_heads) {
-        compute_head_probmat(hidx, probmat.data());
-        const float *prior_h =
-            head_priors + static_cast<int64_t>(hidx) * prior_stride;
-        const auto &ants = head_ants[static_cast<size_t>(hidx)];
+      std::vector<std::vector<int32_t>> head_ants(static_cast<size_t>(n_heads));
+      for (int32_t a = 0; a < n_ants; ++a) {
+        head_ants[static_cast<size_t>(ant_head[static_cast<size_t>(a)])].push_back(a);
+      }
+      std::vector<float> probmat(static_cast<size_t>(prior_stride));
 
 #pragma omp parallel
-        {
-          std::vector<int32_t> checklist;
-          checklist.reserve(m);
+      {
+        std::vector<int32_t> checklist;
+        checklist.reserve(m);
 
-#pragma omp for schedule(static, 1)
+        for (size_t hi = 0; hi < active_heads.size(); ++hi) {
+          int32_t hidx = active_heads[hi];
+          const float *prior_h =
+              head_priors + static_cast<int64_t>(hidx) * prior_stride;
+          const auto &ants = head_ants[static_cast<size_t>(hidx)];
+
+#pragma omp for schedule(static)
+          for (int32_t u = 0; u < n; ++u) {
+            compute_probmat_row(u, base_logits.data(), prior_h, prior_scale,
+                                &probmat[static_cast<size_t>(u) * k]);
+          }
+
+#pragma omp for schedule(dynamic, 1)
           for (int32_t i = 0; i < static_cast<int32_t>(ants.size()); ++i) {
             int32_t a = ants[static_cast<size_t>(i)];
             MFACOTrace &trace = traces_per_ant[static_cast<size_t>(a)];
@@ -2680,9 +2753,9 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
             int32_t mne_out = 0;
             float surv_out = 0.0f;
             (void)sample_ant_direct_traced(
-                probmat.data(), start_nodes[a], result.routes[a],
-                result.routes_raw[a], result.costs_raw[a], mne_out, checklist,
-                trace, rng_local, logp_sum, surv_out, prior_h);
+                probmat.data(), start_nodes[a],
+                result.routes[a], result.routes_raw[a], result.costs_raw[a],
+                mne_out, checklist, trace, rng_local, logp_sum, surv_out, prior_h);
             result.new_edges_count[a] = mne_out;
             result.edge_survival[a] = surv_out;
             result.logps[a] = logp_sum;
@@ -2703,7 +2776,7 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         }
       }
 
-      // Merge traces in ant index order (deterministic)
+      // Merge traces in ant index order
       result.traces.clear();
       result.traces.starts.resize(static_cast<size_t>(n_ants) + 1);
       result.traces.start_nodes.resize(static_cast<size_t>(n_ants));
@@ -2727,51 +2800,37 @@ void MFACO_CVRP::sample_head_priors(bool require_prob,
         const MFACOTrace &t = traces_per_ant[static_cast<size_t>(a)];
         int32_t off = result.traces.starts[static_cast<size_t>(a)];
         for (size_t i = 0; i < t.curr_nodes.size(); ++i) {
-          result.traces.curr_nodes[static_cast<size_t>(off) + i] =
-              t.curr_nodes[i];
-          result.traces.chosen_nodes[static_cast<size_t>(off) + i] =
-              t.chosen_nodes[i];
-          result.traces.is_stochastic[static_cast<size_t>(off) + i] =
-              t.is_stochastic[i];
+          result.traces.curr_nodes[static_cast<size_t>(off) + i] = t.curr_nodes[i];
+          result.traces.chosen_nodes[static_cast<size_t>(off) + i] = t.chosen_nodes[i];
+          result.traces.is_stochastic[static_cast<size_t>(off) + i] = t.is_stochastic[i];
           result.traces.pick_j[static_cast<size_t>(off) + i] = t.pick_j[i];
-          result.traces.valid_mask[static_cast<size_t>(off) + i] =
-              t.valid_mask[i];
-          result.traces.is_new_edge[static_cast<size_t>(off) + i] =
-              t.is_new_edge[i];
+          result.traces.valid_mask[static_cast<size_t>(off) + i] = t.valid_mask[i];
+          result.traces.is_new_edge[static_cast<size_t>(off) + i] = t.is_new_edge[i];
         }
       }
     }
   } else {
-    // Fast path: process one head at a time for cache locality
-    ensure_ant_seeds();
-    for (int32_t hidx : active_heads) {
-      compute_head_probmat(hidx, probmat.data());
-      const float *prior_h =
-          head_priors + static_cast<int64_t>(hidx) * prior_stride;
-      const auto &ants = head_ants[static_cast<size_t>(hidx)];
-
+    // Fast path: all ants in one parallel region, lazy probmat rows
 #pragma omp parallel
-      {
-        std::vector<int32_t> checklist;
-        checklist.reserve(m);
+    {
+      std::vector<int32_t> checklist;
+      checklist.reserve(m);
 
-#pragma omp for schedule(static, 1)
-        for (int32_t i = 0; i < static_cast<int32_t>(ants.size()); ++i) {
-          int32_t a = ants[static_cast<size_t>(i)];
-          Xoshiro128Plus rng_local;
-          rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
-          (void)sample_ant_direct(probmat.data(), start_nodes[a],
-                                  result.routes[a], result.costs_raw[a],
-                                  result.new_edges_count[a], checklist,
-                                  rng_local, prior_h);
+#pragma omp for schedule(dynamic, 1)
+      for (int32_t a = 0; a < n_ants; ++a) {
+        Xoshiro128Plus rng_local;
+        rng_local.seed(ant_seeds[static_cast<size_t>(a)]);
+        (void)sample_ant_direct_lazy(
+            base_logits.data(), ant_prior[static_cast<size_t>(a)], prior_scale,
+            start_nodes[a], result.routes[a], result.costs_raw[a],
+            result.new_edges_count[a], checklist, rng_local);
 
-          if (result.routes[a].empty() || result.routes[a].front() != 0)
-            result.routes[a].insert(result.routes[a].begin(), 0);
-          if (result.routes[a].back() != 0)
-            result.routes[a].push_back(0);
-          result.decoded_routes[a] = result.routes[a];
-          result.costs[a] = route_cost_euclid(result.routes[a]);
-        }
+        if (result.routes[a].empty() || result.routes[a].front() != 0)
+          result.routes[a].insert(result.routes[a].begin(), 0);
+        if (result.routes[a].back() != 0)
+          result.routes[a].push_back(0);
+        result.decoded_routes[a] = result.routes[a];
+        result.costs[a] = route_cost_euclid(result.routes[a]);
       }
     }
   }
@@ -4918,6 +4977,410 @@ float MFACO_CVRP::sample_ant_direct(const float *probmat, int32_t start_node,
   }
 
   // Calculate final cost
+  float final_cost = 0.0f;
+  for (size_t i = 0; i + 1 < route_out.size(); ++i) {
+    final_cost += dist(route_out[i], route_out[i + 1]);
+  }
+
+  return final_cost;
+}
+
+float MFACO_CVRP::sample_ant_direct_lazy(
+    const float *base_logits_ptr, const float *prior_h, float prior_scale_,
+    int32_t start_node, std::vector<int32_t> &route_out, float &cost_raw_out,
+    int32_t &new_edges_out, std::vector<int32_t> &checklist,
+    Xoshiro128Plus &rng) {
+
+  std::vector<int32_t> src_prev(n, -1);
+  std::vector<int32_t> src_next(n, -1);
+  std::vector<uint8_t> src_adj_to_depot(n, 0);
+
+  std::vector<int32_t> source_node_route_id(n, -1);
+  int32_t current_route_id = 0;
+  for (size_t i = 0; i < source_route.size(); ++i) {
+    int32_t u = source_route[i];
+    if (u == 0) {
+      if (i > 0 && source_route[i - 1] != 0) {
+        current_route_id++;
+      }
+    } else {
+      source_node_route_id[u] = current_route_id;
+    }
+  }
+
+  for (size_t i = 0; i + 1 < source_route.size(); ++i) {
+    int32_t u = source_route[i];
+    int32_t v = source_route[i + 1];
+    if (u > 0 && u < n && v > 0 && v < n) {
+      src_next[u] = v;
+      src_prev[v] = u;
+    } else {
+      if (u == 0 && v > 0 && v < n)
+        src_adj_to_depot[v] = 1;
+      if (v == 0 && u > 0 && u < n)
+        src_adj_to_depot[u] = 1;
+    }
+  }
+
+  auto is_source_edge = [&](int32_t u, int32_t v) -> bool {
+    if (u >= n || v >= n)
+      return false;
+    if (u == 0)
+      return src_adj_to_depot[v];
+    if (v == 0)
+      return src_adj_to_depot[u];
+    return (src_next[u] == v || src_prev[u] == v);
+  };
+
+  std::vector<std::vector<int32_t>> init_routes =
+      initial_routes_from_perm(source_route);
+  int32_t num_routes = (int32_t)init_routes.size();
+  int32_t max_routes = n;
+
+  std::vector<int32_t> next_node(n + max_routes);
+  std::vector<int32_t> prev_node(n + max_routes);
+  std::vector<int32_t> node_route(n, -1);
+  std::vector<int64_t> route_loads(max_routes, 0);
+
+  for (int r = 0; r < num_routes; ++r) {
+    int32_t depot = n + r;
+    int32_t prev = depot;
+    int64_t load = 0;
+
+    const auto &rt = init_routes[r];
+    for (size_t i = 1; i < rt.size() - 1; ++i) {
+      int32_t u = rt[i];
+      next_node[prev] = u;
+      prev_node[u] = prev;
+      node_route[u] = r;
+      load += demand_int[u];
+      prev = u;
+    }
+    next_node[prev] = depot;
+    prev_node[depot] = prev;
+    route_loads[r] = load;
+  }
+
+  std::vector<uint8_t> visited(n, 0);
+  int32_t visited_count = 0;
+
+  int32_t curr = start_node;
+  if (curr <= 0 || curr >= n) {
+    int attempts = 0;
+    while (attempts < 10) {
+      curr = 1 + (int32_t)rng.next_uint((uint32_t)m);
+      if (curr > 0 && curr < n)
+        break;
+      attempts++;
+    }
+    if (curr <= 0 || curr >= n)
+      curr = 1;
+  }
+
+  visited[curr] = 1;
+  visited_count++;
+
+  checklist.clear();
+  checklist.push_back(curr);
+  std::vector<uint8_t> in_checklist(n, 0);
+  in_checklist[curr] = 1;
+
+  int32_t new_edges_all = 0;
+  int32_t new_edges_cross = 0;
+  int32_t steps = 0;
+  int32_t max_steps = m * 4;
+  if (fixed_steps > 0)
+    max_steps = fixed_steps;
+
+  float row_buf[MAX_CAND_LIST_SIZE];
+
+  while (true) {
+    if (fixed_steps > 0) {
+      if (steps >= fixed_steps)
+        break;
+    } else {
+      if (new_edges_cross >= min_new_edges || visited_count >= m)
+        break;
+    }
+    if (steps > max_steps)
+      break;
+
+    int32_t r_curr;
+    if (curr >= n) {
+      r_curr = curr - n;
+    } else {
+      r_curr = node_route[curr];
+    }
+
+    int32_t chosen = -1;
+
+    {
+      int32_t candidates[MAX_CAND_LIST_SIZE + 1];
+      float probs[MAX_CAND_LIST_SIZE + 1];
+      int32_t c_size = 0;
+      float sum_prob = 0.0f;
+
+      int32_t lookup_node = (curr >= n) ? 0 : curr;
+      compute_probmat_row(lookup_node, base_logits_ptr, prior_h, prior_scale_,
+                          row_buf);
+
+      for (int32_t j = 0; j < k; ++j) {
+        int32_t v = nn_list[lookup_node * k + j];
+        if (v == 0) {
+          if (curr >= n)
+            continue;
+        } else {
+          if (v < 0 || v >= n)
+            continue;
+          if (visited[v])
+            continue;
+
+          int32_t r_v = node_route[v];
+          if (r_v != r_curr) {
+            if (route_loads[r_curr] + demand_int[v] > capacity_int)
+              continue;
+          }
+        }
+
+        candidates[c_size] = v;
+        probs[c_size] = row_buf[j];
+        sum_prob += row_buf[j];
+        c_size++;
+      }
+
+      if (c_size > 0) {
+        float r = rng.next_float() * sum_prob;
+        float run = 0.0f;
+        chosen = candidates[c_size - 1];
+        for (int32_t i = 0; i < c_size; ++i) {
+          run += probs[i];
+          if (r <= run) {
+            chosen = candidates[i];
+            break;
+          }
+        }
+      }
+    }
+
+    if (chosen == -1) {
+      int32_t lookup_node = (curr >= n) ? 0 : curr;
+      for (int32_t j = 0; j < bl; ++j) {
+        int32_t v = backup_list[lookup_node * bl + j];
+        if (v == 0) {
+          if (curr >= n)
+            continue;
+          chosen = 0;
+          break;
+        }
+        if (v > 0 && v < n && !visited[v]) {
+          int32_t r_v = node_route[v];
+          if (r_curr == r_v ||
+              route_loads[r_curr] + demand_int[v] <= capacity_int) {
+            chosen = v;
+            break;
+          }
+        }
+      }
+    }
+
+    if (chosen == -1) {
+      float min_d = std::numeric_limits<float>::max();
+      int32_t best_global = -1;
+      int32_t lookup_node = (curr >= n) ? 0 : curr;
+
+      for (int32_t v = 1; v < n; ++v) {
+        if (!visited[v]) {
+          int32_t r_v = node_route[v];
+          if (r_curr == r_v ||
+              route_loads[r_curr] + demand_int[v] <= capacity_int) {
+            float d = dist(lookup_node, v);
+            if (d < min_d) {
+              min_d = d;
+              best_global = v;
+            }
+          }
+        }
+      }
+      if (best_global == -1) {
+        if (curr < n)
+          chosen = 0;
+      } else {
+        float d_depot = dist(lookup_node, 0);
+        if (curr < n && d_depot < min_d) {
+          chosen = 0;
+        } else {
+          chosen = best_global;
+        }
+      }
+    }
+
+    if (chosen == -1)
+      break;
+
+    if (chosen == 0) {
+      int32_t next_c = next_node[curr];
+
+      if (next_c >= n) {
+        bool is_cross = true;
+        if (is_cross)
+          new_edges_cross++;
+        if (!is_source_edge(curr >= n ? 0 : curr, 0)) {
+          new_edges_all++;
+        }
+
+        curr = next_c;
+        steps++;
+        continue;
+      }
+
+      if (num_routes >= max_routes) {
+        break;
+      }
+
+      int32_t r_new = num_routes++;
+      int32_t new_depot = n + r_new;
+      int32_t old_depot = n + r_curr;
+
+      int32_t route_end = prev_node[old_depot];
+
+      next_node[curr] = old_depot;
+      prev_node[old_depot] = curr;
+
+      next_node[new_depot] = next_c;
+      prev_node[next_c] = new_depot;
+
+      next_node[route_end] = new_depot;
+      prev_node[new_depot] = route_end;
+
+      int64_t load_shift = 0;
+      int32_t w = next_c;
+      int32_t walk_steps = 0;
+      while (w != new_depot && w < n) {
+        if (++walk_steps > n) {
+          throw std::runtime_error(
+              "CVRP route corruption in sample_ant_direct_lazy split: segment "
+              "did not reach new depot");
+        }
+        assert_cvrp_node_index(w, n + max_routes,
+                               "sample_ant_direct_lazy split");
+        node_route[w] = r_new;
+        load_shift += demand_int[w];
+        w = next_node[w];
+      }
+      route_loads[r_curr] -= load_shift;
+      route_loads[r_new] = load_shift;
+
+      if (!is_source_edge(curr >= n ? 0 : curr, 0)) {
+        new_edges_all++;
+        if (!in_checklist[curr >= n ? 0 : curr]) {
+          checklist.push_back(curr >= n ? 0 : curr);
+          in_checklist[curr >= n ? 0 : curr] = 1;
+        }
+        new_edges_cross++;
+      }
+
+      curr = new_depot;
+      steps++;
+      continue;
+    }
+
+    int32_t v = chosen;
+    int32_t r_v = node_route[v];
+
+    int32_t prev_v = prev_node[v];
+    int32_t next_v = next_node[v];
+
+    if (prev_v == curr) {
+      visited[v] = 1;
+      visited_count++;
+      curr = v;
+      steps++;
+      continue;
+    }
+
+    next_node[prev_v] = next_v;
+    prev_node[next_v] = prev_v;
+
+    int32_t next_c = next_node[curr];
+    next_node[curr] = v;
+    prev_node[v] = curr;
+    next_node[v] = next_c;
+    prev_node[next_c] = v;
+
+    if (r_curr != r_v) {
+      if (r_v != -1) {
+        route_loads[r_v] -= demand_int[v];
+      }
+      route_loads[r_curr] += demand_int[v];
+      node_route[v] = r_curr;
+    }
+
+    visited[v] = 1;
+    visited_count++;
+
+    int32_t u_idx = (curr >= n) ? 0 : curr;
+    if (!is_source_edge(u_idx, v)) {
+      new_edges_all++;
+      if (u_idx > 0 && !in_checklist[u_idx]) {
+        checklist.push_back(u_idx);
+        in_checklist[u_idx] = 1;
+      }
+      if (v > 0 && !in_checklist[v]) {
+        checklist.push_back(v);
+        in_checklist[v] = 1;
+      }
+
+      bool is_cross = false;
+      if (u_idx == 0)
+        is_cross = true;
+      else if (source_node_route_id[u_idx] != source_node_route_id[v])
+        is_cross = true;
+
+      if (is_cross)
+        new_edges_cross++;
+    }
+
+    curr = v;
+    steps++;
+  }
+
+  new_edges_out = new_edges_cross;
+
+  route_out.clear();
+  route_out.reserve(m + num_routes + 2);
+
+  for (int r = 0; r < num_routes; ++r) {
+    int32_t d = n + r;
+    int32_t w = next_node[d];
+    if (w >= n)
+      continue;
+
+    route_out.push_back(0);
+    int32_t walk_steps = 0;
+    while (w < n) {
+      if (++walk_steps > n) {
+        throw std::runtime_error(
+            "CVRP route corruption in sample_ant_direct_lazy flatten: route " +
+            std::to_string(r) + " did not reach depot");
+      }
+      assert_cvrp_node_index(w, n + max_routes,
+                             "sample_ant_direct_lazy flatten");
+      route_out.push_back(w);
+      w = next_node[w];
+    }
+  }
+  if (!route_out.empty())
+    route_out.push_back(0);
+
+  cost_raw_out = 0.0f;
+  for (size_t i = 0; i + 1 < route_out.size(); ++i) {
+    cost_raw_out += dist(route_out[i], route_out[i + 1]);
+  }
+
+  if (use_local_search && !checklist.empty()) {
+    apply_local_search(route_out, checklist, in_checklist);
+  }
+
   float final_cost = 0.0f;
   for (size_t i = 0; i + 1 < route_out.size(); ++i) {
     final_cost += dist(route_out[i], route_out[i + 1]);

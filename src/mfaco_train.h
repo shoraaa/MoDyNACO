@@ -396,6 +396,14 @@ private:
                         int32_t &new_edges_out, std::vector<int32_t> &checklist,
                         Xoshiro128Plus &rng, const float *prior);
 
+  float sample_ant_fast_lazy(const float *base_logits_ptr,
+                             const float *prior_h, float prior_scale_,
+                             int32_t start_node,
+                             std::vector<int32_t> &route_out,
+                             float &cost_raw_out, int32_t &new_edges_out,
+                             std::vector<int32_t> &checklist,
+                             Xoshiro128Plus &rng);
+
   float sample_ant_traced(const float *probmat, // (n, k) precomputed weights
                           int32_t start_node, std::vector<int32_t> &route_out,
                           std::vector<int32_t> &route_raw_out,
@@ -403,6 +411,25 @@ private:
                           std::vector<int32_t> &checklist, MFACOTrace &trace,
                           Xoshiro128Plus &rng, float &logp_sum,
                           float &survival_out, const float *prior);
+
+  inline void compute_probmat_row(int32_t u, const float *base_logits,
+                                  const float *prior_h, float prior_scale_,
+                                  float *row_out) const {
+    const int64_t row_off = static_cast<int64_t>(u) * k;
+    float max_logit = -std::numeric_limits<float>::infinity();
+    float logits[MAX_CAND_LIST_SIZE];
+    for (int32_t j = 0; j < k; ++j) {
+      const int64_t idx = row_off + j;
+      float logit = base_logits[idx] + prior_scale_ * prior_h[idx];
+      logits[j] = logit;
+      if (logit > max_logit)
+        max_logit = logit;
+    }
+    const float eps_ = EPS;
+    for (int32_t j = 0; j < k; ++j) {
+      row_out[j] = std::max(std::exp(logits[j] - max_logit), eps_);
+    }
+  }
 
   std::tuple<int32_t, bool, float>
   select_next_node(int32_t curr,
@@ -647,6 +674,25 @@ public:
   int32_t *source_perm_data() { return source_route.data(); }
   int32_t *best_perm_data() { return best_route.data(); }
 
+  inline void compute_probmat_row(int32_t u, const float *base_logits,
+                                  const float *prior_h, float prior_scale_,
+                                  float *row_out) const {
+    const int64_t row_off = static_cast<int64_t>(u) * k;
+    float max_logit = -std::numeric_limits<float>::infinity();
+    float logits[MAX_CAND_LIST_SIZE];
+    for (int32_t j = 0; j < k; ++j) {
+      const int64_t idx = row_off + j;
+      float logit = base_logits[idx] + prior_scale_ * prior_h[idx];
+      logits[j] = logit;
+      if (logit > max_logit)
+        max_logit = logit;
+    }
+    const float eps_ = EPS;
+    for (int32_t j = 0; j < k; ++j) {
+      row_out[j] = std::max(std::exp(logits[j] - max_logit), eps_);
+    }
+  }
+
 private:
   // ---- build helpers ----
   void build_nn_lists();
@@ -678,6 +724,14 @@ private:
                           int32_t &new_edges_out,
                           std::vector<int32_t> &checklist, Xoshiro128Plus &rng,
                           const float *prior);
+
+  float sample_ant_direct_lazy(const float *base_logits_ptr,
+                               const float *prior_h, float prior_scale_,
+                               int32_t start_node,
+                               std::vector<int32_t> &route_out,
+                               float &cost_raw_out, int32_t &new_edges_out,
+                               std::vector<int32_t> &checklist,
+                               Xoshiro128Plus &rng);
 
   float sample_ant_direct_traced(const float *probmat, int32_t start_node,
                                  std::vector<int32_t> &route_out,
