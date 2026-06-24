@@ -1,0 +1,104 @@
+{
+  "behavior_classifier": {
+    "class_counts": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "classifier": "mlp",
+    "evaluation_reuses_train": false,
+    "majority_chance": 0.125,
+    "n_test": 480,
+    "n_test_instances": 188,
+    "n_train": 1120,
+    "n_train_instances": 200,
+    "permutation_mean": 0.12695833333333334,
+    "permutation_p_value": 0.0,
+    "permutation_std": 0.01910956167007036,
+    "permutation_trials": 50,
+    "split": "held_out_instances",
+    "test_accuracy": 0.7625,
+    "test_accuracy_ci95": [
+      0.7229166666666667,
+      0.7979166666666667
+    ],
+    "train_accuracy": 0.8696428537368774
+  },
+  "class_counts": [
+    25600,
+    25600
+  ],
+  "classifier": "mlp",
+  "controls": {
+    "geometry_baseline": {
+      "class_counts": [
+        25600,
+        25600
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 15360,
+      "n_test_instances": 6,
+      "n_train": 35840,
+      "n_train_instances": 14,
+      "permutation_mean": 0.5029114583333333,
+      "permutation_p_value": 0.0,
+      "permutation_std": 0.04405926591263655,
+      "permutation_trials": 50,
+      "split": "held_out_instances",
+      "test_accuracy": 0.9743489583333333,
+      "test_accuracy_ci95": [
+        0.971875,
+        0.9768880208333334
+      ],
+      "train_accuracy": 0.9867187738418579
+    },
+    "positive_control_phase": {
+      "class_counts": [
+        10240,
+        10240
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 6144,
+      "n_test_instances": 12,
+      "n_train": 14336,
+      "n_train_instances": 28,
+      "permutation_mean": 0.5069466145833332,
+      "permutation_p_value": 0.06,
+      "permutation_std": 0.16770007645083268,
+      "permutation_trials": 50,
+      "split": "held_out_instances",
+      "test_accuracy": 0.74755859375,
+      "test_accuracy_ci95": [
+        0.736328125,
+        0.75863037109375
+      ],
+      "train_accuracy": 0.7504883408546448
+    }
+  },
+  "evaluation_reuses_train": false,
+  "majority_chance": 0.5,
+  "n_test": 15360,
+  "n_test_instances": 6,
+  "n_train": 35840,
+  "n_train_instances": 14,
+  "permutation_mean": 0.5070494791666667,
+  "permutation_p_value": 0.2,
+  "permutation_std": 0.051878395698661754,
+  "permutation_trials": 50,
+  "split": "held_out_instances",
+  "test_accuracy": 0.5087890625,
+  "test_accuracy_ci95": [
+    0.5013671875,
+    0.516796875
+  ],
+  "train_accuracy": 0.5073660612106323
+}

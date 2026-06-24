@@ -1,0 +1,76 @@
+{
+  "class_counts": [
+    25600,
+    25600,
+    25600
+  ],
+  "classifier": "mlp",
+  "controls": {
+    "geometry_baseline": {
+      "class_counts": [
+        25600,
+        25600,
+        25600
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.3333333333333333,
+      "n_test": 23040,
+      "n_test_instances": 9,
+      "n_train": 53760,
+      "n_train_instances": 21,
+      "permutation_mean": 0.33100954861111115,
+      "permutation_p_value": 0.0,
+      "permutation_std": 0.011254002022276752,
+      "permutation_trials": 50,
+      "split": "held_out_instances",
+      "test_accuracy": 0.9015190972222222,
+      "test_accuracy_ci95": [
+        0.89765625,
+        0.9053819444444444
+      ],
+      "train_accuracy": 0.9250930547714233
+    },
+    "positive_control_phase": {
+      "class_counts": [
+        15360,
+        15360
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 9216,
+      "n_test_instances": 18,
+      "n_train": 21504,
+      "n_train_instances": 42,
+      "permutation_mean": 0.48490234375,
+      "permutation_p_value": 0.02,
+      "permutation_std": 0.15901178228271762,
+      "permutation_trials": 50,
+      "split": "held_out_instances",
+      "test_accuracy": 0.7496744791666666,
+      "test_accuracy_ci95": [
+        0.7404513888888888,
+        0.7580295138888888
+      ],
+      "train_accuracy": 0.7497209906578064
+    }
+  },
+  "evaluation_reuses_train": false,
+  "majority_chance": 0.3333333333333333,
+  "n_test": 23040,
+  "n_test_instances": 9,
+  "n_train": 53760,
+  "n_train_instances": 21,
+  "permutation_mean": 0.3272170138888888,
+  "permutation_p_value": 0.16,
+  "permutation_std": 0.028612738458304428,
+  "permutation_trials": 50,
+  "split": "held_out_instances",
+  "test_accuracy": 0.3341145833333333,
+  "test_accuracy_ci95": [
+    0.3280805121527778,
+    0.3399739583333333
+  ],
+  "train_accuracy": 0.33422619104385376
+}

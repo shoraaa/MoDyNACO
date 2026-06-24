@@ -459,8 +459,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Held-out dataset used by the final test.py --dataset run. Required.",
     )
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--members", type=int, default=4)
     parser.add_argument("--checkpoints", nargs="*", default=None, help="Existing single-head member checkpoints")

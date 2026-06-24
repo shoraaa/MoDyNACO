@@ -1,0 +1,92 @@
+{
+  "class_counts": [
+    25600,
+    25600
+  ],
+  "classifier": "mlp",
+  "confusion": [
+    [
+      7680,
+      0
+    ],
+    [
+      7680,
+      0
+    ]
+  ],
+  "controls": {
+    "geometry_baseline": {
+      "class_counts": [
+        25600,
+        25600
+      ],
+      "classifier": "mlp",
+      "confusion": [
+        [
+          7175,
+          505
+        ],
+        [
+          228,
+          7452
+        ]
+      ],
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 15360,
+      "n_test_instances": 6,
+      "n_train": 35840,
+      "n_train_instances": 14,
+      "permutation_mean": 0.5003424686193466,
+      "permutation_p_value": 0.0,
+      "permutation_std": 0.022496472047309105,
+      "permutation_trials": 50,
+      "split": "held_out_instances",
+      "test_accuracy": 0.9542317986488342,
+      "train_accuracy": 0.9542132019996643
+    },
+    "positive_control": {
+      "class_counts": [
+        25600,
+        25600
+      ],
+      "classifier": "mlp",
+      "confusion": [
+        [
+          1559,
+          6121
+        ],
+        [
+          39,
+          7641
+        ]
+      ],
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 15360,
+      "n_test_instances": 12,
+      "n_train": 35840,
+      "n_train_instances": 28,
+      "permutation_mean": 0.4923359578847885,
+      "permutation_p_value": 0.02,
+      "permutation_std": 0.07546781287198481,
+      "permutation_trials": 50,
+      "split": "held_out_instances",
+      "test_accuracy": 0.5994791984558105,
+      "train_accuracy": 0.6008928418159485
+    }
+  },
+  "evaluation_reuses_train": false,
+  "majority_chance": 0.5,
+  "n_test": 15360,
+  "n_test_instances": 6,
+  "n_train": 35840,
+  "n_train_instances": 14,
+  "permutation_mean": 0.4855677327513695,
+  "permutation_p_value": 0.58,
+  "permutation_std": 0.09327857138311639,
+  "permutation_trials": 50,
+  "split": "held_out_instances",
+  "test_accuracy": 0.5,
+  "train_accuracy": 0.5
+}

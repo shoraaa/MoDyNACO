@@ -1243,6 +1243,30 @@ def _allocation_ppo_loss(
     )
 
 
+def _allocation_hindsight_loss(
+    alloc_logits: torch.Tensor,
+    costs_by_head_history: List[List[torch.Tensor]],
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Supervised loss: cross-entropy toward the observed best head allocation."""
+    if not costs_by_head_history:
+        z = alloc_logits.new_tensor(0.0)
+        return z, z.detach()
+    num_heads = int(alloc_logits.numel())
+    head_scores = alloc_logits.new_zeros(num_heads)
+    for costs_by_head in costs_by_head_history:
+        step_scores = torch.stack([c.mean() for c in costs_by_head])
+        head_scores = head_scores + step_scores
+    head_scores = head_scores / len(costs_by_head_history)
+    hs_temp = max(float(getattr(args, "allocator_hindsight_temp", 1.0)), 1e-6)
+    target = torch.softmax(-head_scores / hs_temp, dim=0).detach()
+    alloc_temp = max(float(getattr(args, "allocator_temperature", 1.0)), 1e-6)
+    log_probs = torch.log_softmax(alloc_logits / alloc_temp, dim=0)
+    loss = -(target * log_probs).sum()
+    target_entropy = -(target * target.clamp_min(1e-12).log()).sum()
+    return loss, target_entropy.detach()
+
+
 def _multi_head_jensen_diversity(priors: torch.Tensor) -> torch.Tensor:
     """Jensen-to-mean head diversity over per-node sparse-edge distributions."""
     if priors.dim() != 3 or priors.shape[0] <= 1:
@@ -1788,6 +1812,10 @@ def train_instance_ppo(
                     )
                     if getattr(args, "log_best_head", False):
                         metrics.add_dict(_multi_head_js_diversity_metrics(prior_old))
+                    for h_idx in range(int(prior_old.shape[0])):
+                        head_prior = prior_old[h_idx]
+                        metrics.add(f"head{h_idx}/prior_mean", head_prior.mean().item())
+                        metrics.add(f"head{h_idx}/prior_std", head_prior.std().item())
                     prior_old_for_metrics = prior_old.mean(dim=0)
                 else:
                     prior_old = _model_to_prior(model, pyg_data, aco.n, aco.k, args)
@@ -2065,7 +2093,23 @@ def train_instance_ppo(
                 metrics.add("allocator_reward_std", float(raw_rewards.std(unbiased=False).item()))
                 metrics.add("allocator_adv_mean", float(rewards.mean().item()))
                 metrics.add("allocator_adv_std", float(rewards.std(unbiased=False).item()))
-            
+
+            hs_coef = float(getattr(args, "allocator_hindsight_coef", 0.0))
+            if (
+                _multi_head_enabled(args)
+                and _learned_router_enabled(args)
+                and hs_coef > 0
+                and costs_list
+            ):
+                hs_loss, hs_target_ent = _allocation_hindsight_loss(
+                    alloc_logits_new, costs_list, args,
+                )
+                scaled_hs_loss = hs_coef * hs_loss
+                all_losses.append(scaled_hs_loss)
+                total_loss_val_epoch += float(scaled_hs_loss.detach().item())
+                metrics.add("allocator_hindsight_loss", float(hs_loss.detach().item()))
+                metrics.add("allocator_hindsight_target_entropy", float(hs_target_ent.item()))
+
             if getattr(args, 'smallvram', False):
                 prior_new_base.backward(prior_new.grad)
             else:
@@ -3081,6 +3125,13 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Entropy bonus coefficient for learned ant allocation")
     parser.add_argument("--allocator_temperature", type=float, default=1.0,
                         help="Softmax temperature for learned ant allocation")
+    parser.add_argument("--alloc_mode", type=str, default="mlp",
+                        choices=["mlp", "mlp_meanstd"],
+                        help="Allocator architecture: mlp=original mean-pool, mlp_meanstd=mean+std pool")
+    parser.add_argument("--allocator_hindsight_coef", type=float, default=0.0,
+                        help="Coefficient for hindsight cross-entropy supervision of allocator (0=disabled)")
+    parser.add_argument("--allocator_hindsight_temp", type=float, default=1.0,
+                        help="Temperature for hindsight target distribution (lower=sharper toward best head)")
     parser.add_argument(
         "--head_input_transform",
         "--head-input-transform",
@@ -3257,6 +3308,10 @@ def build_model_name(args: argparse.Namespace) -> str:
                 name += f"_alcoef{float(getattr(args, 'allocator_loss_coef', 1.0)):g}"
                 name += f"_alent{float(getattr(args, 'allocator_entropy_coef', 0.01)):g}"
                 name += f"_alt{float(getattr(args, 'allocator_temperature', 1.0)):g}"
+                if str(getattr(args, "alloc_mode", "mlp")) != "mlp":
+                    name += f"_am{args.alloc_mode}"
+                if float(getattr(args, "allocator_hindsight_coef", 0.0)) > 0:
+                    name += f"_hs{float(args.allocator_hindsight_coef):g}"
             else:
                 name += f"_hra{float(getattr(args, 'head_router_alpha', 0.25)):g}"
         if _head_input_transform_mode(args) != "none":
@@ -3646,6 +3701,7 @@ def main(argv: Optional[List[str]] = None):
             head_decoder_type=args.head_decoder_type,
             head_adapter_init=args.head_adapter_init,
             head_adapter_init_std=args.head_adapter_init_std,
+            alloc_mode=getattr(args, "alloc_mode", "mlp"),
         )
         print(
             f"Using {args.head_decoder_type} multi-head decoder: heads={args.num_heads}, rank={args.lora_rank}, ant-group routing"

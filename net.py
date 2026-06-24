@@ -745,11 +745,13 @@ class MultiHeadNet(Net):
         head_adapter_init_std: float = 0.02,
         logit_net: bool = True,
         fixed_head_codes: bool = True,
+        alloc_mode: str = "mlp",
         **kwargs
     ):
         self.num_heads = num_heads
         self.head_zdim = head_zdim
         self.rank = rank
+        self.alloc_mode = str(alloc_mode or "mlp").lower()
         self.head_decoder_type = str(head_decoder_type or "lora").lower()
         if self.head_decoder_type in {"head_code", "head-code", "residual"}:
             self.head_decoder_type = "lowrank"
@@ -838,8 +840,9 @@ class MultiHeadNet(Net):
                 init_std=head_adapter_init_std,
                 freeze_base=freeze_lora_base,
             )
+        alloc_in = 2 * units if self.alloc_mode == "mlp_meanstd" else units
         self.alloc_net = nn.Sequential(
-            nn.Linear(units, units),
+            nn.Linear(alloc_in, units),
             nn.SiLU(),
             nn.Linear(units, num_heads),
         )
@@ -856,7 +859,11 @@ class MultiHeadNet(Net):
         x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
         emb = self.emb_net(x, edge_index, edge_attr)
         prior = self._decode_heads(emb)
-        alloc_logits = self.alloc_net(emb.mean(dim=0))
+        if self.alloc_mode == "mlp_meanstd":
+            alloc_input = torch.cat([emb.mean(dim=0), emb.std(dim=0)], dim=0)
+        else:
+            alloc_input = emb.mean(dim=0)
+        alloc_logits = self.alloc_net(alloc_input)
         return prior, alloc_logits
 
     def forward(self, pyg):
@@ -920,6 +927,19 @@ def load_multihead_state_dict(model: nn.Module, state_dict: dict):
         for old_key, new_key in mapping.items():
             if old_key in migrated:
                 migrated[new_key] = migrated[old_key]
+
+    # Migrate alloc_net when switching to mlp_meanstd from an old checkpoint
+    alloc_mode = getattr(model, "alloc_mode", "mlp")
+    alloc_w_key = "alloc_net.0.weight"
+    if (
+        alloc_mode == "mlp_meanstd"
+        and alloc_w_key in migrated
+        and migrated[alloc_w_key].shape[1] != 2 * model.emb_net.units
+    ):
+        alloc_keys = [k for k in list(migrated) if k.startswith("alloc_net.")]
+        for k in alloc_keys:
+            del migrated[k]
+        print("Migrating checkpoint: dropped old alloc_net weights for mlp_meanstd mode")
 
     is_current_lora = "par_net_heu.out.lora_A" in migrated
     if is_current_lora:

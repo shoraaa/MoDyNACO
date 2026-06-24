@@ -1,0 +1,202 @@
+{
+  "behavior_classifier": {
+    "chi2_p": 0.0075877729964859,
+    "class_counts": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "classifier": "mlp",
+    "cramers_v": 0.04162257694562061,
+    "evaluation_reuses_train": false,
+    "majority_chance": 0.125,
+    "mean_win_step": [
+      4.502717391304348,
+      4.597911227154047,
+      4.58312020460358,
+      4.591916558018253,
+      4.570666666666667,
+      4.331536388140162,
+      4.3039772727272725,
+      4.49667994687915
+    ],
+    "n_test": 480,
+    "n_test_instances": 188,
+    "n_train": 1120,
+    "n_train_instances": 200,
+    "split": "held_out_instances",
+    "test_accuracy": 0.8041666666666667,
+    "test_accuracy_ci95": [
+      0.7666666666666667,
+      0.8375520833333331
+    ],
+    "train_accuracy": 0.8866071701049805,
+    "win_matrix": [
+      [
+        76,
+        86,
+        80,
+        75,
+        74,
+        78,
+        60,
+        71
+      ],
+      [
+        57,
+        72,
+        79,
+        71,
+        74,
+        89,
+        81,
+        77
+      ],
+      [
+        86,
+        55,
+        83,
+        81,
+        68,
+        66,
+        83,
+        78
+      ],
+      [
+        76,
+        65,
+        69,
+        75,
+        79,
+        82,
+        74,
+        80
+      ],
+      [
+        81,
+        87,
+        65,
+        79,
+        61,
+        75,
+        81,
+        71
+      ],
+      [
+        69,
+        86,
+        71,
+        69,
+        88,
+        79,
+        69,
+        69
+      ],
+      [
+        67,
+        79,
+        77,
+        67,
+        82,
+        66,
+        78,
+        84
+      ],
+      [
+        82,
+        82,
+        94,
+        84,
+        63,
+        65,
+        58,
+        72
+      ],
+      [
+        66,
+        67,
+        79,
+        81,
+        85,
+        77,
+        62,
+        83
+      ],
+      [
+        76,
+        87,
+        85,
+        85,
+        76,
+        65,
+        58,
+        68
+      ]
+    ]
+  },
+  "class_counts": [
+    25600,
+    25600
+  ],
+  "classifier": "mlp",
+  "controls": {
+    "geometry_baseline": {
+      "class_counts": [
+        25600,
+        25600
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 15360,
+      "n_test_instances": 6,
+      "n_train": 35840,
+      "n_train_instances": 14,
+      "split": "held_out_instances",
+      "test_accuracy": 0.8131510416666666,
+      "test_accuracy_ci95": [
+        0.8067692057291667,
+        0.8193375651041667
+      ],
+      "train_accuracy": 0.8451172113418579
+    },
+    "positive_control_phase": {
+      "class_counts": [
+        10240,
+        10240
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 6144,
+      "n_test_instances": 12,
+      "n_train": 14336,
+      "n_train_instances": 28,
+      "split": "held_out_instances",
+      "test_accuracy": 0.7478841145833334,
+      "test_accuracy_ci95": [
+        0.7369750976562499,
+        0.7589518229166666
+      ],
+      "train_accuracy": 0.7502790689468384
+    }
+  },
+  "evaluation_reuses_train": false,
+  "majority_chance": 0.5,
+  "n_test": 15360,
+  "n_test_instances": 6,
+  "n_train": 35840,
+  "n_train_instances": 14,
+  "split": "held_out_instances",
+  "test_accuracy": 0.507421875,
+  "test_accuracy_ci95": [
+    0.49980305989583335,
+    0.5151057942708334
+  ],
+  "train_accuracy": 0.5077846050262451
+}

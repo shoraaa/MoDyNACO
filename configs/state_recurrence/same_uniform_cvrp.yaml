@@ -1,0 +1,10 @@
+compare:
+  - uniform-a
+  - uniform-b
+domain_specs:
+  uniform-a:
+    kind: uniform
+    n: 1000
+  uniform-b:
+    kind: uniform
+    n: 1000

@@ -1,0 +1,88 @@
+{
+  "behavior_classifier": {
+    "class_counts": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "classifier": "mlp",
+    "evaluation_reuses_train": false,
+    "majority_chance": 0.125,
+    "n_test": 480,
+    "n_test_instances": 188,
+    "n_train": 1120,
+    "n_train_instances": 200,
+    "split": "held_out_instances",
+    "test_accuracy": 0.8083333333333333,
+    "test_accuracy_ci95": [
+      0.7729166666666667,
+      0.84375
+    ],
+    "train_accuracy": 0.8928571343421936
+  },
+  "class_counts": [
+    25600,
+    25600
+  ],
+  "classifier": "mlp",
+  "controls": {
+    "geometry_baseline": {
+      "class_counts": [
+        25600,
+        25600
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 15360,
+      "n_test_instances": 6,
+      "n_train": 35840,
+      "n_train_instances": 14,
+      "split": "held_out_instances",
+      "test_accuracy": 0.5,
+      "test_accuracy_ci95": [
+        0.49231608072916666,
+        0.5081380208333334
+      ],
+      "train_accuracy": 0.5
+    },
+    "positive_control_phase": {
+      "class_counts": [
+        10240,
+        10240
+      ],
+      "classifier": "mlp",
+      "evaluation_reuses_train": false,
+      "majority_chance": 0.5,
+      "n_test": 6144,
+      "n_test_instances": 12,
+      "n_train": 14336,
+      "n_train_instances": 28,
+      "split": "held_out_instances",
+      "test_accuracy": 0.7478841145833334,
+      "test_accuracy_ci95": [
+        0.7369750976562499,
+        0.7589518229166666
+      ],
+      "train_accuracy": 0.7502790689468384
+    }
+  },
+  "evaluation_reuses_train": false,
+  "majority_chance": 0.5,
+  "n_test": 15360,
+  "n_test_instances": 6,
+  "n_train": 35840,
+  "n_train_instances": 14,
+  "split": "held_out_instances",
+  "test_accuracy": 0.5073567708333333,
+  "test_accuracy_ci95": [
+    0.4996728515625,
+    0.515234375
+  ],
+  "train_accuracy": 0.5075334906578064
+}

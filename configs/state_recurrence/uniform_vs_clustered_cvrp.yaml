@@ -1,0 +1,11 @@
+compare:
+  - uniform-1k
+  - clustered-16
+domain_specs:
+  uniform-1k:
+    kind: uniform
+    n: 1000
+  clustered-16:
+    kind: clustered
+    n: 1000
+    clusters: 16
