@@ -2618,6 +2618,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                 prior_sample_mat = prior_mat.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy()
 
             for mini_t in range(args.mini_H):
+                mini_iter_start = time.time()
                 if runtime_limit is not None and (time.time() - t_start_total_infer) >= runtime_limit:
                     timed_out = True
                     break
@@ -2750,6 +2751,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     now = time.time()
                     elapsed_s = now - t_start_total_infer
                     outer_elapsed_s = now - outer_step_start
+                    mini_iter_s = now - mini_iter_start
                     outer_step_done = int(mini_t == int(args.mini_H) - 1)
                     iter_stats.append({
                         "iter": int(iter_idx),
@@ -2757,6 +2759,7 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                         "mini_t": int(mini_t),
                         "elapsed_s": float(elapsed_s),
                         "outer_elapsed_s": float(outer_elapsed_s),
+                        "mini_iter_s": float(mini_iter_s),
                         "outer_step_done": outer_step_done,
                         "mean": float(avg_last),
                         "best": float(best_seen),

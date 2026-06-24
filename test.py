@@ -1541,6 +1541,7 @@ def main(argv: Optional[List[str]] = None):
                     "mini_t",
                     "elapsed_s",
                     "outer_elapsed_s",
+                    "mini_iter_s",
                     "outer_step_done",
                     "mean",
                     "best",
