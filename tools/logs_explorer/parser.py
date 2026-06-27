@@ -113,7 +113,7 @@ def discover_runs(logs_dir: str | Path) -> list[RunMeta]:
 def parse_config(checkpoint_or_stem: str | Path | None) -> RunConfig:
     raw = "" if checkpoint_or_stem is None else str(checkpoint_or_stem)
     checkpoint_raw, test_stem = raw.split("|", 1) if "|" in raw else (raw, raw)
-    stem = Path(checkpoint_raw).stem if checkpoint_raw else ""
+    stem = _logical_stem(checkpoint_raw) if checkpoint_raw else ""
     if stem.endswith("_best") or stem.endswith("_last"):
         model_stem = stem.rsplit("_", 1)[0]
     else:
@@ -166,7 +166,10 @@ def parse_config(checkpoint_or_stem: str | Path | None) -> RunConfig:
         elif (match := re.fullmatch(r"mh(\d+)", token)):
             values["num_heads"] = int(match.group(1))
         elif token in DECODER_TYPES:
-            values["decoder_type"] = token
+            if values.get("decoder_type") == "polynet" and token != "polynet":
+                values["extra_flags"].append(token)
+            else:
+                values["decoder_type"] = token
         elif token == "deep" and next_token == "lora":
             values["decoder_type"] = "deep_lora"
             i += 1
@@ -328,6 +331,12 @@ def _split_csv_stem(stem: str) -> tuple[str, str]:
         if stem.endswith(suffix):
             return stem[: -len(suffix)], kind
     return stem, "csv"
+
+
+def _logical_stem(value: str) -> str:
+    if value.endswith((".pt", ".txt", ".csv")):
+        return Path(value).stem
+    return Path(value).name
 
 
 def _checkpoint_or_stem(stem: str, summary_csv: str | None) -> str:
