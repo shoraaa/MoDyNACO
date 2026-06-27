@@ -1,4 +1,5 @@
-# DyNACO Configuration: CVRP-1000 with PPO
+# DyNACO Configuration: CVRP-1000 with PPO, multi-head WITHOUT dynamic state (ablation)
+# Ablation: validates "state-aware representation enables generalization beyond training distribution"
 problem: cvrp
 n_node: 1000
 k_sparse: 32
@@ -16,23 +17,28 @@ min_new_edges: 12
 ablation_pheromone_features: false
 ablation_incumbent_features: false
 no_logit_net: false
-no_dynamic_feats: false
+no_dynamic_feats: true
 edge_feature_set: compact3
 
 val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
 val_size: 16
 baseline: none
 
-# multi_head: true
-# num_heads: 8
-# head_zdim: 128
+multi_head: true
+num_heads: 8
+head_zdim: 128
+head_router: learned
 
 # Experiment metadata
-experiment_name: cvrp_n1000_lr_100
-description: "Baseline CVRP-1K with PPO, 3 dynamic features"
+experiment_name: cvrp_n1000_deep_100_no_dynamic
+description: "Ablation: multi-head CVRP-1K without dynamic state features"
 author: "DyNACO Team"
 
 # W&B
 use_wandb: true
 wandb_project: "dyanco"
 wandb_entity: null
+
+head_decoder_type: deep_lora
+lora_rank: 8
+head_adapter_init: random

@@ -1,0 +1,44 @@
+# DyNACO Configuration: TSP-1000 with PPO, multi-head WITHOUT dynamic state (ablation)
+# Ablation: validates "state-aware representation enables generalization beyond training distribution"
+problem: tsp
+n_node: 1000
+k_sparse: 32
+n_ants: 100
+H: 10
+mini_H: 100
+epochs: 30
+algo: ppo
+rho: 0.5
+lr: 0.000005
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+min_new_edges: 12
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: true
+edge_feature_set: compact3
+
+val_dataset: data/TSP/data/validation_set/validation_TSP1000_n128.txt
+val_size: 16
+baseline: none
+
+multi_head: true
+num_heads: 8
+head_zdim: 128
+head_router: learned
+
+# Experiment metadata
+experiment_name: tsp_n1000_deep_100_no_dynamic
+description: "Ablation: multi-head TSP-1K without dynamic state features"
+author: "DyNACO Team"
+
+# W&B
+use_wandb: true
+wandb_project: "dyanco"
+wandb_entity: null
+
+head_decoder_type: deep_lora
+lora_rank: 8
+head_adapter_init: random
