@@ -1473,6 +1473,14 @@ def _copy_single_head_weights_into_multi_head(model: Net, checkpoint_path: str, 
                 par.out.base.weight.copy_(state_dict[f"{single_prefix}2.weight"])
                 par.out.base.bias.copy_(state_dict[f"{single_prefix}2.bias"])
                 par.out.lora_B.zero_()
+            elif decoder_type == "polynet":
+                for idx in range(2):
+                    par.hidden[idx].weight.copy_(state_dict[f"{single_prefix}{idx}.weight"])
+                    par.hidden[idx].bias.copy_(state_dict[f"{single_prefix}{idx}.bias"])
+                par.out.weight.copy_(state_dict[f"{single_prefix}2.weight"])
+                par.out.bias.copy_(state_dict[f"{single_prefix}2.bias"])
+                par.poly_residual[-1].weight.zero_()
+                par.poly_residual[-1].bias.zero_()
             elif decoder_type == "film":
                 par.input.weight.copy_(state_dict[f"{single_prefix}0.weight"])
                 par.input.bias.copy_(state_dict[f"{single_prefix}0.bias"])
@@ -3091,10 +3099,10 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--num_heads", type=int, default=1,
                         help="Number of prediction heads; values >1 enable multi-head training")
     parser.add_argument("--head_zdim", type=int, default=16,
-                        help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
+                        help="Head-code width for code-conditioned decoder variants")
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
-                        choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank"], default="lora",
-                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent full decoders, or legacy low-rank residual")
+                        choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank", "polynet"], default="lora",
+                        help="Multi-head decoder type: PolyNet residual block, LoRA variants, FiLM, independent full decoders, or legacy low-rank residual")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
@@ -3704,7 +3712,8 @@ def main(argv: Optional[List[str]] = None):
             alloc_mode=getattr(args, "alloc_mode", "mlp"),
         )
         print(
-            f"Using {args.head_decoder_type} multi-head decoder: heads={args.num_heads}, rank={args.lora_rank}, ant-group routing"
+            f"Using shared encoder + {args.head_decoder_type} multi-head decoder: "
+            f"heads={args.num_heads}, rank={args.lora_rank}, ant-group routing"
         )
 
     net_model = model_cls(

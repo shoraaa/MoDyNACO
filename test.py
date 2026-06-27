@@ -687,10 +687,10 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--num_heads", type=int, default=1,
                         help="Number of prediction heads; values >1 enable multi-head model loading")
     parser.add_argument("--head_zdim", type=int, default=16,
-                        help="Head-code width for --head_decoder_type lowrank; unused by the LoRA decoder")
+                        help="Head-code width for code-conditioned decoder variants")
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
-                        choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank"], default="lora",
-                        help="Multi-head decoder type: final-layer LoRA, hidden-layer LoRA, FiLM, independent full decoders, or legacy low-rank residual")
+                        choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank", "polynet"], default="lora",
+                        help="Multi-head decoder type: PolyNet residual block, LoRA variants, FiLM, independent full decoders, or legacy low-rank residual")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,

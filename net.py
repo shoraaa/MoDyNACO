@@ -729,8 +729,71 @@ class ParNetMultiDecoder(nn.Module):
 ParNetMultiMLP = ParNetMultiDecoder
 
 
+def make_polynet_codes(num_heads: int, zdim: int) -> torch.Tensor:
+    """Create fixed, unique binary strategy codes for PolyNet heads."""
+    if num_heads <= 0:
+        raise ValueError("num_heads must be positive")
+    if zdim <= 0:
+        raise ValueError("head_zdim must be positive")
+    bits = max(1, math.ceil(math.log2(max(num_heads, 2))))
+    if zdim < bits:
+        raise ValueError(f"head_zdim={zdim} is too small for {num_heads} unique binary codes; need at least {bits}")
+    codes = torch.zeros(num_heads, zdim)
+    for head_idx in range(num_heads):
+        for bit_idx in range(bits):
+            codes[head_idx, bit_idx] = float((head_idx >> bit_idx) & 1)
+    return codes
+
+
+class ParNetPolyNet(nn.Module):
+    """Single shared decoder with a PolyNet-style code-conditioned residual block."""
+
+    def __init__(
+        self,
+        depth: int = 3,
+        units: int = 32,
+        zdim: int = 16,
+        poly_units: int = 256,
+        act_fn: str = 'silu',
+        logit_net: bool = True,
+    ):
+        super().__init__()
+        if depth < 2:
+            raise ValueError("ParNetPolyNet requires depth >= 2")
+        self.units = units
+        self.zdim = zdim
+        self.poly_units = poly_units
+        self.act_fn = getattr(F, act_fn)
+        self.sigmoid_output = not logit_net
+        self.hidden = nn.ModuleList([
+            nn.Linear(units, units) for _ in range(depth - 1)
+        ])
+        self.poly_residual = nn.Sequential(
+            nn.Linear(units + zdim, poly_units),
+            nn.ReLU(),
+            nn.Linear(poly_units, units),
+        )
+        self.out = nn.Linear(units, 1)
+        nn.init.zeros_(self.poly_residual[-1].weight)
+        nn.init.zeros_(self.poly_residual[-1].bias)
+
+    def forward(self, emb, head_codes):
+        x = emb
+        for layer in self.hidden:
+            x = self.act_fn(layer(x))
+        e = x.shape[0]
+        h = head_codes.shape[0]
+        xh = x.unsqueeze(1).expand(e, h, self.units)
+        zh = head_codes.unsqueeze(0).expand(e, h, self.zdim)
+        xh = xh + self.poly_residual(torch.cat([xh, zh], dim=-1))
+        out = self.out(xh).squeeze(-1)
+        if self.sigmoid_output:
+            out = torch.sigmoid(out)
+        return out
+
+
 class MultiHeadNet(Net):
-    """DyNACO edge-prior model with a shared trunk and multi-head LoRA decoder."""
+    """DyNACO edge-prior model with a shared encoder and multi-head decoder."""
 
     def __init__(
         self,
@@ -763,7 +826,9 @@ class MultiHeadNet(Net):
             self.head_decoder_type = "multi_decoder"
         if self.head_decoder_type == "per_head_mlp":
             self.head_decoder_type = "multi_decoder"
-        valid_decoders = {"lora", "deep_lora", "film", "multi_decoder", "lowrank"}
+        if self.head_decoder_type in {"poly-net", "poly_net", "code_decoder", "code_conditioned_decoder"}:
+            self.head_decoder_type = "polynet"
+        valid_decoders = {"lora", "deep_lora", "film", "multi_decoder", "lowrank", "polynet"}
         if self.head_decoder_type not in valid_decoders:
             raise ValueError(f"head_decoder_type must be one of {sorted(valid_decoders)}")
         super().__init__(*args, logit_net=True, **kwargs)
@@ -785,6 +850,14 @@ class MultiHeadNet(Net):
                 rank=rank,
                 logit_net=logit_net,
                 zero_init=True,
+            )
+        elif self.head_decoder_type == "polynet":
+            codes = make_polynet_codes(num_heads, head_zdim)
+            self.register_buffer("head_codes", codes)
+            self.par_net_heu = ParNetPolyNet(
+                units=units,
+                zdim=head_zdim,
+                logit_net=logit_net,
             )
         elif self.head_decoder_type == "film":
             adapter_init = str(head_adapter_init or "anchored").lower()
@@ -850,20 +923,21 @@ class MultiHeadNet(Net):
         nn.init.zeros_(self.alloc_net[-1].bias)
 
     def _decode_heads(self, emb):
-        if self.head_decoder_type in {"lowrank", "film"}:
+        if self.head_decoder_type in {"lowrank", "film", "polynet"}:
             return self.par_net_heu(emb, self.head_codes)
         return self.par_net_heu(emb)
+
+    def _alloc_input(self, emb):
+        if self.alloc_mode == "mlp_meanstd":
+            return torch.cat([emb.mean(dim=0), emb.std(dim=0)], dim=0)
+        return emb.mean(dim=0)
 
     def forward_with_alloc(self, pyg):
         pyg = move_pyg_to_module_device(self, pyg)
         x, edge_index, edge_attr = pyg.x, pyg.edge_index, pyg.edge_attr
         emb = self.emb_net(x, edge_index, edge_attr)
         prior = self._decode_heads(emb)
-        if self.alloc_mode == "mlp_meanstd":
-            alloc_input = torch.cat([emb.mean(dim=0), emb.std(dim=0)], dim=0)
-        else:
-            alloc_input = emb.mean(dim=0)
-        alloc_logits = self.alloc_net(alloc_input)
+        alloc_logits = self.alloc_net(self._alloc_input(emb))
         return prior, alloc_logits
 
     def forward(self, pyg):
