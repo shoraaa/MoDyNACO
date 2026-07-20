@@ -53,7 +53,8 @@ To scale to 100K nodes, D2NACO pairs the policy with a perturbation-based ACO ba
 # Create environment and install dependencies
 uv sync
 
-# Build the C++ backend (perturbation-based ACO + SRR)
+# Build the C++ backends: faco_opt (perturbation-based ACO + SRR for TSP/CVRP)
+# and alphaant_tsp_aco_cpp (extended-problem ACO for BPP/MKP/OP)
 cd src
 uv run python setup.py build_ext --inplace
 cd ..
@@ -62,7 +63,8 @@ cd ..
 ### Verify installation
 
 ```bash
-uv run python -c "import faco_opt; print('C++ backend OK')"
+uv run python -c "import faco_opt; print('faco_opt OK')"
+uv run python -c "import faco; faco.load_alphaant_cpp_module(); print('extended backend OK')"
 uv run python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.cuda.is_available()}')"
 ```
 
@@ -217,7 +219,8 @@ Key evaluation arguments:
 ├── extended_common.py  # Shared utilities for BPP/MKP/OP
 ├── baselines.py        # Baseline solvers
 ├── utils.py            # Utilities, metrics, analysis tools
-├── src/                # C++ perturbation-based ACO backend + pybind11 bindings
+├── src/                # C++ backends: faco_opt (mfaco_train.cpp/binding.cpp) +
+│                       #   extended ACO (aco.cpp/aco_more.inc) + pybind11 bindings
 ├── configs/            # YAML experiment configs (train / eval / ablation / extended)
 ├── data/               # Benchmark datasets
 ├── scripts/            # Experiment and analysis scripts

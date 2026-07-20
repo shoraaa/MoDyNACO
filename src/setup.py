@@ -25,10 +25,23 @@ ext_modules = [
         extra_link_args=extra_link_args,
         language='c++',
     ),
+    # Extended-problem ACO backend (TSP/CVRP/VRPTW + BPP/MKP/OP).
+    # aco.cpp #includes aco_more.inc from this directory.
+    Extension(
+        "alphaant_tsp_aco_cpp",
+        ["aco.cpp"],
+        include_dirs=[
+            pybind11.get_include(),
+            ".",
+        ],
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+        language='c++',
+    ),
 ]
 
 setup(
-    name="faco_opt",
+    name="dynaco_backends",
     version="1.0.0",
     ext_modules=ext_modules,
 )

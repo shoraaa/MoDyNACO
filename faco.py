@@ -51,31 +51,52 @@ except ImportError:
             "C++ backend 'faco_opt' not found. Please build the C++ extension in src/."
         )
 
-# Import extended C++ backend utilities
-try:
-    from cpp_aco_wrapper import (
-        load_alphaant_cpp_module,
-        to_numpy_matrix,
-        to_numpy_vector,
-        trace_paths_to_tensor,
-        fresh_seed,
-    )
-except ImportError:
-    # Define stubs for when the extended backend is not available
-    def load_alphaant_cpp_module():
+# Extended-problem C++ backend (BPP / MKP / OP). The sources live in src/
+# (aco.cpp + aco_more.inc) and are compiled into `alphaant_tsp_aco_cpp` by
+# src/setup.py alongside faco_opt.
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def load_alphaant_cpp_module():
+    """Import the compiled extended-problem ACO backend."""
+    try:
+        import alphaant_tsp_aco_cpp
+    except ImportError as exc:
         raise ImportError(
-            "C++ backend 'cpp_aco_wrapper' not found. "
-            "Please ensure the AlphaAnt C++ extensions are built and in PYTHONPATH."
-        )
-    def trace_paths_to_tensor(trace, device):
-        return torch.zeros(0, device=device, dtype=torch.long)
-    def to_numpy_matrix(x):
-        return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
-    def to_numpy_vector(x):
-        return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
-    def fresh_seed(seed):
-        import random
-        return random.randint(0, 2**31-1) if seed is None else seed
+            "C++ backend 'alphaant_tsp_aco_cpp' not found. "
+            "Build the extensions in src/ with "
+            "`python setup.py build_ext --inplace`."
+        ) from exc
+    return alphaant_tsp_aco_cpp
+
+
+def to_numpy_matrix(tensor):
+    """Convert a torch tensor to a contiguous float64 numpy matrix."""
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach().to(device="cpu", dtype=torch.float64).contiguous().numpy()
+    return np.ascontiguousarray(tensor, dtype=np.float64)
+
+
+def to_numpy_vector(tensor):
+    """Convert a torch tensor to a contiguous float64 numpy vector."""
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach().to(device="cpu", dtype=torch.float64).contiguous().numpy()
+    return np.ascontiguousarray(tensor, dtype=np.float64)
+
+
+def trace_paths_to_tensor(trace, device):
+    """Convert a C++ trace object to a torch long tensor of paths."""
+    return torch.as_tensor(
+        np.asarray(trace.paths_numpy(), dtype=np.int64), device=device, dtype=torch.long
+    )
+
+
+def fresh_seed(seed):
+    """Return a valid integer seed, generating a fresh one when seed is None."""
+    if seed is not None:
+        return int(seed)
+    return int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
 
 # Constants
 EPS = 1e-10
