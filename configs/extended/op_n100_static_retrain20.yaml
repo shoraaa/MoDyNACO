@@ -1,0 +1,40 @@
+# Reconstructed single-head static-prior retraining config for OP-100.
+problem: op
+n_node: 100
+k_sparse: 32
+n_ants: 100
+H: 5
+mini_H: 5
+epochs: 20
+steps_per_epoch: 32
+aco_iters_per_sample: 20
+rho: 0.9
+alpha: 1.0
+beta: 1.0
+lr: 0.0003
+gamma: 1.0
+min_gamma: 0.0
+warmup: 0
+train_anneal: false
+static_prior: true
+no_dynamic_feats: false
+no_logit_net: false
+grad_checkpointing: false
+multi_head: false
+device: cuda:0
+seed: 1234
+save_dir: checkpoints_extended/static_retrain20
+save_interval: 1
+
+# OP-specific
+max_len: 4.0
+
+# Experiment metadata
+experiment_name: op_n100_static_retrain20
+description: "DeepACO-scale OP-100 static-prior single-head retraining, max_len 4.0, 100 ants, 20 epochs x 32 steps"
+author: "DyNACO Team"
+
+# W&B
+use_wandb: true
+wandb_project: "dyanco"
+wandb_entity: null

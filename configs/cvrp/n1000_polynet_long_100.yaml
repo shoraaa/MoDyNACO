@@ -28,6 +28,7 @@ num_heads: 8
 head_zdim: 128
 head_router: static
 head_decoder_type: polynet
+poly_units: 64
 
 # Experiment metadata
 experiment_name: cvrp_n1000_polynet_long_100

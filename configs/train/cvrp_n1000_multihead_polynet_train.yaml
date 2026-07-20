@@ -36,6 +36,7 @@ edge_feature_set: compact3
 multi_head: true
 num_heads: 4
 head_zdim: 16
+poly_units: 64
 
 val_dataset: data/CVRP/data/validation_set/validation_cvrp1000_n128_C250.txt
 val_size: 16

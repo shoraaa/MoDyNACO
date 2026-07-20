@@ -1,0 +1,39 @@
+# DyNACO Configuration: MKP-100 with Multi-Head Deep LoRA
+problem: mkp
+n_node: 100
+k_sparse: 32
+n_ants: 20
+H: 5
+mini_H: 5
+epochs: 20
+rho: 0.9
+lr: 0.0003
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+
+# MKP-specific
+m: 5
+
+# Multi-head deep LoRA
+multi_head: true
+num_heads: 8
+head_zdim: 128
+head_router: static
+head_loss_mode: winner
+head_decoder_type: deep_lora
+lora_rank: 8
+head_adapter_init: random
+
+# Experiment metadata
+experiment_name: mkp_n100_deep_lora
+description: "MKP-100 multi-head deep LoRA REINFORCE"
+
+# W&B
+use_wandb: true
+wandb_project: "dyanco"
+wandb_entity: null

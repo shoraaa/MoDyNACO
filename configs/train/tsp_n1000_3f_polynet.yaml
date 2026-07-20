@@ -38,6 +38,7 @@ grad_checkpointing: false
 multi_head: true
 num_heads: 4
 head_zdim: 16
+poly_units: 64
 
 # Adaptive ant routing
 head_router: ema

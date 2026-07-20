@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
                         help="dynamic classifies only pheromone/incumbent channels; full classifies the requested representation")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Required for --representation embedding")
+    parser.add_argument("--model-input-mode", choices=["auto", "dynamic", "static"], default="auto",
+                        help="Guidance-model input for behavior diagnostics: auto follows checkpoint no_dynamic_feats.")
     parser.add_argument("--state-level", choices=["behavior", "graph", "edge", "trajectory"], default="graph",
                         help="behavior uses fixed-bin dynamic summaries; graph pools rows; edge samples edge rows; trajectory summarises per-instance search dynamics across all H steps")
     parser.add_argument("--edge-samples-per-state", type=int, default=256)
@@ -344,6 +346,10 @@ def load_embedding_model(args: argparse.Namespace, edge_feats: int) -> torch.nn.
     ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
     state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+    if args.model_input_mode == "auto":
+        args.model_input_dynamic = not bool(config.get("no_dynamic_feats", False))
+    else:
+        args.model_input_dynamic = args.model_input_mode == "dynamic"
     feats, ckpt_edge_feats = infer_model_shape(state_dict, edge_feats)
     if ckpt_edge_feats != edge_feats:
         raise ValueError(
@@ -386,6 +392,21 @@ def build_state_tensor(aco: Any, instance: Any, args: argparse.Namespace) -> Any
         ablation_incumbent=args.ablation_incumbent_features,
         edge_feature_set=args.edge_feature_set,
         dynamic=True,
+    )
+    if args.problem == "tsp":
+        return utils.build_pyg_data_tsp(aco, instance, args.device, **kwargs)
+    if args.problem == "cvrp":
+        coords, demand, _ = instance
+        return utils.build_pyg_data_cvrp(aco, coords, demand, args.device, **kwargs)
+    raise ValueError(f"Unsupported problem: {args.problem}")
+
+
+def build_model_tensor(aco: Any, instance: Any, args: argparse.Namespace) -> Any:
+    kwargs = dict(
+        ablation_pheromone=args.ablation_pheromone_features,
+        ablation_incumbent=args.ablation_incumbent_features,
+        edge_feature_set=args.edge_feature_set,
+        dynamic=bool(getattr(args, "model_input_dynamic", True)),
     )
     if args.problem == "tsp":
         return utils.build_pyg_data_tsp(aco, instance, args.device, **kwargs)
@@ -737,26 +758,30 @@ def collect_states(
     return x, rows, x_geo
 
 
-def _head_of_ant(ant_idx: int, head_counts: List[int]) -> int:
-    cumul = 0
-    for h, cnt in enumerate(head_counts):
-        cumul += cnt
-        if ant_idx < cumul:
-            return h
-    return len(head_counts) - 1
+def _head_mean_costs(costs: Any, head_counts: List[int]) -> np.ndarray:
+    costs_np = np.asarray(costs, dtype=np.float32)
+    split_points = np.cumsum(head_counts, dtype=np.int64)[:-1]
+    return np.asarray([float(vals.mean()) for vals in np.split(costs_np, split_points)], dtype=np.float32)
+
+
+def _column_cosine(a: torch.Tensor, b: torch.Tensor) -> np.ndarray:
+    a = a.float()
+    b = b.float()
+    denom = a.norm(dim=0).clamp_min(1e-8) * b.norm(dim=0).clamp_min(1e-8)
+    return ((a * b).sum(dim=0) / denom).cpu().numpy()
 
 
 def collect_behavior_data(
     args: argparse.Namespace,
     model: torch.nn.Module,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
-    """Collect per-head guidance fields, per-step wins, and pairwise divergence.
+    """Collect per-head guidance fields, per-step selections, and pairwise divergence.
 
     Returns (x, y_head, groups, win_matrix, divergence) where
       x          – (N, 5) pooled head-column vectors for behavior classification,
       y_head     – head index label per row of x,
       groups     – instance group tag per row of x,
-      win_matrix – (H, num_heads) counts of best-ant attribution per macro-step,
+      win_matrix – (H, num_heads) counts of lowest-mean-cost head selections per macro-step,
       divergence – dict with cosine/top-K overlap matrices and scalar summaries.
     """
     model.eval()
@@ -768,6 +793,9 @@ def collect_behavior_data(
     cos_sum: Optional[np.ndarray] = None     # (num_heads, num_heads) running sum
     topk_sum: Optional[np.ndarray] = None    # (num_heads, num_heads) running sum
     n_snapshots = 0
+    temporal_adjacent: List[np.ndarray] = []
+    temporal_endpoint: List[np.ndarray] = []
+    model_input_step_max_abs: List[float] = []
 
     for domain_idx, domain in enumerate(args.domains):
         for inst_idx in range(args.instances_per_domain):
@@ -791,10 +819,14 @@ def collect_behavior_data(
             else:
                 norm_instance = (norm_coords, instance[1], instance[2])
 
+            prev_logits: Optional[torch.Tensor] = None
+            first_logits: Optional[torch.Tensor] = None
+            prev_edge_attr: Optional[torch.Tensor] = None
             for outer in range(args.H):
-                pyg = build_state_tensor(aco, norm_instance, args)
+                pyg = build_model_tensor(aco, norm_instance, args)
                 with torch.no_grad():
                     pyg = net.move_pyg_to_module_device(model, pyg)
+                    edge_attr_for_audit = pyg.edge_attr.detach().float().cpu()
                     emb = model.emb_net(pyg.x, pyg.edge_index, pyg.edge_attr)
                     head_logits = model._decode_heads(emb)  # (E, H)
                     prior = model_prior_from_pyg(model, pyg, aco)
@@ -805,6 +837,16 @@ def collect_behavior_data(
 
                 # --- pairwise head divergence ---
                 logits_f = head_logits.detach().float()  # (E, H)
+                if prev_edge_attr is not None:
+                    model_input_step_max_abs.append(float((edge_attr_for_audit - prev_edge_attr).abs().max().item()))
+                prev_edge_attr = edge_attr_for_audit
+
+                logits_cpu = logits_f.cpu()
+                if first_logits is None:
+                    first_logits = logits_cpu
+                if prev_logits is not None:
+                    temporal_adjacent.append(_column_cosine(prev_logits, logits_cpu))
+                prev_logits = logits_cpu
 
                 # Residual cosine: subtract head-mean to isolate per-head signal
                 head_mean = logits_f.mean(dim=1, keepdim=True)  # (E, 1)
@@ -845,7 +887,7 @@ def collect_behavior_data(
                     head_ids.append(h)
                     group_tags.append(f"d{domain_idx}:i{inst_idx}:t{outer}")
 
-                # --- inner loop: sample, track winner, update pheromone ---
+                # --- inner loop: sample, track training-style winner, update pheromone ---
                 head_counts = [args.n_ants // n_heads] * n_heads
                 for i in range(args.n_ants % n_heads):
                     head_counts[i] += 1
@@ -875,9 +917,12 @@ def collect_behavior_data(
 
                     costs_np = np.asarray(costs)
                     best_idx = int(np.argmin(costs_np))
-                    winner = _head_of_ant(best_idx, head_counts)
+                    winner = int(np.argmin(_head_mean_costs(costs_np, head_counts)))
                     win_counts[outer, winner] += 1
                     aco.update_pheromone(solution_rows[best_idx], float(costs_np[best_idx]))
+
+            if first_logits is not None and prev_logits is not None and args.H > 1:
+                temporal_endpoint.append(_column_cosine(first_logits, prev_logits))
 
     x = np.concatenate(vectors, axis=0).astype(np.float32)
     y = np.array(head_ids, dtype=np.int64)
@@ -898,6 +943,21 @@ def collect_behavior_data(
             "n_snapshots": n_snapshots,
             "top_frac": 0.05,
         }
+    if temporal_adjacent:
+        adj = np.stack(temporal_adjacent, axis=0)
+        divergence["temporal_adjacent_cosine_per_head"] = adj.mean(axis=0).tolist()
+        divergence["mean_temporal_adjacent_cosine"] = float(adj.mean())
+        divergence["min_temporal_adjacent_cosine"] = float(adj.min())
+    if temporal_endpoint:
+        end = np.stack(temporal_endpoint, axis=0)
+        divergence["temporal_endpoint_cosine_per_head"] = end.mean(axis=0).tolist()
+        divergence["mean_temporal_endpoint_cosine"] = float(end.mean())
+        divergence["min_temporal_endpoint_cosine"] = float(end.min())
+    if model_input_step_max_abs:
+        changes = np.asarray(model_input_step_max_abs, dtype=np.float64)
+        divergence["model_input_dynamic"] = bool(getattr(args, "model_input_dynamic", True))
+        divergence["model_input_step_max_abs_mean"] = float(changes.mean())
+        divergence["model_input_step_max_abs_max"] = float(changes.max())
     return x, y, groups, win_counts, divergence
 
 
@@ -1168,13 +1228,32 @@ def write_summary(path: Path, args: argparse.Namespace, metrics: Dict[str, Any],
                 f"- Head top-5% edge overlap (off-diagonal mean): "
                 f"{behavior_metrics['mean_offdiag_topk_overlap']:.4f}"
             )
+        if "mean_temporal_adjacent_cosine" in behavior_metrics:
+            lines.append(
+                f"- Same-head temporal cosine, adjacent steps: "
+                f"mean={behavior_metrics['mean_temporal_adjacent_cosine']:.4f}, "
+                f"min={behavior_metrics['min_temporal_adjacent_cosine']:.4f}"
+            )
+        if "mean_temporal_endpoint_cosine" in behavior_metrics:
+            lines.append(
+                f"- Same-head temporal cosine, first-to-last step: "
+                f"mean={behavior_metrics['mean_temporal_endpoint_cosine']:.4f}, "
+                f"min={behavior_metrics['min_temporal_endpoint_cosine']:.4f}"
+            )
+        if "model_input_step_max_abs_max" in behavior_metrics:
+            mode = "dynamic" if behavior_metrics.get("model_input_dynamic") else "static"
+            lines.append(
+                f"- Model-input audit ({mode}): max step change="
+                f"{behavior_metrics['model_input_step_max_abs_max']:.6g}, "
+                f"mean max step change={behavior_metrics['model_input_step_max_abs_mean']:.6g}"
+            )
         if "cramers_v" in behavior_metrics:
             lines.append(
                 f"- Phase-behavior coupling (Cramér's V): {behavior_metrics['cramers_v']:.4f} "
                 f"(chi² p={behavior_metrics['chi2_p']:.4g})"
             )
             mws = behavior_metrics["mean_win_step"]
-            lines.append(f"- Mean win-step per head: {', '.join(f'{v:.2f}' for v in mws)}")
+            lines.append(f"- Mean selected-head step per head (lowest mean ant cost): {', '.join(f'{v:.2f}' for v in mws)}")
     if umap_note:
         lines.append(f"- {umap_note}")
     path.write_text("\n".join(lines) + "\n")
@@ -1283,10 +1362,28 @@ def main() -> None:
             topk = behavior_metrics["mean_offdiag_topk_overlap"]
             print(f"  {'head residual cosine (off-diag mean)':<40s} {cos:.4f}")
             print(f"  {'head top-5% edge overlap (off-diag)':<40s} {topk:.4f}")
+        if "mean_temporal_adjacent_cosine" in behavior_metrics:
+            print(
+                f"  {'same-head temporal cosine (adjacent)':<40s} "
+                f"{behavior_metrics['mean_temporal_adjacent_cosine']:.4f} "
+                f"(min={behavior_metrics['min_temporal_adjacent_cosine']:.4f})"
+            )
+        if "mean_temporal_endpoint_cosine" in behavior_metrics:
+            print(
+                f"  {'same-head temporal cosine (first-last)':<40s} "
+                f"{behavior_metrics['mean_temporal_endpoint_cosine']:.4f} "
+                f"(min={behavior_metrics['min_temporal_endpoint_cosine']:.4f})"
+            )
+        if "model_input_step_max_abs_max" in behavior_metrics:
+            mode = "dynamic" if behavior_metrics.get("model_input_dynamic") else "static"
+            print(
+                f"  {f'model input audit ({mode})':<40s} "
+                f"max_change={behavior_metrics['model_input_step_max_abs_max']:.6g}"
+            )
         if "cramers_v" in behavior_metrics:
             print(f"  {'phase×behavior Cramér V':<40s} {behavior_metrics['cramers_v']:.4f}  (p={behavior_metrics['chi2_p']:.4g})")
             mws = behavior_metrics["mean_win_step"]
-            print(f"  {'mean win-step per head':<40s} {', '.join(f'{v:.2f}' for v in mws)}")
+            print(f"  {'mean selected-head step per head':<40s} {', '.join(f'{v:.2f}' for v in mws)}")
 
     # --- Save ----------------------------------------------------------------
     np.savez_compressed(

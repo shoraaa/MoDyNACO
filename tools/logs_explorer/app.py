@@ -19,6 +19,7 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[2]
 LOGS_DIR = ROOT / "logs"
+INDEX_SCHEMA_VERSION = 5
 
 
 def _dir_signature(logs_dir: Path) -> tuple[tuple[str, float, int], ...]:
@@ -27,11 +28,41 @@ def _dir_signature(logs_dir: Path) -> tuple[tuple[str, float, int], ...]:
 
 
 @st.cache_data(show_spinner="Scanning logs")
-def load_index(logs_dir: str, signature: tuple[tuple[str, float, int], ...]) -> tuple[list[parser.RunMeta], pd.DataFrame]:
-    del signature
+def load_index(
+    logs_dir: str,
+    signature: tuple[tuple[str, float, int], ...],
+    schema_version: int,
+) -> tuple[list[parser.RunMeta], pd.DataFrame]:
+    del signature, schema_version
     runs = parser.discover_runs(logs_dir)
     rows = [parser.run_to_row(run) for run in runs]
     return runs, pd.DataFrame(rows)
+
+
+def normalize_index_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Backfill UI columns when Streamlit has an older cached dataframe."""
+    defaults = {
+        "has_per_times": False,
+        "per_time_rows": 0,
+        "has_iters": False,
+        "has_iter_times": False,
+        "iter_time_axis": None,
+        "bucket_coverage": "-",
+        "gap_by_bucket": "-",
+        "small_time": float("nan"),
+        "medium_time": float("nan"),
+        "large_time": float("nan"),
+        "overall_time": float("nan"),
+        "small_gap_per_time": float("nan"),
+        "medium_gap_per_time": float("nan"),
+        "large_gap_per_time": float("nan"),
+        "overall_gap_per_time": float("nan"),
+    }
+    df = df.copy()
+    for col, value in defaults.items():
+        if col not in df.columns:
+            df[col] = value
+    return df
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
@@ -44,6 +75,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     problems = st.sidebar.multiselect("Problem", sorted(x for x in df["problem"].dropna().unique()), default=None)
     sizes = st.sidebar.multiselect("Train size", sorted(x for x in df["train_size"].dropna().unique()), default=None)
     multihead = st.sidebar.segmented_control("Multihead", ["all", "yes", "no"], default="all")
+    per_times = st.sidebar.segmented_control("Per-time CSV", ["all", "yes", "no"], default="all")
     decoders = st.sidebar.multiselect("Decoder", sorted(x for x in df["decoder_type"].dropna().unique()), default=None)
     routers = st.sidebar.multiselect("Router", sorted(x for x in df["router"].dropna().unique()), default=None)
     search = st.sidebar.text_input("Search stem/dataset")
@@ -59,6 +91,10 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[filtered["multihead"]]
     elif multihead == "no":
         filtered = filtered[~filtered["multihead"]]
+    if per_times == "yes":
+        filtered = filtered[filtered["has_per_times"]]
+    elif per_times == "no":
+        filtered = filtered[~filtered["has_per_times"]]
     if decoders:
         filtered = filtered[filtered["decoder_type"].isin(decoders)]
     if routers:
@@ -89,7 +125,16 @@ def run_table(df: pd.DataFrame) -> None:
         "head_config",
         "dataset",
         "timestamp",
-        "overall_gap%",
+        "bucket_coverage",
+        "gap_by_bucket",
+        "small_gap%",
+        "medium_gap%",
+        "large_gap%",
+        "has_per_times",
+        "per_time_rows",
+        "has_iters",
+        "has_iter_times",
+        "iter_time_axis",
         "mean_time",
         "done",
         "total",
@@ -100,7 +145,9 @@ def run_table(df: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "overall_gap%": st.column_config.NumberColumn("overall gap%", format="%.3f"),
+            "small_gap%": st.column_config.NumberColumn("<1K gap%", format="%.3f"),
+            "medium_gap%": st.column_config.NumberColumn("[1K,10K) gap%", format="%.3f"),
+            "large_gap%": st.column_config.NumberColumn(">=10K gap%", format="%.3f"),
             "timestamp": st.column_config.DatetimeColumn("timestamp"),
         },
     )
@@ -125,10 +172,22 @@ def detail_view(run: parser.RunMeta) -> None:
     st.dataframe(parser.config_table(cfg, show_all=show_all), hide_index=True, use_container_width=True)
 
     instances = parser.load_instances(run)
+    if instances.empty or "primary_time" not in instances or instances["primary_time"].notna().sum() == 0:
+        st.warning(
+            "This run's `_instances.csv` does not contain usable per-instance time snapshots "
+            "such as `model_anneal_time_I1000`. Gap-per-time plots will use summary time only "
+            "where available and cannot be split reliably by bucket."
+        )
     perf = parser.aggregate_perf(instances, run)
     perf_df = pd.DataFrame(
         [
-            {"bucket": bucket, "gap%": perf[bucket]["gap%"], "count": perf[bucket]["count"]}
+            {
+                "bucket": bucket,
+                "gap%": perf[bucket]["gap%"],
+                "mean_time": perf[bucket].get("time"),
+                "gap_per_time": perf[bucket].get("gap_per_time"),
+                "count": perf[bucket]["count"],
+            }
             for bucket in parser.BUCKET_ORDER
         ]
     )
@@ -167,23 +226,43 @@ def convergence_view(run: parser.RunMeta, instances: pd.DataFrame) -> None:
         if iters.empty:
             st.warning("No iteration rows matched that instance.")
             return
-        fig = go.Figure()
+        fig_iter = go.Figure()
+        fig_time = go.Figure()
+        time_col = _time_axis_column(iters)
         for method, part in iters.groupby("method", dropna=False):
             name = str(method)
-            if "mean" in part:
-                fig.add_trace(go.Scatter(x=part["iter"], y=part["mean"], mode="lines", name=f"{name} mean"))
             if "best" in part:
-                fig.add_trace(go.Scatter(x=part["iter"], y=part["best"], mode="lines", name=f"{name} best"))
-        fig.update_layout(xaxis_title="iteration", yaxis_title="cost", legend_title="series")
-        st.plotly_chart(fig, use_container_width=True)
+                fig_iter.add_trace(go.Scatter(x=part["iter"], y=part["best"], mode="lines", name=f"{name} best"))
+                if time_col:
+                    fig_time.add_trace(go.Scatter(x=part[time_col], y=part["best"], mode="lines", name=f"{name} best"))
+        fig_iter.update_layout(xaxis_title="iteration", yaxis_title="best cost", legend_title="series")
+        st.plotly_chart(fig_iter, use_container_width=True)
+        if time_col and fig_time.data:
+            fig_time.update_layout(xaxis_title=f"{time_col} (s)", yaxis_title="best cost", legend_title="series")
+            st.plotly_chart(fig_time, use_container_width=True)
 
 
 def compare_view(runs_by_stem: dict[str, parser.RunMeta], df: pd.DataFrame) -> None:
-    options = df["stem"].tolist()
+    df = enrich_compare_flags(df, runs_by_stem)
+    ctrl_cols = st.columns(2)
+    only_iters = ctrl_cols[0].checkbox("Only runs with iteration CSV", value=False)
+    only_iter_time = ctrl_cols[1].checkbox("Only runs with convergence time axis", value=False)
+    options_df = df.copy()
+    if only_iters or only_iter_time:
+        options_df = options_df[options_df["has_iters"]]
+    if only_iter_time:
+        options_df = options_df[options_df["has_iter_times"]]
+
+    st.caption(
+        f"Compare candidates: {len(options_df)} "
+        f"({int(df['has_iters'].sum())} with `_iters.csv`, "
+        f"{int(df['has_iter_times'].sum())} with a time axis)"
+    )
+    options = options_df["stem"].tolist()
     default = options[:2] if len(options) >= 2 else options
     selected = st.multiselect("Runs to compare", options=options, default=default)
     if len(selected) < 2:
-        st.info("Select at least two runs.")
+        st.info("Select at least two runs. Relax the Compare tab filters if too few runs remain.")
         return
 
     rows = []
@@ -198,6 +277,15 @@ def compare_view(runs_by_stem: dict[str, parser.RunMeta], df: pd.DataFrame) -> N
                 "medium_gap%": perf["medium"]["gap%"],
                 "large_gap%": perf["large"]["gap%"],
                 "overall_gap%": perf["overall"]["gap%"],
+                "small_time": perf["small"]["time"],
+                "medium_time": perf["medium"]["time"],
+                "large_time": perf["large"]["time"],
+                "overall_time": perf["overall"]["time"],
+                "small_gap_per_time": perf["small"]["gap_per_time"],
+                "medium_gap_per_time": perf["medium"]["gap_per_time"],
+                "large_gap_per_time": perf["large"]["gap_per_time"],
+                "overall_gap_per_time": perf["overall"]["gap_per_time"],
+                "bucket_coverage": parser.run_to_row(run)["bucket_coverage"],
                 "mean_time": perf.get("mean_time"),
                 "total_time": perf.get("total_time"),
             }
@@ -216,20 +304,299 @@ def compare_view(runs_by_stem: dict[str, parser.RunMeta], df: pd.DataFrame) -> N
     if table["mean_time"].notna().any():
         st.plotly_chart(px.bar(table, x="head_config", y="mean_time", hover_data=["stem"]), use_container_width=True)
 
-    shared_iters = [runs_by_stem[stem] for stem in selected if runs_by_stem[stem].iters_csv]
-    if len(shared_iters) >= 2 and st.button("Overlay first-instance convergence"):
-        fig = go.Figure()
-        for run in shared_iters:
-            iters = parser.load_iters(run, 0)
+    gap_time_view(table)
+    compare_iters_view(runs_by_stem, selected)
+
+
+def enrich_compare_flags(df: pd.DataFrame, runs_by_stem: dict[str, parser.RunMeta]) -> pd.DataFrame:
+    df = df.copy()
+    for col, default in [("has_iters", False), ("has_iter_times", False), ("iter_time_axis", None)]:
+        if col not in df.columns:
+            df[col] = default
+    for idx, row in df.iterrows():
+        stem = row.get("stem")
+        run = runs_by_stem.get(stem)
+        if not run:
+            continue
+        axis = row.get("iter_time_axis")
+        if pd.isna(axis) or axis in ("", None):
+            axis = get_iters_time_axis(run)
+            df.at[idx, "iter_time_axis"] = axis
+        df.at[idx, "has_iters"] = bool(run.iters_csv)
+        df.at[idx, "has_iter_times"] = axis is not None
+    return df
+
+
+def get_iters_time_axis(run: parser.RunMeta) -> str | None:
+    if hasattr(parser, "iters_time_axis"):
+        return parser.iters_time_axis(run)
+    if not run.iters_csv:
+        return None
+    try:
+        header = pd.read_csv(run.iters_csv, nrows=0).columns.tolist()
+    except Exception:
+        return None
+    for col in ["elapsed_s", "outer_elapsed_s", "t"]:
+        if col in header:
+            return col
+    return None
+
+
+def gap_time_view(table: pd.DataFrame) -> None:
+    st.subheader("Gap per time")
+    missing_timed = table[["small_time", "medium_time", "large_time", "overall_time"]].isna().all(axis=1)
+    if missing_timed.any():
+        st.warning(
+            f"{int(missing_timed.sum())} selected run(s) do not have usable per-instance `*_time_I...` "
+            "columns. Their bucket-level gap-per-time values are unavailable."
+        )
+    time_cols = ["small_time", "medium_time", "large_time", "overall_time"]
+    gap_time_cols = ["small_gap_per_time", "medium_gap_per_time", "large_gap_per_time", "overall_gap_per_time"]
+    value_cols = [
+        "small_gap%",
+        "medium_gap%",
+        "large_gap%",
+        "overall_gap%",
+        *time_cols,
+        *gap_time_cols,
+    ]
+    shown_cols = ["head_config", "bucket_coverage", *value_cols, "stem"]
+    st.dataframe(table[shown_cols], hide_index=True, use_container_width=True)
+
+    long_gap = table.melt(
+        id_vars=["stem", "head_config"],
+        value_vars=["small_gap%", "medium_gap%", "large_gap%", "overall_gap%"],
+        var_name="bucket",
+        value_name="gap%",
+    )
+    long_time = table.melt(
+        id_vars=["stem", "head_config"],
+        value_vars=time_cols,
+        var_name="bucket",
+        value_name="bucket_time",
+    )
+    long_eff = table.melt(
+        id_vars=["stem", "head_config"],
+        value_vars=gap_time_cols,
+        var_name="bucket",
+        value_name="gap_per_time",
+    )
+    long_gap["bucket"] = long_gap["bucket"].str.replace("_gap%", "", regex=False)
+    long_time["bucket"] = long_time["bucket"].str.replace("_time", "", regex=False)
+    long_eff["bucket"] = long_eff["bucket"].str.replace("_gap_per_time", "", regex=False)
+    merged = long_gap.merge(long_time, on=["stem", "head_config", "bucket"]).merge(
+        long_eff, on=["stem", "head_config", "bucket"]
+    )
+    merged = merged.dropna(subset=["gap%", "bucket_time"])
+    if merged.empty:
+        st.caption("No per-instance timing columns were available for the selected runs.")
+        return
+
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(
+            px.scatter(
+                merged,
+                x="bucket_time",
+                y="gap%",
+                color="head_config",
+                symbol="bucket",
+                hover_data=["stem", "bucket", "gap_per_time"],
+                labels={"bucket_time": "bucket mean time (s)", "gap%": "gap (%)"},
+            ),
+            use_container_width=True,
+        )
+    with right:
+        st.plotly_chart(
+            px.bar(
+                merged.dropna(subset=["gap_per_time"]),
+                x="bucket",
+                y="gap_per_time",
+                color="head_config",
+                barmode="group",
+                hover_data=["stem", "bucket_time", "gap%"],
+                labels={"gap_per_time": "gap % per second"},
+            ),
+            use_container_width=True,
+        )
+
+
+def compare_iters_view(runs_by_stem: dict[str, parser.RunMeta], selected: list[str]) -> None:
+    st.divider()
+    st.subheader("Per-iteration convergence comparison")
+    runs = [runs_by_stem[stem] for stem in selected if runs_by_stem[stem].iters_csv]
+    if len(runs) < 2:
+        st.caption("Select at least two runs with `_iters.csv` files.")
+        return
+
+    mode = st.segmented_control("Convergence scope", ["single instance", "average"], default="single instance")
+    methods = st.multiselect("Method filter", ["Model", "Base", "Mix"], default=["Model"])
+    if mode == "average":
+        compare_average_iters_view(runs, methods)
+        return
+
+    bucket_choice = st.segmented_control(
+        "Instance bucket",
+        ["all", "small (<1K)", "medium ([1K,10K))", "large (>=10K)"],
+        default="all",
+    )
+    bucket_key = {
+        "all": None,
+        "small (<1K)": "small",
+        "medium ([1K,10K))": "medium",
+        "large (>=10K)": "large",
+    }[bucket_choice]
+    instance_options = _shared_instance_options(runs, bucket_key)
+    if not instance_options:
+        st.caption("No shared instance names were found for that bucket in the selected runs' instance CSVs.")
+        return
+    choice = st.selectbox("Shared instance", options=instance_options)
+    if not st.button("Load per-iteration overlay"):
+        return
+
+    idx = choice.split(":", 1)[0]
+    fig_iter = go.Figure()
+    fig_time = go.Figure()
+    with st.spinner("Reading selected iteration traces"):
+        for run in runs:
+            iters = parser.load_iters(run, idx)
+            if iters.empty or "best" not in iters:
+                continue
+            time_col = _time_axis_column(iters)
+            if methods and "method" in iters:
+                mask = False
+                for method in methods:
+                    mask = mask | iters["method"].astype(str).str.contains(method, case=False, na=False)
+                iters = iters[mask]
             if iters.empty:
                 continue
             label = parser.head_label(run.config or parser.parse_config(run.stem))
-            best = iters[iters["method"].astype(str).str.contains("Model", na=False)] if "method" in iters else iters
-            if not best.empty and "best" in best:
-                fig.add_trace(go.Scatter(x=best["iter"], y=best["best"], mode="lines", name=f"{label}: {run.stem[-28:]}"))
-        if fig.data:
-            fig.update_layout(xaxis_title="iteration", yaxis_title="best cost")
-            st.plotly_chart(fig, use_container_width=True)
+            for method_name, part in iters.groupby("method", dropna=False):
+                fig_iter.add_trace(
+                    go.Scatter(
+                        x=part["iter"],
+                        y=part["best"],
+                        mode="lines",
+                        name=f"{label} {method_name}: {run.stem[-19:]}",
+                    )
+                )
+                if time_col:
+                    fig_time.add_trace(
+                        go.Scatter(
+                            x=part[time_col],
+                            y=part["best"],
+                            mode="lines",
+                            name=f"{label} {method_name}: {run.stem[-19:]}",
+                        )
+                    )
+    if fig_iter.data:
+        fig_iter.update_layout(xaxis_title="iteration", yaxis_title="best cost", legend_title="run")
+        st.plotly_chart(fig_iter, use_container_width=True)
+        if fig_time.data:
+            fig_time.update_layout(xaxis_title="time (s)", yaxis_title="best cost", legend_title="run")
+            st.plotly_chart(fig_time, use_container_width=True)
+    else:
+        st.warning("No matching iteration rows were found for that instance/method filter.")
+
+
+def compare_average_iters_view(runs: list[parser.RunMeta], methods: list[str]) -> None:
+    scope = st.segmented_control(
+        "Average scope",
+        ["all instances", "small (<1K)", "medium ([1K,10K))", "large (>=10K)"],
+        default="all instances",
+    )
+    bucket_key = {
+        "all instances": None,
+        "small (<1K)": "small",
+        "medium ([1K,10K))": "medium",
+        "large (>=10K)": "large",
+    }[scope]
+    if not st.button("Load averaged convergence overlay"):
+        return
+
+    fig_iter = go.Figure()
+    fig_time = go.Figure()
+    with st.spinner("Averaging selected iteration traces"):
+        for run in runs:
+            indices = _bucket_indices(run, bucket_key)
+            if indices is not None and not indices:
+                continue
+            avg = parser.load_iters_average(run, tuple(indices) if indices is not None else None)
+            if avg.empty or "best" not in avg:
+                continue
+            if methods and "method" in avg:
+                mask = False
+                for method in methods:
+                    mask = mask | avg["method"].astype(str).str.contains(method, case=False, na=False)
+                avg = avg[mask]
+            if avg.empty:
+                continue
+            label = parser.head_label(run.config or parser.parse_config(run.stem))
+            for method_name, part in avg.groupby("method", dropna=False):
+                fig_iter.add_trace(
+                    go.Scatter(
+                        x=part["iter"],
+                        y=part["best"],
+                        mode="lines",
+                        name=f"{label} {method_name}: {run.stem[-19:]}",
+                    )
+                )
+                if "time" in part and pd.to_numeric(part["time"], errors="coerce").notna().any():
+                    fig_time.add_trace(
+                        go.Scatter(
+                            x=part["time"],
+                            y=part["best"],
+                            mode="lines",
+                            name=f"{label} {method_name}: {run.stem[-19:]}",
+                        )
+                    )
+    if fig_iter.data:
+        fig_iter.update_layout(xaxis_title="iteration", yaxis_title=f"average best cost ({scope})", legend_title="run")
+        st.plotly_chart(fig_iter, use_container_width=True)
+        if fig_time.data:
+            fig_time.update_layout(xaxis_title="average time (s)", yaxis_title=f"average best cost ({scope})", legend_title="run")
+            st.plotly_chart(fig_time, use_container_width=True)
+    else:
+        st.warning("No averaged iteration rows were available for that scope/method filter.")
+
+
+def _bucket_indices(run: parser.RunMeta, bucket: str | None) -> list[int] | None:
+    if bucket is None:
+        return None
+    df = parser.load_instances(run)
+    if df.empty or "idx" not in df or "bucket" not in df:
+        return []
+    return [int(idx) for idx in df.loc[df["bucket"] == bucket, "idx"].dropna().tolist()]
+
+
+def _time_axis_column(df: pd.DataFrame) -> str | None:
+    for col in ["elapsed_s", "outer_elapsed_s", "t"]:
+        if col in df and pd.to_numeric(df[col], errors="coerce").notna().any():
+            return col
+    return None
+
+
+def _shared_instance_options(runs: list[parser.RunMeta], bucket: str | None = None) -> list[str]:
+    shared: set[tuple[int, str, str]] | None = None
+    for run in runs:
+        df = parser.load_instances(run)
+        if df.empty or "idx" not in df or "name" not in df:
+            shared = set()
+            break
+        if bucket and "bucket" in df:
+            df = df[df["bucket"] == bucket]
+        if df.empty:
+            shared = set()
+            break
+        cols = ["idx", "name", "bucket"] if "bucket" in df else ["idx", "name"]
+        pairs = set()
+        for _, row in df[cols].dropna().iterrows():
+            label = str(row["bucket"]) if "bucket" in row else "unknown"
+            pairs.add((int(row["idx"]), str(row["name"]), label))
+        shared = pairs if shared is None else shared & pairs
+    if not shared:
+        return []
+    return [f"{idx}: {name} [{label}]" for idx, name, label in sorted(shared)[:200]]
 
 
 def main() -> None:
@@ -241,7 +608,8 @@ def main() -> None:
         st.error(f"Logs directory not found: {logs_dir}")
         return
 
-    runs, df = load_index(str(logs_dir), _dir_signature(logs_dir))
+    runs, df = load_index(str(logs_dir), _dir_signature(logs_dir), INDEX_SCHEMA_VERSION)
+    df = normalize_index_df(df)
     if df.empty:
         st.warning("No runs found.")
         return
@@ -255,6 +623,9 @@ def main() -> None:
         run_table(filtered)
     with tab_detail:
         choices = filtered["stem"].tolist()
+        only_timed = st.checkbox("Only runs with per-time CSV logging", value=False)
+        if only_timed:
+            choices = filtered[filtered["has_per_times"]]["stem"].tolist()
         if choices:
             stem = st.selectbox("Run", options=choices)
             detail_view(runs_by_stem[stem])

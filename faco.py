@@ -261,6 +261,7 @@ class ACO_BPP:
 
         # Convert demand to numpy
         demand_np = to_numpy_vector(demand)
+        self._demand = torch.as_tensor(demand_np, device=device, dtype=torch.float32)
         self._n = len(demand_np) - 1  # Exclude depot
 
         # Initialize pheromone
@@ -519,7 +520,7 @@ class ACO_BPP:
     @property
     def demand(self) -> torch.Tensor:
         """Get demand tensor."""
-        return self.heuristic[0, :]
+        return self._demand
 
     @property
     def n(self) -> int:
@@ -707,10 +708,11 @@ class ACO_MKP:
         n = n_plus_1 - 1
 
         items = paths[0]
-        mask = torch.ones((self.n_ants, n_plus_1), device=device, dtype=torch.float32)
-        dummy_mask = torch.ones((self.n_ants, n_plus_1), device=device, dtype=torch.float32)
+        n_ants = items.size(0)  # replay width (may be a per-head ant slice)
+        mask = torch.ones((n_ants, n_plus_1), device=device, dtype=torch.float32)
+        dummy_mask = torch.ones((n_ants, n_plus_1), device=device, dtype=torch.float32)
         dummy_mask[:, -1] = 0
-        knapsack = torch.zeros((self.n_ants, self._m), device=device, dtype=torch.float32)
+        knapsack = torch.zeros((n_ants, self._m), device=device, dtype=torch.float32)
 
         mask, knapsack = self._update_knapsack(mask, knapsack, items)
         dummy_mask = self._update_dummy_state(mask, dummy_mask)
@@ -748,7 +750,7 @@ class ACO_MKP:
 
     def _update_knapsack(self, mask: torch.Tensor, knapsack: torch.Tensor, new_item: torch.Tensor):
         """Update knapsack state."""
-        ant_idx = torch.arange(self.n_ants, device=mask.device)
+        ant_idx = torch.arange(mask.size(0), device=mask.device)
         mask[ant_idx, new_item] = 0
 
         is_real = new_item < self._n
@@ -756,7 +758,7 @@ class ACO_MKP:
             knapsack[is_real] += self._weight[new_item[is_real]]
 
         # Check candidates for feasibility
-        for ant_idx in range(self.n_ants):
+        for ant_idx in range(mask.size(0)):
             candidates = torch.nonzero(mask[ant_idx]).squeeze(-1)
             if candidates.dim() > 0 and candidates.numel() > 0:
                 real_candidates = candidates[candidates < self._n]
@@ -1006,8 +1008,9 @@ class ACO_OP:
         n = n_plus_1 - 1
 
         cur_node = paths[0]
-        mask = torch.ones((self.n_ants, n_plus_1), device=device, dtype=torch.float32)
-        travel_dis = torch.zeros((self.n_ants,), device=device, dtype=torch.float32)
+        n_ants = cur_node.size(0)  # replay width (may be a per-head ant slice)
+        mask = torch.ones((n_ants, n_plus_1), device=device, dtype=torch.float32)
+        travel_dis = torch.zeros((n_ants,), device=device, dtype=torch.float32)
 
         mask = self._update_mask(travel_dis, cur_node, mask)
         log_probs = []
@@ -1040,8 +1043,8 @@ class ACO_OP:
 
     def _update_mask(self, travel_dis: torch.Tensor, cur_node: torch.Tensor, mask: torch.Tensor):
         """Update mask based on budget constraint."""
-        mask[torch.arange(self.n_ants, device=mask.device), cur_node] = 0
-        for ant_id in range(self.n_ants):
+        mask[torch.arange(mask.size(0), device=mask.device), cur_node] = 0
+        for ant_id in range(mask.size(0)):
             if cur_node[ant_id] != self._n:
                 _m = mask[ant_id]
                 candidates = torch.nonzero(_m).squeeze(-1)

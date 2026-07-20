@@ -1,105 +1,72 @@
-# DyNACO: Dynamic Neural Guidance for ACO
-# Comprehensive .gitignore for research code
+# D2NACO — Dynamic and Diverse Neural ACO
+# .gitignore: track core method code, ignore everything generated or auxiliary.
 
-# Python
+# ── Python ──────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyd
 .Python
 env/
 venv/
 .venv/
 .tox/
+*.egg-info/
+*.dist-info/
+*.egg
+build/
+dist/
+bdist.*/
+temp.linux-*/
+lib/
+
+# ── Caches & coverage ───────────────────────────────────────────────────
+.cache
 .coverage
 .coverage.*
-.cache
+coverage.xml
+htmlcov/
 .pytest_cache/
 .mypy_cache/
 .hypothesis/
-*.egg-info/
-*.dist-info/
-build/
-bdist.linux-x86_64/
-dist/
-*.egg
+.ipynb_checkpoints/
 
-# IDE & editors
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Project-specific generated data (everything under experiments/)
-experiments/
-output/
-logs/
-results_extended/
-tmp_models/
-tuning_results/
-search_results/
-visualizations/
-rebuttal_results.csv
-
-# W&B
-wandb/
-.wandb/
-
-# Data generated at runtime (keep curated benchmarks in data/ only)
-data/generated/
-data/cache/
-
-# C++ build
+# ── C++ backend build artifacts ─────────────────────────────────────────
 src/build/
 src/.cache/
 src/*.so
 src/*.pyd
 src/ngfaco.egg-info/
-temp.linux-*/
-bdist.*/
-lib/
 
-# System files (but keep project-specific dotfiles)
-.*
-!.gitignore
-!.claude/
-!.claude.settings.json
+# ── Experiment outputs & artifacts (not core methods) ───────────────────
+experiments/
+output/
+logs/
+results/
+results_extended/
+tuning_results/
+search_results/
+visualizations/
+tmp_models/
+wandb/
 
-# OmniFocus/OmniOutliner (from .omx)
-.omx/
-.omc/
+# ── Model checkpoints (large binaries) ──────────────────────────────────
+pretrained/
+checkpoints/
+checkpoints_extended/
 
-# Plan files (temporary)
-PLAN.MD
-
-# Test memory files
-test_mem*.py
-
-# Old directories (clean these up eventually)
+# ── Runtime-generated data (keep curated benchmarks in data/) ───────────
+data/generated/
+data/cache/
 data_old/
 pretrained_old/
 reviewer_experiments/
 
-# VRAM notes
-vram.md
-
-# Coverage data
-.coverage
-coverage.xml
-htmlcov/
-
-# pytest
-.pytest_cache/
-
-# mypy
-.mypy_cache/
-
-# IPython
-.ipynb_checkpoints/
-
-# Latex auxiliary (if writing paper)
+# ── Paper, notes & auxiliary docs (not code) ────────────────────────────
+paper/
+figures/
+*.tex
 *.aux
 *.log
 *.out
@@ -107,7 +74,31 @@ htmlcov/
 *.synctex.gz
 *.fls
 *.fdb_latexmk
+dynaco_journal.pdf
+srr_training_progress.pdf
+srr_training_progress.png
+rebuttal_results.csv
+PROSE.md
+polynet.md
+survey.md
+results.md
+vram.md
+explorer_plan.md
+PLAN.MD
 
-pretrained/
-checkpoints/
-chechpoints_extended/
+# ── All dotfiles / editor / agent state (keep only .gitignore) ──────────
+.*
+!.gitignore
+!.python-version
+
+# ── External reference implementations (not our core method) ────────────
+references/
+
+# ── Core dumps & OS files ───────────────────────────────────────────────
+gpucore.*
+core.*
+*.core
+.DS_Store
+*.swp
+*.swo
+*~

@@ -1,9 +1,0 @@
-{"checkpoint": "", "member": 0, "seed": 1234, "train_rc": 0}
-{"checkpoint": "", "member": 1, "seed": 1235, "train_rc": 0}
-{"checkpoint": "", "member": 2, "seed": 1236, "train_rc": 0}
-{"checkpoint": "", "member": 3, "seed": 1237, "train_rc": 0}
-{"checkpoint": "", "member": 4, "seed": 1238, "train_rc": 0}
-{"checkpoint": "", "member": 5, "seed": 1239, "train_rc": 0}
-{"checkpoint": "", "member": 6, "seed": 1240, "train_rc": 0}
-{"checkpoint": "", "member": 7, "seed": 1241, "train_rc": 0}
-{"checkpoints": ["<member-0-checkpoint-from-train>", "<member-1-checkpoint-from-train>", "<member-2-checkpoint-from-train>", "<member-3-checkpoint-from-train>", "<member-4-checkpoint-from-train>", "<member-5-checkpoint-from-train>", "<member-6-checkpoint-from-train>", "<member-7-checkpoint-from-train>"], "eval_rc": 0, "instances_csv": "", "member_ant_counts": [13, 13, 13, 13, 12, 12, 12, 12], "stage": "ind_r_ensemble_eval", "summary_json": "results/independent_policy_ensemble/dryrun_tsp_multi_decoder_confirm/ind_r_summary.json"}

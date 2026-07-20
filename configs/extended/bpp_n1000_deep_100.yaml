@@ -1,0 +1,57 @@
+# DyNACO Configuration: BPP-1000 with multi-head deep LoRA
+problem: bpp
+n_node: 100
+k_sparse: 32
+n_ants: 100
+H: 10
+mini_H: 100
+epochs: 30
+steps_per_epoch: 64
+val_size: 128
+aco_iters_per_sample: 20
+rho: 0.5
+lr: 0.000005
+device: cuda:0
+seed: 1234
+grad_checkpointing: false
+min_new_edges: 12
+ablation_pheromone_features: false
+ablation_incumbent_features: false
+no_logit_net: false
+no_dynamic_feats: false
+edge_feature_set: compact3
+
+# BPP-specific
+capacity: 150.0
+
+# Multi-head deep LoRA
+multi_head: true
+num_heads: 8
+head_zdim: 128
+head_router: static
+head_ant_weights: null
+head_router_min_frac: 0.0
+head_loss_mode: winner
+head_decoder_type: deep_lora
+lora_rank: 8
+lora_alpha: 1.0
+freeze_lora_base: false
+head_adapter_init: random
+head_adapter_init_std: 0.02
+
+# Experiment metadata
+experiment_name: bpp_n1000_deep_100
+description: "BPP-1K deep multi-head REINFORCE with winner-take-all loss"
+author: "DyNACO Team"
+
+# W&B
+no_wandb: false
+wandb_project: "dyanco"
+wandb_entity: null
+wandb_group: null
+run_name: null
+
+# Checkpointing
+save_dir: checkpoints_extended
+save_interval: 1
+dry_run: false

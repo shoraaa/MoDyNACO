@@ -46,10 +46,13 @@ from extended_common import (
     create_model as create_extended_model,
     extract_problem_data as extract_extended_problem_data,
     prior_kwargs as get_extended_prior_kwargs,
+    prior_output_to_heuristic as extended_prior_output_to_heuristic,
     raw_values_to_objective as extended_raw_values_to_objective,
+    reshape_multihead_extended_prior,
     reshape_prior_output as reshape_extended_prior_output,
     select_best_value as select_extended_best_value,
     setup_aco as setup_extended_aco,
+    get_problem_n as get_extended_problem_n,
 )
 
 BASE_PROBLEMS = {"tsp", "cvrp"}
@@ -81,6 +84,14 @@ def _checkpoint_state_and_config(ckpt: Any) -> Tuple[Dict[str, torch.Tensor], Di
     state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     return state_dict, config
+
+
+def _extended_model_kwargs_from_checkpoint(ckpt: Any) -> Tuple[Dict[str, Any], str]:
+    if isinstance(ckpt, dict) and isinstance(ckpt.get("model_kwargs"), dict):
+        return dict(ckpt["model_kwargs"]), "checkpoint_model_kwargs"
+    # Legacy extended checkpoints were trained before create_model forwarded kwargs
+    # to single-head BPP/MKP/OP wrappers, so they used sigmoid decoder outputs.
+    return {"logit_net": False, "grad_checkpointing": False}, "legacy_sigmoid_no_model_kwargs"
 
 
 def _single_head_model_from_checkpoint(
@@ -354,11 +365,215 @@ def _run_extended_aco_rollout(aco: Any, problem_type: str, n_iterations: int) ->
     raise ValueError(f"Unknown problem type: {problem_type}")
 
 
+def _run_extended_guided_rollout(
+    model: Any,
+    aco: Any,
+    problem_type: str,
+    args: argparse.Namespace,
+    data: Dict[str, Any],
+    pyg_args: Tuple[Any, ...],
+    expected_edge_feats: int,
+    *,
+    static_prior: Optional[torch.Tensor] = None,
+    logit_net: bool = False,
+) -> float:
+    """Run the H x mini_H guided trajectory used by extended training/validation."""
+    best_seen = float("-inf")
+    base_heuristic = aco.heuristic.detach().clone()
+    for _outer in range(args.H):
+        for _inner in range(args.mini_H):
+            if static_prior is None:
+                pyg_data = build_extended_pyg_data(
+                    aco,
+                    problem_type,
+                    *pyg_args,
+                    dynamic=not args.no_dynamic_feats,
+                )
+                pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
+                prior_output = model(pyg_data)
+                prior = reshape_extended_prior_output(
+                    prior_output,
+                    problem_type,
+                    **get_extended_prior_kwargs(problem_type, data),
+                )
+            else:
+                prior = static_prior
+            aco.heuristic = extended_prior_output_to_heuristic(
+                prior,
+                base_heuristic,
+                logit_net=logit_net,
+            ).to(device=args.device, dtype=torch.float32)
+            aco._sync_cpp_inputs()
+            costs, paths, _, _ = aco.sample(require_prob=False, prior=None, parallel_traced=True)
+            costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+            best_seen = max(best_seen, select_extended_best_value(costs_t, problem_type))
+            aco.update_pheromone(paths, costs)
+
+    return float(best_seen)
+
+
+def _concat_extended_head_batches(path_chunks: List[torch.Tensor], device: str) -> torch.Tensor:
+    """Concatenate per-head extended-problem paths into one ant batch."""
+    if not path_chunks:
+        raise ValueError("Expected at least one per-head path chunk")
+    max_len = max(int(paths.size(0)) for paths in path_chunks)
+    padded = []
+    for paths in path_chunks:
+        paths = paths.to(device=device, dtype=torch.long)
+        if paths.size(0) < max_len:
+            last = paths[-1:].expand(max_len - paths.size(0), -1)
+            paths = torch.cat((paths, last), dim=0)
+        padded.append(paths)
+    return torch.cat(padded, dim=1)
+
+
+def _extended_head_counts(args: argparse.Namespace, num_heads: int, alloc_logits: Optional[torch.Tensor]) -> List[int]:
+    if str(getattr(args, "head_router", "static") or "static").lower() == "learned":
+        if alloc_logits is None:
+            raise ValueError("learned head router requires allocation logits")
+        return utils.learned_head_counts_from_logits(alloc_logits, int(args.n_ants), args)
+    return utils.split_ant_counts_from_weights(
+        int(args.n_ants),
+        num_heads,
+        getattr(args, "head_ant_weights", None),
+    )
+
+
+def _run_extended_multihead_sample(
+    aco: Any,
+    prior_all: torch.Tensor,
+    args: argparse.Namespace,
+    alloc_logits: Optional[torch.Tensor] = None,
+    *,
+    update_pheromone: bool,
+) -> torch.Tensor:
+    """Sample one allocated multi-head ant batch and optionally update pheromone."""
+    num_heads = int(prior_all.shape[0])
+    head_counts = _extended_head_counts(args, num_heads, alloc_logits)
+    path_chunks: List[torch.Tensor] = []
+    cost_chunks: List[torch.Tensor] = []
+    for h, count in enumerate(head_counts):
+        if count <= 0:
+            continue
+        aco.heuristic = prior_all[h].detach().to(device=args.device, dtype=torch.float32)
+        aco._sync_cpp_inputs()
+        costs_h, paths_h, _, _ = aco.sample(require_prob=False, prior=None, parallel_traced=True)
+        costs_h_t = torch.as_tensor(costs_h, device=args.device, dtype=torch.float32)[:count]
+        paths_h_t = paths_h[:, :count]
+        cost_chunks.append(costs_h_t)
+        path_chunks.append(paths_h_t)
+    costs_t = torch.cat(cost_chunks)
+    if update_pheromone:
+        paths = _concat_extended_head_batches(path_chunks, args.device)
+        aco.update_pheromone(paths, costs_t)
+    return costs_t
+
+
+def _run_extended_multihead_rollout(
+    model: Any,
+    aco: Any,
+    problem_type: str,
+    args: argparse.Namespace,
+    data: Dict[str, Any],
+    pyg_args: Tuple[Any, ...],
+    expected_edge_feats: int,
+    num_heads: int,
+    *,
+    logit_net: bool = False,
+) -> float:
+    """Multi-head analogue of ``_run_extended_guided_rollout``.
+
+    Each outer step decodes ``num_heads`` head priors from the current (dynamic)
+    graph, converts each to a heuristic via the shared additive-logit mapping,
+    allocates ants across heads (static split or learned allocator), samples each
+    head with its own heuristic, tracks the best objective across all heads, and
+    updates the pheromone with the pooled batch.  Mirrors the multi-head training
+    loop in ``_train_extended_instance_reinforce`` so eval matches training.
+    """
+    best_seen = float("-inf")
+    base_heuristic = aco.heuristic.detach().clone()
+    n_problem = get_extended_problem_n(problem_type, data)
+    router = str(getattr(args, "head_router", "static") or "static").lower()
+    learned = router == "learned"
+
+    if router == "ensemble":
+        # Multi-start ensemble inference: run EACH head as an independent full-ant
+        # rollout (fresh pheromone) and take the best across heads.  Unlike the
+        # static ant-split (which starves each head with n_ants/H ants and thus
+        # cancels the best-of-heads gain on low-diversity problems), this gives
+        # every head the full ant budget, so best-of-H >= a single head >= SH by
+        # construction, and strictly greater whenever the heads differ at all.
+        pher_shape = aco.pheromone.shape
+        for h in range(num_heads):
+            aco.pheromone = torch.ones(pher_shape, device=args.device, dtype=torch.float32)
+            aco.shortest_path = None
+            aco._sync_cpp_inputs()
+            for _outer in range(args.H):
+                pyg_data = build_extended_pyg_data(
+                    aco, problem_type, *pyg_args, dynamic=not args.no_dynamic_feats
+                )
+                pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
+                prior_all = reshape_multihead_extended_prior(model(pyg_data), num_heads, n_problem)
+                heur_h = extended_prior_output_to_heuristic(
+                    prior_all[h], base_heuristic, logit_net=logit_net
+                ).to(device=args.device, dtype=torch.float32)
+                for _inner in range(args.mini_H):
+                    aco.heuristic = heur_h
+                    aco._sync_cpp_inputs()
+                    costs_h, paths_h, _, _ = aco.sample(require_prob=False, prior=None, parallel_traced=True)
+                    costs_h_t = torch.as_tensor(costs_h, device=args.device, dtype=torch.float32)
+                    best_seen = max(best_seen, select_extended_best_value(costs_h_t, problem_type))
+                    aco.update_pheromone(paths_h, costs_h)
+        return float(best_seen)
+
+    for _outer in range(args.H):
+        pyg_data = build_extended_pyg_data(
+            aco, problem_type, *pyg_args, dynamic=not args.no_dynamic_feats
+        )
+        pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
+        alloc_logits = None
+        if learned and hasattr(model, "forward_with_alloc"):
+            prior_output, alloc_logits = model.forward_with_alloc(pyg_data)
+        else:
+            prior_output = model(pyg_data)
+        prior_all = reshape_multihead_extended_prior(prior_output, num_heads, n_problem)
+        heur_all = [
+            extended_prior_output_to_heuristic(
+                prior_all[h], base_heuristic, logit_net=logit_net
+            ).to(device=args.device, dtype=torch.float32)
+            for h in range(num_heads)
+        ]
+        for _inner in range(args.mini_H):
+            head_counts = _extended_head_counts(args, num_heads, alloc_logits)
+            path_chunks: List[torch.Tensor] = []
+            cost_chunks: List[torch.Tensor] = []
+            for h, count in enumerate(head_counts):
+                if count <= 0:
+                    continue
+                aco.heuristic = heur_all[h]
+                aco._sync_cpp_inputs()
+                costs_h, paths_h, _, _ = aco.sample(
+                    require_prob=False, prior=None, parallel_traced=True
+                )
+                costs_h_t = torch.as_tensor(costs_h, device=args.device, dtype=torch.float32)[:count]
+                cost_chunks.append(costs_h_t)
+                path_chunks.append(paths_h[:, :count])
+            costs_t = torch.cat(cost_chunks)
+            best_seen = max(best_seen, select_extended_best_value(costs_t, problem_type))
+            paths = _concat_extended_head_batches(path_chunks, args.device)
+            aco.update_pheromone(paths, costs_t)
+    return float(best_seen)
+
+
 def _test_extended_instance(
     model: Any,
     instance_data: Any,
     args: argparse.Namespace,
     expected_edge_feats: int,
+    static_model: Optional[Any] = None,
+    static_edge_feats: Optional[int] = None,
+    model_logit_net: bool = False,
+    static_logit_net: bool = False,
 ) -> Tuple[float, float, Dict[str, float]]:
     """Evaluate a single extended-problem instance."""
     model.eval()
@@ -409,55 +624,75 @@ def _test_extended_instance(
     static_improvement_pct = None
     if args.static_compare:
         static_aco, _ = setup_extended_aco(args, instance_data, args.problem)
+        static_eval_model = static_model if static_model is not None else model
+        static_expected_edge_feats = static_edge_feats if static_edge_feats is not None else expected_edge_feats
+        static_initial_pyg_data = align_extended_edge_attr_width(initial_pyg_data, static_expected_edge_feats)
         with torch.no_grad():
-            static_prior_output = model(initial_pyg_data)
+            static_prior_output = static_eval_model(static_initial_pyg_data)
             static_prior = reshape_extended_prior_output(
                 static_prior_output,
                 args.problem,
                 **get_extended_prior_kwargs(args.problem, data),
             )
-            static_aco.heuristic = static_prior.to(device=args.device, dtype=torch.float32)
-            static_aco._sync_cpp_inputs()
-
-            for _ in range(args.H):
-                static_aco.sample(require_prob=False, prior=None, parallel_traced=True)
-                static_aco.run(1)
-
-        static_aco_cost = _run_extended_aco_rollout(static_aco, args.problem, args.H * args.mini_H)
-
-    with torch.no_grad():
-        for _ in range(args.H):
-            if args.no_dynamic_feats:
-                pyg_data = initial_pyg_data
-            else:
-                pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=True)
-            pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
-
-            prior_output = model(pyg_data)
-            prior = reshape_extended_prior_output(
-                prior_output,
+            static_aco_cost = _run_extended_guided_rollout(
+                model,
+                static_aco,
                 args.problem,
-                **get_extended_prior_kwargs(args.problem, data),
+                args,
+                data,
+                pyg_args,
+                static_expected_edge_feats,
+                static_prior=static_prior,
+                logit_net=static_logit_net,
             )
-            aco.heuristic = prior.to(device=args.device, dtype=torch.float32)
-            aco._sync_cpp_inputs()
-            costs, _, _, _ = aco.sample(require_prob=False, prior=None, parallel_traced=True)
-            aco.run(1)
 
-    costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
-    objective_t = extended_raw_values_to_objective(costs_t, args.problem)
-    avg_cost = float(objective_t.mean().item())
-    best_cost = select_extended_best_value(costs_t, args.problem)
-    best_aco_cost = _run_extended_aco_rollout(aco, args.problem, args.H * args.mini_H)
+    model_num_heads = int(getattr(model, "num_heads", 1))
+    with torch.no_grad():
+        if model_num_heads > 1:
+            best_aco_cost = _run_extended_multihead_rollout(
+                model,
+                aco,
+                args.problem,
+                args,
+                data,
+                pyg_args,
+                expected_edge_feats,
+                model_num_heads,
+                logit_net=model_logit_net,
+            )
+        else:
+            best_aco_cost = _run_extended_guided_rollout(
+                model,
+                aco,
+                args.problem,
+                args,
+                data,
+                pyg_args,
+                expected_edge_feats,
+                logit_net=model_logit_net,
+            )
+
+    avg_cost = float(best_aco_cost)
+    best_cost = float(best_aco_cost)
 
     pure_aco_cost = None
     aco_improvement_pct = None
     if not args.no_baselines:
         pure_aco, _ = setup_extended_aco(args, instance_data, args.problem)
-        pure_aco_cost = _run_extended_aco_rollout(pure_aco, args.problem, args.H * (args.mini_H + 1))
-        aco_improvement_pct = compute_extended_relative_improvement(best_aco_cost, pure_aco_cost, args.problem)
+        pure_aco_cost = _run_extended_aco_rollout(pure_aco, args.problem, args.H * args.mini_H)
+        aco_improvement_pct = compute_extended_relative_improvement(
+            best_aco_cost,
+            pure_aco_cost,
+            args.problem,
+            objective_mode=True,
+        )
     if static_aco_cost is not None:
-        static_improvement_pct = compute_extended_relative_improvement(best_aco_cost, static_aco_cost, args.problem)
+        static_improvement_pct = compute_extended_relative_improvement(
+            best_aco_cost,
+            static_aco_cost,
+            args.problem,
+            objective_mode=True,
+        )
 
     return avg_cost, best_cost, {
         "avg_cost": avg_cost,
@@ -472,18 +707,6 @@ def _test_extended_instance(
 
 def _test_extended_main(args: argparse.Namespace):
     """Main evaluation loop for BPP/MKP/OP."""
-    # Load configuration from YAML if provided
-    if args.config:
-        print(f"Loading configuration from YAML: {args.config}")
-        import yaml
-        with open(args.config) as f:
-            yaml_config = yaml.safe_load(f)
-
-        # Override args with YAML values (CLI args take precedence if already set)
-        for key, value in yaml_config.items():
-            if not hasattr(args, key) or getattr(args, key) is None:
-                setattr(args, key, value)
-
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -492,16 +715,56 @@ def _test_extended_main(args: argparse.Namespace):
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=args.device)
+    checkpoint = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
     config = checkpoint.get("config", {})
+    model_kwargs, model_kwargs_source = _extended_model_kwargs_from_checkpoint(checkpoint)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     feats = state_dict["emb_net.v_lin0.weight"].shape[1]
     edge_feats = state_dict["emb_net.e_lin0.weight"].shape[1]
-    model = create_extended_model(args.problem, m=args.m, feats=feats, edge_feats=edge_feats).to(args.device)
+    model = create_extended_model(
+        args.problem,
+        m=args.m,
+        feats=feats,
+        edge_feats=edge_feats,
+        **model_kwargs,
+    ).to(args.device)
     model.load_state_dict(state_dict)
     model.eval()
 
-    print(f"Loaded model from {checkpoint_path}")
+    print(f"Loaded model from {checkpoint_path} ({model_kwargs_source})")
+
+    static_model = None
+    static_edge_feats = None
+    static_checkpoint_config = None
+    static_checkpoint_path = None
+    if getattr(args, "static_checkpoint", None):
+        static_checkpoint_path = Path(args.static_checkpoint)
+        if not static_checkpoint_path.exists():
+            raise FileNotFoundError(f"Static checkpoint not found: {static_checkpoint_path}")
+        static_checkpoint = torch.load(static_checkpoint_path, map_location=args.device, weights_only=False)
+        static_checkpoint_config = static_checkpoint.get("config", {})
+        static_model_kwargs, static_model_kwargs_source = _extended_model_kwargs_from_checkpoint(static_checkpoint)
+        static_state_dict = static_checkpoint.get("model_state_dict", static_checkpoint)
+        static_feats = static_state_dict["emb_net.v_lin0.weight"].shape[1]
+        static_edge_feats = static_state_dict["emb_net.e_lin0.weight"].shape[1]
+        static_model = create_extended_model(
+            args.problem,
+            m=args.m,
+            feats=static_feats,
+            edge_feats=static_edge_feats,
+            **static_model_kwargs,
+        ).to(args.device)
+        static_model.load_state_dict(static_state_dict)
+        static_model.eval()
+        print(f"Loaded static model from {static_checkpoint_path} ({static_model_kwargs_source})")
+    else:
+        static_model_kwargs = None
+        static_model_kwargs_source = None
+    static_compare_mode = (
+        "static_checkpoint"
+        if static_checkpoint_path is not None
+        else "frozen_initial_prior_from_dynamic"
+    )
 
     # Load test dataset based on problem type
     if args.problem == "bpp":
@@ -525,7 +788,16 @@ def _test_extended_main(args: argparse.Namespace):
     all_static_improvements = []
 
     for instance_data in tqdm(test_instances, desc="Testing"):
-        avg_cost, best_cost, metrics = _test_extended_instance(model, instance_data, args, edge_feats)
+        avg_cost, best_cost, metrics = _test_extended_instance(
+            model,
+            instance_data,
+            args,
+            edge_feats,
+            static_model=static_model,
+            static_edge_feats=static_edge_feats,
+            model_logit_net=bool(model_kwargs.get("logit_net", False)),
+            static_logit_net=bool((static_model_kwargs or {}).get("logit_net", False)),
+        )
         all_avg_costs.append(avg_cost)
         all_best_costs.append(best_cost)
         all_aco_costs.append(metrics["best_aco_cost"])
@@ -562,9 +834,19 @@ def _test_extended_main(args: argparse.Namespace):
     if aco_improvement_mean is not None:
         print(f"  Guided vs Pure ACO Improvement: {aco_improvement_mean:.2f}% ± {aco_improvement_std:.2f}%")
     if static_aco_cost_mean is not None:
-        print(f"  Static-Prior ACO Cost: {static_aco_cost_mean:.4f} ± {static_aco_cost_std:.4f}")
+        static_label = (
+            "Static-Prior ACO"
+            if static_compare_mode == "static_checkpoint"
+            else "Frozen-Initial-Prior ACO"
+        )
+        print(f"  {static_label} Cost: {static_aco_cost_mean:.4f} ± {static_aco_cost_std:.4f}")
     if static_improvement_mean is not None:
-        print(f"  Dynamic vs Static Prior Improvement: {static_improvement_mean:.2f}% ± {static_improvement_std:.2f}%")
+        static_label = (
+            "Static Prior"
+            if static_compare_mode == "static_checkpoint"
+            else "Frozen Initial Prior"
+        )
+        print(f"  Dynamic vs {static_label} Improvement: {static_improvement_mean:.2f}% ± {static_improvement_std:.2f}%")
 
     if args.save_results:
         results_path = Path(args.save_dir) / f"{args.problem}_n{args.n_node}_results.json"
@@ -587,7 +869,16 @@ def _test_extended_main(args: argparse.Namespace):
             "dynamic_vs_static_improvement_pct_mean": None if static_improvement_mean is None else float(static_improvement_mean),
             "dynamic_vs_static_improvement_pct_std": None if static_improvement_std is None else float(static_improvement_std),
             "checkpoint": str(checkpoint_path),
-            "config": config,
+            "static_checkpoint": None if static_checkpoint_path is None else str(static_checkpoint_path),
+            "static_compare_mode": static_compare_mode,
+            "model_kwargs": model_kwargs,
+            "model_kwargs_source": model_kwargs_source,
+            "static_model_kwargs": static_model_kwargs,
+            "static_model_kwargs_source": static_model_kwargs_source,
+            "checkpoint_config": config,
+            "static_checkpoint_config": static_checkpoint_config,
+            "eval_config": vars(args),
+            "config": vars(args),
         }
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
@@ -596,6 +887,7 @@ def _test_extended_main(args: argparse.Namespace):
 
 def _parse_extended_test_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse evaluation arguments for BPP/MKP/OP."""
+    args_list = _normalize_cli_argv(argv)
     parser = argparse.ArgumentParser(description="Test NGFACO for BPP, MKP, OP", allow_abbrev=False)
 
     # Configuration file
@@ -604,6 +896,14 @@ def _parse_extended_test_args(argv: Optional[List[str]] = None) -> argparse.Name
 
     add_extended_problem_args(parser)
     parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path")
+    parser.add_argument(
+        "--static_checkpoint",
+        "--static-checkpoint",
+        dest="static_checkpoint",
+        type=str,
+        default=None,
+        help="Optional separately trained static-prior checkpoint for --static_compare",
+    )
     parser.add_argument("--test_size", type=int, default=16, help="Number of test instances")
     parser.add_argument("--H", type=int, default=5, help="Number of outer iterations (replaces T)")
     parser.add_argument("--mini_H", type=int, default=5, help="Number of inner iterations")
@@ -617,21 +917,36 @@ def _parse_extended_test_args(argv: Optional[List[str]] = None) -> argparse.Name
     parser.add_argument("--save_dir", type=str, default="results_extended", help="Save directory")
     parser.add_argument("--save_results", action="store_true", help="Save results")
     parser.add_argument("--no_dynamic_feats", action="store_true", help="Disable dynamic features")
+    # Multi-head ant allocation at eval (learned allocator or static split).
+    parser.add_argument("--elitist", action="store_true",
+                        help="Best-only pheromone deposit (MMAS/elitist), matching TSP/CVRP; "
+                             "prevents diverse-but-weak mixed-ant heads from polluting the shared pheromone")
+    parser.add_argument("--head_router", choices=["static", "ema", "learned", "ensemble"], default="static",
+                        help="Ant allocation across heads for multi-head checkpoints")
+    parser.add_argument("--head_router_min_frac", type=float, default=0.0, help="Min ant fraction per head")
+    parser.add_argument("--head_router_alpha", type=float, default=0.25, help="EMA router smoothing (unused for learned)")
+    parser.add_argument("--head_ant_weights", type=str, default=None, help="Comma-delimited per-head ant weights (static split)")
+    parser.add_argument("--num_heads", type=int, default=1, help="Number of heads (usually inferred from checkpoint)")
     # Add more arguments...
     parser.add_argument("--no_baselines", "--no-baselines", dest="no_baselines", action="store_true", help="Skip pure ACO baseline runs")
     parser.add_argument("--static_compare", action="store_true", help="Also compare against a run that sets the neural prior only once at the beginning")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
 
     # Load configuration from YAML if provided
     if args.config:
         print(f"Loading configuration from YAML: {args.config}")
         import yaml
         with open(args.config) as f:
-            yaml_config = yaml.safe_load(f)
+            yaml_config = yaml.safe_load(f) or {}
+        cli_flags = {
+            token.lstrip("-").split("=")[0].replace("-", "_")
+            for token in args_list
+            if token.startswith("--")
+        }
 
-        # Override args with YAML values (CLI args take precedence if already set)
+        # Override parser defaults with YAML values unless the CLI explicitly set the flag.
         for key, value in yaml_config.items():
-            if not hasattr(args, key) or getattr(args, key) is None:
+            if not hasattr(args, key) or key not in cli_flags:
                 setattr(args, key, value)
 
     return args
@@ -663,6 +978,14 @@ def main(argv: Optional[List[str]] = None):
         default=None,
         help="Load independently trained single-head checkpoints and evaluate them as policy heads in one ACO rollout.",
     )
+    parser.add_argument(
+        "--single_head_seed_heads",
+        "--single-head-seed-heads",
+        dest="single_head_seed_heads",
+        type=int,
+        default=0,
+        help="Use one single-head checkpoint as K seeded sidecar rollouts whose heatmaps are stacked for multi-head backend deployment.",
+    )
     parser.add_argument("--n_ants", type=int, default=100)
     parser.add_argument("--H", type=int, default=10)
     parser.add_argument("--mini_H", type=int, default=100)
@@ -691,6 +1014,8 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
                         choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank", "polynet"], default="lora",
                         help="Multi-head decoder type: PolyNet residual block, LoRA variants, FiLM, independent full decoders, or legacy low-rank residual")
+    parser.add_argument("--poly_units", "--poly-units", dest="poly_units", type=int, default=256,
+                        help="Hidden width of the PolyNet code-conditioned residual block")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
@@ -859,6 +1184,12 @@ def main(argv: Optional[List[str]] = None):
         and "lora_rank" not in yaml_config_keys
     ):
         args.lora_rank = 16
+
+    if int(getattr(args, "single_head_seed_heads", 0) or 0) > 1:
+        if args.ensemble_checkpoints:
+            raise ValueError("--single_head_seed_heads cannot be combined with --ensemble_checkpoints")
+        args.multi_head = True
+        args.num_heads = int(args.single_head_seed_heads)
 
     if args.decode_chunk_edges is not None:
         if args.decode_chunk_edges < 0:
@@ -1332,8 +1663,11 @@ def main(argv: Optional[List[str]] = None):
                 print("Checkpoint has 3 edge features; using edge_feature_set=compact3")
                 args.edge_feature_set = "compact3"
 
-        multi_head = bool(getattr(args, "multi_head", False) or getattr(args, "num_heads", 1) > 1)
-        if config.get("multi_head", False) or config.get("num_heads", 1) > 1:
+        single_head_seed_mode = int(getattr(args, "single_head_seed_heads", 0) or 0) > 1
+        multi_head = False if single_head_seed_mode else bool(
+            getattr(args, "multi_head", False) or getattr(args, "num_heads", 1) > 1
+        )
+        if not single_head_seed_mode and (config.get("multi_head", False) or config.get("num_heads", 1) > 1):
             multi_head = True
             if "--num_heads" not in sys.argv and "--num-heads" not in sys.argv:
                 args.num_heads = int(config.get("num_heads", args.num_heads))
@@ -1341,6 +1675,8 @@ def main(argv: Optional[List[str]] = None):
                 args.head_zdim = int(config.get("head_zdim", args.head_zdim))
             if "--head_decoder_type" not in sys.argv and "--head-decoder-type" not in sys.argv:
                 args.head_decoder_type = config.get("head_decoder_type", args.head_decoder_type)
+            if "--poly_units" not in sys.argv and "--poly-units" not in sys.argv:
+                args.poly_units = int(config.get("poly_units", args.poly_units))
             if "--lora_rank" not in sys.argv and "--lora-rank" not in sys.argv:
                 args.lora_rank = int(config.get("lora_rank", args.lora_rank))
             if "--lora_alpha" not in sys.argv and "--lora-alpha" not in sys.argv:
@@ -1381,6 +1717,7 @@ def main(argv: Optional[List[str]] = None):
                 lora_alpha=args.lora_alpha,
                 freeze_lora_base=args.freeze_lora_base,
                 head_decoder_type=args.head_decoder_type,
+                poly_units=args.poly_units,
                 head_adapter_init=args.head_adapter_init,
                 head_adapter_init_std=args.head_adapter_init_std,
             )

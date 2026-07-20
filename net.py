@@ -763,6 +763,7 @@ class ParNetPolyNet(nn.Module):
         self.units = units
         self.zdim = zdim
         self.poly_units = poly_units
+        self.decode_chunk_edges = int(os.getenv("DYNACO_DECODE_CHUNK_EDGES", "0"))
         self.act_fn = getattr(F, act_fn)
         self.sigmoid_output = not logit_net
         self.hidden = nn.ModuleList([
@@ -777,7 +778,7 @@ class ParNetPolyNet(nn.Module):
         nn.init.zeros_(self.poly_residual[-1].weight)
         nn.init.zeros_(self.poly_residual[-1].bias)
 
-    def forward(self, emb, head_codes):
+    def _forward_impl(self, emb, head_codes):
         x = emb
         for layer in self.hidden:
             x = self.act_fn(layer(x))
@@ -790,6 +791,16 @@ class ParNetPolyNet(nn.Module):
         if self.sigmoid_output:
             out = torch.sigmoid(out)
         return out
+
+    def forward(self, emb, head_codes):
+        chunk = int(getattr(self, "decode_chunk_edges", 0) or 0)
+        if self.training or chunk <= 0 or emb.shape[0] <= chunk:
+            return self._forward_impl(emb, head_codes)
+        outs = [
+            self._forward_impl(emb[start:start + chunk], head_codes)
+            for start in range(0, emb.shape[0], chunk)
+        ]
+        return torch.cat(outs, dim=0)
 
 
 class MultiHeadNet(Net):
@@ -804,6 +815,7 @@ class MultiHeadNet(Net):
         lora_alpha: float = 1.0,
         freeze_lora_base: bool = False,
         head_decoder_type: str = "lora",
+        poly_units: int = 256,
         head_adapter_init: str = "anchored",
         head_adapter_init_std: float = 0.02,
         logit_net: bool = True,
@@ -857,6 +869,7 @@ class MultiHeadNet(Net):
             self.par_net_heu = ParNetPolyNet(
                 units=units,
                 zdim=head_zdim,
+                poly_units=poly_units,
                 logit_net=logit_net,
             )
         elif self.head_decoder_type == "film":

@@ -1,2 +1,0 @@
-{"checkpoint": "", "eval_rc": 0, "instances_csv": "", "member": 0, "seed": 1234, "summary_json": "results/independent_policy_ensemble/dryrun_smoke/member_0_summary.json", "train_rc": 0}
-{"checkpoint": "", "eval_rc": 0, "instances_csv": "", "member": 1, "seed": 1235, "summary_json": "results/independent_policy_ensemble/dryrun_smoke/member_1_summary.json", "train_rc": 0}

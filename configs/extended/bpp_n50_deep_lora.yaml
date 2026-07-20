@@ -1,0 +1,26 @@
+# DyNACO Configuration: BPP-50 with Multi-Head Deep LoRA (DyNACS)
+problem: bpp
+n_node: 50
+k_sparse: 32
+n_ants: 20
+H: 5
+mini_H: 5
+epochs: 20
+rho: 0.9
+lr: 0.0003
+device: cuda:0
+seed: 1234
+no_dynamic_feats: false
+capacity: 150.0
+
+multi_head: true
+num_heads: 8
+head_zdim: 128
+head_router: static
+head_loss_mode: winner
+head_decoder_type: deep_lora
+lora_rank: 8
+head_adapter_init: random
+
+experiment_name: bpp_n50_dynacs
+use_wandb: false

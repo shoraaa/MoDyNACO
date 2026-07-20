@@ -24,6 +24,26 @@ BUCKET_ORDER = ["small", "medium", "large", "overall"]
 DECODER_TYPES = {"lora", "deep_lora", "film", "multi_decoder", "lowrank", "polynet"}
 INTERRUPT_MARKERS = ("KeyboardInterrupt", "Traceback", "OutOfMemoryError", "CUDA out of memory")
 SUMMARY_METHODS = ("Model(anneal)", "Model(no anneal)", "Base", "Mix(anneal)", "Mix(no anneal)")
+LEGACY_CHECKPOINT_ALIASES = {
+    "checkpoints_extended/cvrp.pt": {
+        "is_multihead": True,
+        "num_heads": 8,
+        "decoder_type": "deep_lora",
+        "router": "learned",
+        "head_init": "random",
+        "edge_feature_set": "compact3",
+        "extra_flags": ["legacy_alias:cvrp.pt->cvrp_dynacs"],
+    },
+    "checkpoints_extended/tsp.pt": {
+        "is_multihead": True,
+        "num_heads": 8,
+        "decoder_type": "deep_lora",
+        "router": "learned",
+        "head_init": "random",
+        "edge_feature_set": "compact3",
+        "extra_flags": ["legacy_alias:tsp.pt->tsp_dynacs"],
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -165,14 +185,29 @@ def parse_config(checkpoint_or_stem: str | Path | None) -> RunConfig:
             values["edge_feature_set"] = token
         elif (match := re.fullmatch(r"mh(\d+)", token)):
             values["num_heads"] = int(match.group(1))
+        elif token == "deep" and next_token == "lora":
+            if values.get("decoder_type") == "polynet":
+                values["extra_flags"].append("deep_lora")
+            else:
+                values["decoder_type"] = "deep_lora"
+            i += 1
+        elif token == "multi" and next_token == "decoder":
+            if values.get("decoder_type") == "polynet":
+                values["extra_flags"].append("multi_decoder")
+            else:
+                values["decoder_type"] = "multi_decoder"
+            i += 1
+        elif token == "lora" and next_token is not None and re.fullmatch(r"r\d+", next_token):
+            if values.get("decoder_type") == "polynet":
+                values["extra_flags"].append(f"lora_{next_token}")
+            elif values.get("decoder_type") != "deep_lora":
+                values["decoder_type"] = "lora"
+            i += 1
         elif token in DECODER_TYPES:
             if values.get("decoder_type") == "polynet" and token != "polynet":
                 values["extra_flags"].append(token)
             else:
                 values["decoder_type"] = token
-        elif token == "deep" and next_token == "lora":
-            values["decoder_type"] = "deep_lora"
-            i += 1
         elif token.startswith("hr") and len(token) > 2:
             values["router"] = token[2:]
         elif token == "hreta":
@@ -195,8 +230,7 @@ def parse_config(checkpoint_or_stem: str | Path | None) -> RunConfig:
         i += 1
 
     values["is_multihead"] = int(values.get("num_heads") or 1) > 1
-    if values["is_multihead"] and not values.get("decoder_type"):
-        values["decoder_type"] = "polynet"
+    _apply_legacy_checkpoint_alias(values, checkpoint_raw)
     values["default_fields"] = _default_flags(values)
     return RunConfig(**values)
 
@@ -221,13 +255,27 @@ def aggregate_perf(df: pd.DataFrame, run: RunMeta | None = None) -> dict[str, An
     result: dict[str, Any] = {}
     if df.empty or "gap%" not in df.columns:
         for bucket in BUCKET_ORDER:
-            result[bucket] = {"gap%": math.nan, "count": 0}
+            result[bucket] = {"gap%": math.nan, "time": math.nan, "gap_per_time": math.nan, "count": 0}
     else:
         bucket_series = df["bucket"] if "bucket" in df.columns else df.get("size_group", pd.Series(dtype=str)).map(SIZE_BUCKETS)
         for bucket in BUCKET_ORDER[:-1]:
             part = df[bucket_series == bucket]
-            result[bucket] = {"gap%": _safe_mean(part["gap%"]), "count": int(len(part))}
-        result["overall"] = {"gap%": _safe_mean(df["gap%"]), "count": int(len(df))}
+            gap = _safe_mean(part["gap%"])
+            time = _safe_mean(part["primary_time"]) if "primary_time" in part else math.nan
+            result[bucket] = {
+                "gap%": gap,
+                "time": time,
+                "gap_per_time": _gap_per_time(gap, time),
+                "count": int(len(part)),
+            }
+        gap = _safe_mean(df["gap%"])
+        time = _safe_mean(df["primary_time"]) if "primary_time" in df else math.nan
+        result["overall"] = {
+            "gap%": gap,
+            "time": time,
+            "gap_per_time": _gap_per_time(gap, time),
+            "count": int(len(df)),
+        }
 
     if run and run.summary_csv:
         summary = parse_summary(run.summary_csv)
@@ -236,6 +284,9 @@ def aggregate_perf(df: pd.DataFrame, run: RunMeta | None = None) -> dict[str, An
             result["mean_time"] = _parse_time_value(method.get("MeanTime"))
             result["total_time"] = _parse_time_value(method.get("TotalTime"))
             result["summary_gap"] = _to_float(method.get("Gap%"))
+            if not math.isfinite(result["overall"].get("time", math.nan)) and result["mean_time"]:
+                result["overall"]["time"] = result["mean_time"]
+                result["overall"]["gap_per_time"] = _gap_per_time(result["overall"]["gap%"], result["mean_time"])
     return result
 
 
@@ -249,6 +300,8 @@ def load_iters(run: RunMeta, instance: str | int | None = None) -> pd.DataFrame:
         "anneal",
         "iter",
         "t",
+        "elapsed_s",
+        "outer_elapsed_s",
         "mean",
         "best",
         "mean_before_ls",
@@ -267,6 +320,12 @@ def load_iters(run: RunMeta, instance: str | int | None = None) -> pd.DataFrame:
     return _load_iters_cached(run.iters_csv, _mtime(run.iters_csv), tuple(usecols), tuple(filters.items()))
 
 
+def load_iters_average(run: RunMeta, indices: tuple[int, ...] | None = None) -> pd.DataFrame:
+    if not run.iters_csv:
+        return pd.DataFrame()
+    return _load_iters_average_cached(run.iters_csv, _mtime(run.iters_csv), tuple(sorted(indices)) if indices else ())
+
+
 def parse_summary(path: str | Path | None) -> dict[str, Any]:
     if not path:
         return {"meta": {}, "methods": pd.DataFrame(), "size_gaps": pd.DataFrame()}
@@ -275,7 +334,11 @@ def parse_summary(path: str | Path | None) -> dict[str, Any]:
 
 def run_to_row(run: RunMeta) -> dict[str, Any]:
     cfg = run.config or parse_config(run.stem)
-    perf = aggregate_perf(load_instances(run), run)
+    instances = load_instances(run)
+    perf = aggregate_perf(instances, run)
+    bucket_counts = {bucket: perf[bucket]["count"] for bucket in BUCKET_ORDER}
+    per_time_count = int(instances["primary_time"].notna().sum()) if "primary_time" in instances else 0
+    iter_time_axis = iters_time_axis(run)
     return {
         "stem": run.stem,
         "status": run.status,
@@ -292,7 +355,26 @@ def run_to_row(run: RunMeta) -> dict[str, Any]:
         "small_gap%": perf["small"]["gap%"],
         "medium_gap%": perf["medium"]["gap%"],
         "large_gap%": perf["large"]["gap%"],
+        "small_time": perf["small"]["time"],
+        "medium_time": perf["medium"]["time"],
+        "large_time": perf["large"]["time"],
+        "overall_time": perf["overall"]["time"],
+        "small_gap_per_time": perf["small"]["gap_per_time"],
+        "medium_gap_per_time": perf["medium"]["gap_per_time"],
+        "large_gap_per_time": perf["large"]["gap_per_time"],
+        "overall_gap_per_time": perf["overall"]["gap_per_time"],
+        "small_n": bucket_counts["small"],
+        "medium_n": bucket_counts["medium"],
+        "large_n": bucket_counts["large"],
+        "overall_n": bucket_counts["overall"],
+        "bucket_coverage": _bucket_coverage_label(bucket_counts),
+        "gap_by_bucket": _gap_by_bucket_label(perf),
         "mean_time": perf.get("mean_time"),
+        "has_per_times": per_time_count > 0,
+        "per_time_rows": per_time_count,
+        "has_iters": bool(run.iters_csv),
+        "has_iter_times": iter_time_axis is not None,
+        "iter_time_axis": iter_time_axis,
         "done": run.done_instances,
         "total": run.total_instances,
         "txt": run.txt,
@@ -326,11 +408,59 @@ def head_label(config: RunConfig) -> str:
     return f"{label} {detail}" if detail else label
 
 
+def iters_time_axis(run: RunMeta) -> str | None:
+    if not run.iters_csv:
+        return None
+    return _iters_time_axis_cached(run.iters_csv, _mtime(run.iters_csv))
+
+
+@lru_cache(maxsize=256)
+def _iters_time_axis_cached(path: str, mtime: float) -> str | None:
+    del mtime
+    header = pd.read_csv(path, nrows=0).columns.tolist()
+    for col in ["elapsed_s", "outer_elapsed_s", "t"]:
+        if col in header:
+            return col
+    return None
+
+
+def _bucket_coverage_label(bucket_counts: dict[str, int]) -> str:
+    labels = []
+    for bucket, label in [("small", "<1K"), ("medium", "[1K,10K)"), ("large", ">=10K")]:
+        count = bucket_counts.get(bucket, 0)
+        if count:
+            labels.append(f"{label} n={count}")
+    return ", ".join(labels) if labels else "-"
+
+
+def _gap_by_bucket_label(perf: dict[str, Any]) -> str:
+    labels = []
+    for bucket, label in [("small", "<1K"), ("medium", "[1K,10K)"), ("large", ">=10K")]:
+        count = perf[bucket]["count"]
+        value = perf[bucket]["gap%"]
+        if count and math.isfinite(value):
+            labels.append(f"{label}: {value:.2f}%")
+    return ", ".join(labels) if labels else "-"
+
+
 def _split_csv_stem(stem: str) -> tuple[str, str]:
     for suffix, kind in (("_summary", "summary_csv"), ("_instances", "instances_csv"), ("_iters", "iters_csv")):
         if stem.endswith(suffix):
             return stem[: -len(suffix)], kind
     return stem, "csv"
+
+
+def _apply_legacy_checkpoint_alias(values: dict[str, Any], checkpoint_raw: str) -> None:
+    alias = LEGACY_CHECKPOINT_ALIASES.get(str(Path(checkpoint_raw).as_posix()))
+    if not alias:
+        alias = LEGACY_CHECKPOINT_ALIASES.get(checkpoint_raw)
+    if not alias:
+        return
+    for key, value in alias.items():
+        if key == "extra_flags":
+            values.setdefault("extra_flags", []).extend(value)
+        else:
+            values[key] = value
 
 
 def _logical_stem(value: str) -> str:
@@ -436,6 +566,8 @@ def _parse_summary_cached(path: str, mtime: float) -> dict[str, Any]:
     meta: dict[str, str] = {}
     methods: list[list[str]] = []
     size_rows: list[list[str]] = []
+    method_header: list[str] = []
+    size_header: list[str] = []
     section: str | None = "meta"
     with open(path, newline="") as handle:
         reader = csv.reader(handle)
@@ -460,8 +592,8 @@ def _parse_summary_cached(path: str, mtime: float) -> dict[str, Any]:
             elif section == "size_rows":
                 if len(row) > 1:
                     size_rows.append(row)
-    method_df = pd.DataFrame(methods, columns=locals().get("method_header", []))
-    size_df = pd.DataFrame(size_rows, columns=locals().get("size_header", []))
+    method_df = pd.DataFrame(methods, columns=method_header)
+    size_df = pd.DataFrame(size_rows, columns=size_header)
     return {"meta": meta, "methods": method_df, "size_gaps": size_df}
 
 
@@ -474,10 +606,13 @@ def _load_instances_cached(path: str, mtime: float) -> pd.DataFrame:
         return df
     ref_col = "opt" if "opt" in df.columns and pd.to_numeric(df["opt"], errors="coerce").notna().any() else "baseline"
     costs = pd.to_numeric(df[cost_col], errors="coerce")
+    time_col = _primary_time_column(df, cost_col)
+    times = pd.to_numeric(df[time_col], errors="coerce") if time_col else pd.Series(math.nan, index=df.index)
     refs = pd.to_numeric(df.get(ref_col), errors="coerce")
     valid = refs.notna() & (refs.abs() > 1e-12)
     df = df.copy()
     df["primary_cost"] = costs
+    df["primary_time"] = times
     df["gap%"] = ((costs - refs) / refs * 100.0).where(valid)
     if "size_group" not in df.columns and "size" in df.columns:
         size = pd.to_numeric(df["size"], errors="coerce")
@@ -501,8 +636,71 @@ def _load_iters_cached(path: str, mtime: float, usecols: tuple[str, ...], filter
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=list(usecols))
 
 
+@lru_cache(maxsize=16)
+def _load_iters_average_cached(path: str, mtime: float, indices: tuple[int, ...]) -> pd.DataFrame:
+    del mtime
+    header = pd.read_csv(path, nrows=0).columns.tolist()
+    time_col = next((col for col in ["elapsed_s", "outer_elapsed_s", "t"] if col in header), None)
+    usecols = [col for col in ["idx", "method", "iter", "best", time_col] if col and col in header]
+    if not {"idx", "method", "iter", "best"}.issubset(usecols):
+        return pd.DataFrame()
+
+    wanted = set(indices)
+    groups: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(path, usecols=usecols, chunksize=200_000):
+        if wanted:
+            chunk = chunk[chunk["idx"].isin(wanted)]
+        if chunk.empty:
+            continue
+        chunk = chunk.copy()
+        chunk["best"] = pd.to_numeric(chunk["best"], errors="coerce")
+        if time_col:
+            chunk[time_col] = pd.to_numeric(chunk[time_col], errors="coerce")
+            grouped = chunk.groupby(["method", "iter"], dropna=False).agg(
+                best_sum=("best", "sum"),
+                count=("best", "count"),
+                time_sum=(time_col, "sum"),
+                time_count=(time_col, "count"),
+            )
+        else:
+            grouped = chunk.groupby(["method", "iter"], dropna=False).agg(
+                best_sum=("best", "sum"),
+                count=("best", "count"),
+            )
+        groups.append(grouped.reset_index())
+    if not groups:
+        return pd.DataFrame()
+
+    combined = pd.concat(groups, ignore_index=True)
+    agg = {"best_sum": "sum", "count": "sum"}
+    if "time_sum" in combined:
+        agg.update({"time_sum": "sum", "time_count": "sum"})
+    out = combined.groupby(["method", "iter"], dropna=False).agg(agg).reset_index()
+    out["best"] = out["best_sum"] / out["count"].where(out["count"] > 0)
+    if "time_sum" in out:
+        out["time"] = out["time_sum"] / out["time_count"].where(out["time_count"] > 0)
+    return out
+
+
 def _first_existing(df: pd.DataFrame, cols: list[str]) -> str | None:
     return next((col for col in cols if col in df.columns), None)
+
+
+def _primary_time_column(df: pd.DataFrame, cost_col: str) -> str | None:
+    candidates = [
+        col
+        for col in df.columns
+        if col.startswith(f"{cost_col}_time_I") and pd.to_numeric(df[col], errors="coerce").notna().any()
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda col: int(col.rsplit("I", 1)[1]))[-1]
+
+
+def _gap_per_time(gap: float, time: float) -> float:
+    if not math.isfinite(gap) or not math.isfinite(time) or abs(time) <= 1e-12:
+        return math.nan
+    return gap / time
 
 
 def _primary_summary_method(methods: pd.DataFrame) -> dict[str, Any] | None:
@@ -526,7 +724,7 @@ def _loaded_instance_count(path: str | None) -> int | None:
     if not path or not Path(path).exists():
         return None
     text = Path(path).read_text(errors="replace")
-    matches = re.findall(r"Loaded\s+(\d+)\s+instances", text)
+    matches = re.findall(r"Loaded\s+(\d+)\s+(?:\S+\s+)?instances", text)
     return int(matches[-1]) if matches else None
 
 

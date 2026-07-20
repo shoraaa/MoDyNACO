@@ -994,35 +994,51 @@ def _augment_edge_attr_with_dynamic_features(
     dynamic: bool,
     device: str,
 ) -> Tensor:
-    """Append normalized pheromone and incumbent channels to dense edge attributes."""
+    """Append pheromone and incumbent channels to dense edge attributes.
+
+    Mirrors the TSP/CVRP ``build_pyg_data`` "compact3" edge-feature set so the
+    extended BPP/MKP/OP solvers observe the same ACO state representation:
+
+        [base, log_tau_rel, is_in_incumbent]
+
+    ``base`` replaces TSP's ``dist_norm`` physical channel (the extended graphs
+    are fully connected and carry their physical signal via node features).
+    ``is_in_incumbent`` marks edges that are adjacent (either direction) in the
+    incumbent path, exactly like TSP's undirected ``is_in_incumbent`` channel.
+    In static mode only the ``base`` channel is returned (the dynamic model
+    zero-pads it via ``align_edge_attr_width``).
+    """
     base_edge_attr = base_edge_attr.to(device=device, dtype=torch.float32)
     edge_count = base_edge_attr.size(0)
     n_nodes = int(round(edge_count ** 0.5))
 
-    if dynamic:
-        # 1. Pheromone feature (log-relative normalization)
-        tau = aco.pheromone.to(device=device, dtype=torch.float32)
-        tau_mean = tau.mean(dim=1, keepdim=True).clamp_min(1e-12)
-        tau_rel = (tau / tau_mean).clamp_min(1e-12)
-        pheromone_feat = torch.log(tau_rel).clamp(-5.0, 5.0).reshape(edge_count, 1)
-
-        # 2. Incumbent feature (is_source_succ)
-        sp = getattr(aco, 'shortest_path', None)
-        if sp is not None and sp.numel() > 1:
-            is_source_succ = torch.zeros((n_nodes, n_nodes), device=device)
-            u_indices = sp[:-1]
-            v_indices = sp[1:]
-            # Ensure indices are within bounds (handles dummy nodes etc.)
-            mask = (u_indices < n_nodes) & (v_indices < n_nodes)
-            is_source_succ[u_indices[mask], v_indices[mask]] = 1.0
-            incumbent_feat = is_source_succ.reshape(edge_count, 1)
-        else:
-            incumbent_feat = torch.zeros((edge_count, 1), device=device)
-
-        return torch.cat((base_edge_attr, pheromone_feat, incumbent_feat), dim=1)
-    else:
-        # Static mode: just return the base edge attribute (1 channel)
+    if not dynamic:
+        # Static mode: just the base edge attribute (constant graph).
         return base_edge_attr
+
+    # --- Pheromone feature (per-source log-relative normalization, TSP log_tau_rel) ---
+    tau = aco.pheromone.to(device=device, dtype=torch.float32)
+    tau_mean = tau.mean(dim=1, keepdim=True).clamp_min(1e-12)
+    tau_rel = (tau / tau_mean).clamp_min(1e-12)
+    log_tau_rel = torch.log(tau_rel).clamp(-5.0, 5.0).reshape(edge_count, 1)
+
+    # --- Incumbent feature (undirected membership, TSP is_in_incumbent) ---
+    sp = getattr(aco, 'shortest_path', None)
+    if sp is not None and sp.numel() > 1:
+        sp = sp.to(device=device, dtype=torch.long)
+        incumbent_mat = torch.zeros((n_nodes, n_nodes), device=device, dtype=torch.float32)
+        u_indices = sp[:-1]
+        v_indices = sp[1:]
+        mask = (u_indices < n_nodes) & (v_indices < n_nodes)
+        um = u_indices[mask]
+        vm = v_indices[mask]
+        incumbent_mat[um, vm] = 1.0
+        incumbent_mat[vm, um] = 1.0  # undirected: mark both orientations
+        is_in_incumbent = incumbent_mat.reshape(edge_count, 1)
+    else:
+        is_in_incumbent = torch.zeros((edge_count, 1), device=device, dtype=torch.float32)
+
+    return torch.cat((base_edge_attr, log_tau_rel, is_in_incumbent), dim=1)
 
 
 # =============================================================================
@@ -1031,7 +1047,12 @@ def _augment_edge_attr_with_dynamic_features(
 
 # ----------------- BPP (Bin Packing Problem) -----------------
 
-DEMAND_LOW = 20
+# Harder BPP: items in [50,100] with capacity 150 make packing a tight matching
+# problem (at most 2-3 items/bin, small+large pairings), so there are many diverse
+# near-optimal packings of DIFFERENT quality -> a good heuristic clearly beats a
+# poor one AND diverse heads find genuinely different solutions (the pre-condition
+# for the multi-head ensemble to help, absent in the easy [20,100] distribution).
+DEMAND_LOW = 50
 DEMAND_HIGH = 100
 CAPACITY = 150
 
@@ -1094,9 +1115,23 @@ def load_bpp_test_dataset(problem_size: int, device: torch.device):
 
 # ----------------- MKP (Multi-dimensional Knapsack Problem) -----------------
 
+# MKP hardness controls (Chu & Beasley style). The C++/replay budget is a
+# fixed n/2 per constraint, so we scale weights to make the capacity *binding*
+# (only ~1/MKP_WEIGHT_SCALE of the items fit) and correlate profits with weights
+# so the prize/weight-ratio heuristic is (near) uninformative.  Uniform,
+# uncorrelated instances with a non-binding budget are trivial: ACO takes almost
+# every item regardless of the heuristic, so dynamic/static/pure all tie.
+MKP_WEIGHT_SCALE = 4.0        # tightness alpha ~= 1/scale = 0.25 (binding)
+MKP_PROFIT_NOISE = 0.5        # profit = mean_j(weight) + NOISE*scale*U(0,1)
+
 def gen_mkp_instance(n: int, m: int, device: torch.device) -> tuple[Tensor, Tensor]:
     """
-    Generate an MKP instance.
+    Generate a (non-trivial) MKP instance.
+
+    Weights are scaled so the fixed n/2-per-constraint budget is binding
+    (~25% of items fit) and profits are weakly correlated with weights, so the
+    default prize/weight-ratio heuristic is uninformative and a learned
+    heuristic has real room to help (mirrors the standard hard MKP benchmark).
 
     Args:
         n: Number of items
@@ -1107,8 +1142,8 @@ def gen_mkp_instance(n: int, m: int, device: torch.device) -> tuple[Tensor, Tens
         prize: Prize tensor of shape (n,)
         weight: Weight tensor of shape (n, m)
     """
-    prize = torch.rand(n, device=device)
-    weight = torch.rand(n, m, device=device)
+    weight = torch.rand(n, m, device=device) * MKP_WEIGHT_SCALE
+    prize = weight.mean(dim=1) + MKP_PROFIT_NOISE * MKP_WEIGHT_SCALE * torch.rand(n, device=device)
     return prize, weight
 
 def build_pyg_data_mkp(
@@ -2441,6 +2476,23 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
 
     if hasattr(aco, 'reset_timings'): aco.reset_timings()
 
+    single_head_seed_heads = int(getattr(args, "single_head_seed_heads", 0) or 0)
+    seed_head_acos = []
+    if model is not None and not use_heuristic_only and single_head_seed_heads > 1:
+        if single_head_seed_heads > int(n_ants):
+            raise ValueError(
+                f"single_head_seed_heads={single_head_seed_heads} cannot exceed n_ants={n_ants}"
+            )
+        if not hasattr(aco, "sample_mixed_priors"):
+            raise ValueError("--single_head_seed_heads requires a backend with sample_mixed_priors")
+        for head_idx in range(single_head_seed_heads):
+            head_aco = aco_class(**kwargs)
+            if hasattr(head_aco, "seed_rng"):
+                head_aco.seed_rng(int(instance_seed) + 1009 * (head_idx + 1))
+            if hasattr(head_aco, "reset_timings"):
+                head_aco.reset_timings()
+            seed_head_acos.append(head_aco)
+
     best_seen = float("inf")
     avg_last = None
     t_neural_total = 0.0
@@ -2514,7 +2566,32 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                 
                 if use_model:
                     t_neural_start = time.time()
-                    if (
+                    if seed_head_acos:
+                        head_priors = []
+                        for head_aco in seed_head_acos:
+                            if problem == 'tsp':
+                                head_pyg = build_fn(head_aco, norm_coords, args.device, dynamic=dynamic,
+                                                    ablation_pheromone=ablation_pheromone,
+                                                    ablation_incumbent=ablation_incumbent,
+                                                    edge_feature_set=getattr(args, "edge_feature_set", "full"))
+                            else:
+                                head_pyg = build_fn(head_aco, norm_coords, demand, args.device, dynamic=dynamic,
+                                                    ablation_pheromone=ablation_pheromone,
+                                                    ablation_incumbent=ablation_incumbent,
+                                                    edge_feature_set=getattr(args, "edge_feature_set", "full"))
+                            head_output = model(head_pyg)
+                            if head_output.dim() == 2:
+                                raise ValueError(
+                                    "--single_head_seed_heads expects a single-head model; "
+                                    "got multi-head model output"
+                                )
+                            head_priors.append(dynaco_net.output_to_sparse_prior(head_output, head_aco.n, head_aco.k))
+                        prior_mat = torch.stack(head_priors, dim=0)
+                        prior_for_metrics = prior_mat.mean(dim=0)
+                        prior_head_counts = head_counts_for_router(
+                            args, int(prior_mat.shape[0]), n_ants, head_router
+                        )
+                    elif (
                         _head_input_transform_mode(args) not in {"none", "identity"}
                         and int(getattr(args, "num_heads", 1)) > 1
                     ):
@@ -2710,6 +2787,31 @@ def infer_instance(problem, aco_class, build_fn, model, instance_data, k_sparse,
                     aco._update_pheromone_from_flat(flats[best_idx], best_cost)
                 else:
                     aco.update_pheromone(flats[best_idx], best_cost)
+
+                if seed_head_acos:
+                    for head_idx, head_aco in enumerate(seed_head_acos):
+                        head_prior = None
+                        if current_prior is not None and getattr(current_prior, "ndim", None) == 3:
+                            head_prior = current_prior[head_idx] * float(prior_scale)
+                        if problem == 'tsp':
+                            h_costs, h_flats, _, _, _, _, _, _, _ = head_aco.sample(
+                                require_prob=False,
+                                prior=head_prior,
+                                parallel_traced=True,
+                            )
+                            h_best_idx = int(h_costs.argmin().item())
+                            h_best_cost = float(h_costs[h_best_idx].item())
+                            head_aco._update_pheromone_from_flat(h_flats[h_best_idx], h_best_cost)
+                        else:
+                            h_costs, h_routes, _, _, _, _, _, _, _ = head_aco.sample(
+                                require_prob=False,
+                                prior=head_prior,
+                                return_decoded=False,
+                                parallel_traced=True,
+                            )
+                            h_best_idx = int(h_costs.argmin().item())
+                            h_best_cost = float(h_costs[h_best_idx].item())
+                            head_aco.update_pheromone(h_routes[h_best_idx], h_best_cost)
 
                 incumbent_after_aco = float(best_seen)
                 stage_totals["avg_ant_before_ls"] += avg_raw

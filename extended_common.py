@@ -13,7 +13,7 @@ import torch
 # Unified modules
 import faco
 import utils
-from net import NetBPP, NetMKP, NetOP
+from net import NetBPP, NetMKP, NetOP, MultiHeadNet
 
 
 EXTENDED_PROBLEMS = ("bpp", "mkp", "op")
@@ -36,12 +36,21 @@ def build_model_name(args: argparse.Namespace) -> str:
         name += "_static"
     if getattr(args, "static_prior", False):
         name += "_static_prior"
+    if getattr(args, "multi_head", False):
+        nh = getattr(args, "num_heads", 4)
+        dt = getattr(args, "head_decoder_type", "deep_lora")
+        name += f"_mh{nh}_{dt}"
 
     return name
 
 
 def get_model_edge_feats(args: argparse.Namespace) -> int:
-    """Return the model edge width for the selected extended training regime."""
+    """Return the model edge width for the selected extended training regime.
+
+    Dynamic runs use the TSP/CVRP "compact3" edge-feature set
+    ([base, log_tau_rel, is_in_incumbent]); static-prior runs see only the
+    constant ``base`` channel.
+    """
     return 1 if getattr(args, "static_prior", False) else 3
 
 
@@ -85,6 +94,43 @@ def compute_relative_improvement(
     if is_maximization_problem(problem_type):
         return (candidate - baseline) / abs(baseline) * 100.0
     return (baseline - candidate) / abs(baseline) * 100.0
+
+
+def prior_output_to_heuristic(
+    prior: torch.Tensor,
+    base_heuristic: torch.Tensor,
+    *,
+    logit_net: bool,
+) -> torch.Tensor:
+    """Convert model output into positive heuristic weights.
+
+    Extended BPP/MKP/OP solvers consume ``aco.heuristic`` as constructive
+    weights and their C++ samplers only read the pheromone/heuristic channels
+    (they cannot take an additive ``prior`` term during sampling like the TSP/
+    CVRP samplers do).  To reproduce the TSP/CVRP sampling distribution
+
+        log_w = alpha*log(tau) + beta*log(eta) + prior
+
+    we fold the neural output into the heuristic as ``eta * exp(prior)`` so that
+    ``beta*log(heuristic) = beta*log(eta) + beta*prior``.  The model output is
+    therefore a *raw additive logit* on top of the default problem heuristic,
+    exactly like ``output_to_sparse_prior`` for TSP/CVRP (an untrained model
+    with prior~0 gives multiplier~1, i.e. plain ACO).
+    """
+    if logit_net:
+        # Additive-logit modulation matching TSP/CVRP: heuristic = eta * exp(prior)
+        # so that beta*log(heuristic) = beta*log(eta) + beta*prior.  During training
+        # the GNN's batch-norm keeps the prior O(1), so the tanh bound is ~linear
+        # (identity) there; it only saturates in the eval-at-init corner case where
+        # BN running stats are uninitialized.  For |prior| << LOGIT_BOUND this is the
+        # plain additive logit (an untrained model gives multiplier ~ 1, i.e. ACO).
+        LOGIT_BOUND = 6.0
+        bounded_logit = LOGIT_BOUND * torch.tanh(prior / LOGIT_BOUND)
+        multiplier = torch.exp(bounded_logit)
+    else:
+        multiplier = prior.clamp_min(EPS)
+    base = base_heuristic.to(device=prior.device, dtype=prior.dtype)
+    return torch.where(base > EPS, base * multiplier, multiplier)
 
 
 def align_edge_attr_width(pyg_data: Any, expected_edge_feats: int) -> Any:
@@ -171,22 +217,87 @@ def get_pyg_args(problem_type: str, data: Dict[str, torch.Tensor], device: str) 
     raise ValueError(f"Unknown problem type: {problem_type}")
 
 
+def get_problem_n(problem_type: str, data: Dict[str, Any]) -> int:
+    """Extract the problem size n from the data dict (number of non-depot items)."""
+    if problem_type == "bpp":
+        return len(data["demand"]) - 1
+    if problem_type == "mkp":
+        return len(data["prize"])
+    if problem_type == "op":
+        return len(data["prizes"])
+    raise ValueError(f"Unknown problem type: {problem_type}")
+
+
+def reshape_multihead_extended_prior(
+    prior_output: torch.Tensor,
+    num_heads: int,
+    n: int,
+) -> torch.Tensor:
+    """Reshape multi-head model output (E, H) → (H, n+1, n+1).
+
+    All three extended problems build fully-connected graphs with (n+1)^2 edges,
+    so the model produces (E, H) = ((n+1)^2, H) which we reshape to (H, n+1, n+1).
+    """
+    return prior_output.T.contiguous().view(num_heads, n + 1, n + 1)
+
+
 def create_model(
     problem_type: str,
     *,
     m: int = 5,
     feats: Optional[int] = None,
     edge_feats: int,
+    multi_head: bool = False,
+    num_heads: int = 4,
+    rank: int = 8,
+    lora_alpha: float = 1.0,
+    freeze_lora_base: bool = False,
+    head_decoder_type: str = "deep_lora",
+    head_zdim: int = 128,
+    head_adapter_init: str = "random",
+    head_adapter_init_std: float = 0.02,
+    **kwargs: Any,
 ) -> Any:
     """Create the neural model for the selected extended problem."""
+    if not multi_head:
+        single_head_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in {"grad_checkpointing", "logit_net"}
+        }
+        if problem_type == "bpp":
+            return NetBPP(feats=1 if feats is None else feats, edge_feats=edge_feats, **single_head_kwargs)
+        if problem_type == "mkp":
+            resolved_feats = (m + 1) if feats is None else feats
+            return NetMKP(m=m, feats=resolved_feats, edge_feats=edge_feats, **single_head_kwargs)
+        if problem_type == "op":
+            return NetOP(feats=2 if feats is None else feats, edge_feats=edge_feats, **single_head_kwargs)
+        raise ValueError(f"Unknown problem: {problem_type}")
+
+    # Multi-head path: use MultiHeadNet with problem-specific feature dimensions
     if problem_type == "bpp":
-        return NetBPP(feats=1 if feats is None else feats, edge_feats=edge_feats)
-    if problem_type == "mkp":
+        resolved_feats = 1 if feats is None else feats
+    elif problem_type == "mkp":
         resolved_feats = (m + 1) if feats is None else feats
-        return NetMKP(m=m, feats=resolved_feats, edge_feats=edge_feats)
-    if problem_type == "op":
-        return NetOP(feats=2 if feats is None else feats, edge_feats=edge_feats)
-    raise ValueError(f"Unknown problem: {problem_type}")
+    elif problem_type == "op":
+        resolved_feats = 2 if feats is None else feats
+    else:
+        raise ValueError(f"Unknown problem: {problem_type}")
+    return MultiHeadNet(
+        problem_type=problem_type,
+        m=m,
+        feats=resolved_feats,
+        edge_feats=edge_feats,
+        num_heads=num_heads,
+        rank=rank,
+        lora_alpha=lora_alpha,
+        freeze_lora_base=freeze_lora_base,
+        head_decoder_type=head_decoder_type,
+        head_zdim=head_zdim,
+        head_adapter_init=head_adapter_init,
+        head_adapter_init_std=head_adapter_init_std,
+        **kwargs,
+    )
 
 
 def setup_aco(
@@ -207,7 +318,7 @@ def setup_aco(
             decay=args.rho,
             alpha=args.alpha,
             beta=args.beta,
-            elitist=False,
+            elitist=bool(getattr(args, "elitist", False)),
             heuristic=heuristic,
             device=args.device,
         )
@@ -219,7 +330,7 @@ def setup_aco(
             decay=args.rho,
             alpha=args.alpha,
             beta=args.beta,
-            elitist=False,
+            elitist=bool(getattr(args, "elitist", False)),
             heuristic=heuristic,
             device=args.device,
         )
@@ -232,7 +343,7 @@ def setup_aco(
             decay=args.rho,
             alpha=args.alpha,
             beta=args.beta,
-            elitist=False,
+            elitist=bool(getattr(args, "elitist", False)),
             heuristic=heuristic,
             device=args.device,
         )
@@ -286,4 +397,3 @@ def add_extended_problem_args(parser: argparse.ArgumentParser) -> argparse.Argum
     parser.add_argument("--capacity", type=float, default=150.0, help="Bin capacity for BPP")
     parser.add_argument("--max_len", type=float, default=4.0, help="Maximum route length for OP")
     return parser
-

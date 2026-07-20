@@ -51,8 +51,11 @@ from extended_common import (
     create_model as create_extended_model,
     extract_problem_data as extract_extended_problem_data,
     get_model_edge_feats as get_extended_model_edge_feats,
+    get_problem_n as get_extended_problem_n,
     prior_kwargs as get_extended_prior_kwargs,
+    prior_output_to_heuristic as extended_prior_output_to_heuristic,
     raw_values_to_objective as extended_raw_values_to_objective,
+    reshape_multihead_extended_prior,
     reshape_prior_output as reshape_extended_prior_output,
     select_best_value as select_extended_best_value,
     setup_aco as setup_extended_aco,
@@ -783,6 +786,15 @@ def _head_cost_scores(head_costs: torch.Tensor, args: Optional[argparse.Namespac
     return head_costs.mean(dim=1)
 
 
+def _head_loss_mode(args: argparse.Namespace) -> str:
+    mode = str(getattr(args, "head_loss_mode", "winner") or "winner").strip().lower()
+    if mode in {"winner", "winner_selected", "best"}:
+        return "winner"
+    if mode in {"mean", "all", "all_heads"}:
+        return "mean"
+    raise ValueError(f"Unsupported head_loss_mode={mode!r}; expected 'winner' or 'mean'")
+
+
 def _split_ant_counts(n_ants: int, num_heads: int) -> List[int]:
     return _split_ant_counts_from_weights(n_ants, num_heads, None)
 
@@ -1031,29 +1043,48 @@ def _collect_multi_head_rollout(
     selected_head = int(torch.argmin(_head_cost_scores(costs_by_head, args).detach()).item())
 
     with torch.no_grad():
-        h0, h1 = _head_ant_range(head_counts, selected_head)
-        selected_prior = current_prior[selected_head:selected_head + 1].expand(h1 - h0, -1, -1)
-        tau_ant = tau_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
-        eta_ant = eta_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
-        log_prob_old = log_prob_sparse_from_tau_eta_prior(
-            tau_ant, eta_ant, selected_prior,
-            alpha=args.alpha, beta=args.beta, eps=EPS
-        )
-        logp_old_selected, ndec_selected = replay_logp_from_cpp_batch_trace_ant_slice(
-            traces, log_prob_old, h0, h1
-        )
-        ndec_f = ndec_selected.to(torch.float32).clamp_min(1.0)
-        logp_old_selected = (logp_old_selected / ndec_f).detach()
-        logp_old_by_head = [
-            logp_old_selected.detach() if h == selected_head
-            else current_prior.new_zeros((int(count),), dtype=torch.float32).detach()
-            for h, count in enumerate(head_counts)
-        ]
-        ndec_by_head = [
-            ndec_selected.detach() if h == selected_head
-            else torch.zeros((int(count),), device=current_prior.device, dtype=torch.int32)
-            for h, count in enumerate(head_counts)
-        ]
+        if _head_loss_mode(args) == "mean":
+            logp_old_by_head = []
+            ndec_by_head = []
+            for h, count in enumerate(head_counts):
+                h0, h1 = _head_ant_range(head_counts, h)
+                head_prior = current_prior[h:h + 1].expand(h1 - h0, -1, -1)
+                tau_ant = tau_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
+                eta_ant = eta_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
+                log_prob_old = log_prob_sparse_from_tau_eta_prior(
+                    tau_ant, eta_ant, head_prior,
+                    alpha=args.alpha, beta=args.beta, eps=EPS
+                )
+                logp_old_h, ndec_h = replay_logp_from_cpp_batch_trace_ant_slice(
+                    traces, log_prob_old, h0, h1
+                )
+                ndec_f = ndec_h.to(torch.float32).clamp_min(1.0)
+                logp_old_by_head.append((logp_old_h / ndec_f).detach())
+                ndec_by_head.append(ndec_h.detach())
+        else:
+            h0, h1 = _head_ant_range(head_counts, selected_head)
+            selected_prior = current_prior[selected_head:selected_head + 1].expand(h1 - h0, -1, -1)
+            tau_ant = tau_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
+            eta_ant = eta_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
+            log_prob_old = log_prob_sparse_from_tau_eta_prior(
+                tau_ant, eta_ant, selected_prior,
+                alpha=args.alpha, beta=args.beta, eps=EPS
+            )
+            logp_old_selected, ndec_selected = replay_logp_from_cpp_batch_trace_ant_slice(
+                traces, log_prob_old, h0, h1
+            )
+            ndec_f = ndec_selected.to(torch.float32).clamp_min(1.0)
+            logp_old_selected = (logp_old_selected / ndec_f).detach()
+            logp_old_by_head = [
+                logp_old_selected.detach() if h == selected_head
+                else current_prior.new_zeros((int(count),), dtype=torch.float32).detach()
+                for h, count in enumerate(head_counts)
+            ]
+            ndec_by_head = [
+                ndec_selected.detach() if h == selected_head
+                else torch.zeros((int(count),), device=current_prior.device, dtype=torch.int32)
+                for h, count in enumerate(head_counts)
+            ]
 
     best_idx = int(costs_all.argmin().item())
     if alloc_action is not None:
@@ -1165,6 +1196,41 @@ def _multi_head_ppo_loss(
     selected_head: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     head_scores = _head_cost_scores(costs_by_head, args)
+    if _head_loss_mode(args) == "mean":
+        losses = []
+        approx_kls = []
+        clip_fracs = []
+        baseline = head_scores.mean()
+        for h, count in enumerate(head_counts):
+            h0, h1 = _head_ant_range(head_counts, h)
+            head_prior = current_prior[h:h + 1].expand(h1 - h0, -1, -1)
+            tau_ant = tau_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
+            eta_ant = eta_nk.unsqueeze(0).expand(h1 - h0, -1, -1)
+            log_prob_new = log_prob_sparse_from_tau_eta_prior(
+                tau_ant, eta_ant, head_prior,
+                alpha=args.alpha, beta=args.beta, eps=EPS
+            )
+            logp_new, ndec_new = replay_logp_from_cpp_batch_trace_ant_slice(
+                traces, log_prob_new, h0, h1
+            )
+            ndec_f = ndec_new.to(torch.float32).clamp_min(1.0)
+            logp_new = logp_new / ndec_f
+            loss_h, approx_kl_h, clip_frac_h = _ppo_clipped_loss(
+                logp_new,
+                logp_old_by_head[h],
+                costs_by_head[h],
+                args,
+                baseline=baseline,
+            )
+            losses.append(loss_h)
+            approx_kls.append(approx_kl_h)
+            clip_fracs.append(clip_frac_h)
+        return (
+            torch.stack(losses).mean(),
+            torch.stack(approx_kls).mean(),
+            torch.stack(clip_fracs).mean(),
+        )
+
     selected = (
         int(selected_head)
         if selected_head is not None
@@ -2670,14 +2736,19 @@ def _train_extended_instance_reinforce(
     optimizer: torch.optim.Optimizer,
     instance_data: Any,
     args: argparse.Namespace,
+    head_router: Any = None,
 ) -> Tuple[float, float, Dict[str, float]]:
     """Train on a single extended-problem instance using REINFORCE."""
     model.train()
 
     data = extract_extended_problem_data(args.problem, instance_data)
     aco, pyg_args = setup_extended_aco(args, instance_data, args.problem, heuristic=None)
+    base_heuristic = aco.heuristic.detach().clone()
     expected_edge_feats = get_extended_model_edge_feats(args)
     dynamic_graph = use_extended_dynamic_edge_features(args)
+    is_multihead = _multi_head_enabled(args)
+    num_heads = int(getattr(args, "num_heads", 1)) if is_multihead else 1
+    n_problem = get_extended_problem_n(args.problem, data) if is_multihead else 0
 
     static_pyg_data = None
     if args.static_prior:
@@ -2699,63 +2770,427 @@ def _train_extended_instance_reinforce(
             pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=dynamic_graph)
             pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
 
-        prior_output = model(pyg_data)
-        prior = reshape_extended_prior_output(
-            prior_output,
-            args.problem,
-            **get_extended_prior_kwargs(args.problem, data),
-        )
-        t_neural_total += time.time() - t0
+        if is_multihead:
+            # Multi-head forward: (E, H) output reshaped to (H, n+1, n+1)
+            alloc_logits = None
+            if _learned_router_enabled(args) and hasattr(model, "forward_with_alloc"):
+                prior_output, alloc_logits = model.forward_with_alloc(pyg_data)
+            else:
+                prior_output = model(pyg_data)
+            prior_all = reshape_multihead_extended_prior(prior_output, num_heads, n_problem)
+            t_neural_total += time.time() - t0
 
-        all_logp_sums = []
-        all_objectives = []
+            # Per-head accumulators for this outer step
+            all_logp_sums_per_head: List[List[torch.Tensor]] = [[] for _ in range(num_heads)]
+            all_objectives_per_head: List[List[torch.Tensor]] = [[] for _ in range(num_heads)]
+            alloc_actions: List[AllocationAction] = []
+            alloc_rewards: List[torch.Tensor] = []
 
-        for inner in range(args.mini_H):
-            t_aco_start_inner = time.time()
-            current_prior = prior
-            if args.train_anneal:
-                factor = compute_annealing_factor(inner, args.mini_H, args.gamma, args.min_gamma)
-                current_prior = prior * factor
+            for inner in range(args.mini_H):
+                t_aco_start_inner = time.time()
+                current_prior_all = prior_all
+                if args.train_anneal:
+                    factor = compute_annealing_factor(inner, args.mini_H, args.gamma, args.min_gamma)
+                    current_prior_all = prior_all * factor
 
-            aco.heuristic = current_prior.to(device=args.device, dtype=torch.float32)
-            aco._sync_cpp_inputs()
-
-            costs, paths, logps, _ = aco.sample(require_prob=True, prior=None, parallel_traced=True)
-            costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
-            objective_t = extended_raw_values_to_objective(costs_t, args.problem)
-            best_cost_obj = select_extended_best_value(costs_t, args.problem)
-            best_seen = max(best_seen, best_cost_obj)
-
-            with torch.no_grad():
-                aco.update_pheromone(paths, costs)
-
-            avg_cost_last = float(objective_t.mean().item())
-            t_aco_total += time.time() - t_aco_start_inner
-
-            if outer >= args.warmup:
-                if args.static_prior:
-                    logp_steps_new = aco._replay_logp_from_paths(
-                        paths,
-                        current_prior,
-                        pheromone=aco.pheromone,
-                        heuristic=current_prior,
+                alloc_action = None
+                if _learned_router_enabled(args):
+                    if alloc_logits is None:
+                        raise ValueError("learned head router requires allocation logits")
+                    head_counts, alloc_action, _ = _sample_learned_allocation(
+                        alloc_logits, args, deterministic=False
                     )
-                    if logp_steps_new.size(0) > 0:
-                        logp_sum = logp_steps_new.sum(dim=0)
-                    else:
-                        logp_sum = torch.zeros((paths.size(1),), device=args.device)
                 else:
+                    head_counts = utils.head_counts_for_router(args, num_heads, aco.n_ants, head_router)
+                pheromone_before = aco.pheromone.detach().clone()
+                path_chunks: List[torch.Tensor] = []
+                cost_chunks: List[torch.Tensor] = []
+                objective_chunks: List[torch.Tensor] = []
+                heuristic_chunks: List[torch.Tensor] = []
+
+                for h, count in enumerate(head_counts):
+                    head_prior = extended_prior_output_to_heuristic(
+                        current_prior_all[h],
+                        base_heuristic,
+                        logit_net=not bool(getattr(args, "no_logit_net", False)),
+                    )
+                    aco.heuristic = head_prior.to(device=args.device, dtype=torch.float32)
+                    aco._sync_cpp_inputs()
+                    heuristic_chunks.append(aco.heuristic)
+
+                    costs_h, paths_h, _logps_h, _ = aco.sample(
+                        require_prob=True,
+                        prior=None,
+                        parallel_traced=True,
+                    )
+                    costs_h_t = torch.as_tensor(costs_h, device=args.device, dtype=torch.float32)[:count]
+                    paths_h_t = paths_h[:, :count]
+                    path_chunks.append(paths_h_t)
+                    cost_chunks.append(costs_h_t)
+                    objective_chunks.append(extended_raw_values_to_objective(costs_h_t, args.problem))
+
+                paths = _concat_extended_head_batches(path_chunks, args.device)
+                costs_t = torch.cat(cost_chunks)
+                objective_t = torch.cat(objective_chunks)
+                best_cost_obj = select_extended_best_value(costs_t, args.problem)
+                best_seen = max(best_seen, best_cost_obj)
+                if alloc_action is not None:
+                    alloc_actions.append(alloc_action)
+                    alloc_rewards.append(objective_t.max().detach())
+
+                with torch.no_grad():
+                    aco.update_pheromone(paths, costs_t)
+
+                avg_cost_last = float(objective_t.mean().item())
+                t_aco_total += time.time() - t_aco_start_inner
+
+                if outer >= args.warmup:
+                    start = 0
+                    for h in range(num_heads):
+                        count = int(head_counts[h])
+                        end = start + count
+                        logp_h = aco._replay_logp_from_paths(
+                            paths,
+                            prior=None,
+                            pheromone=pheromone_before,
+                            heuristic=heuristic_chunks[h],
+                        )
+                        logp_h = logp_h[:, start:end]
+                        logp_sum_h = logp_h.sum(dim=0) if logp_h.size(0) > 0 else torch.zeros(
+                            (count,), device=args.device
+                        )
+                        all_logp_sums_per_head[h].append(logp_sum_h)
+                        all_objectives_per_head[h].append(objective_chunks[h])
+                        start = end
+
+            if outer >= args.warmup and all_logp_sums_per_head[0]:
+                losses_per_head: List[torch.Tensor] = []
+                for h in range(num_heads):
+                    logp_cat = torch.cat(all_logp_sums_per_head[h])
+                    obj_cat = torch.cat(all_objectives_per_head[h])
+                    adv = (obj_cat - obj_cat.mean()).detach()
+                    loss_h = -torch.sum(adv * logp_cat) / (aco.n_ants * args.mini_H)
+                    losses_per_head.append(loss_h)
+
+                if _head_loss_mode(args) == "mean":
+                    loss = torch.stack(losses_per_head).mean()
+                else:  # winner: use head with highest mean objective
+                    head_mean_objs = torch.tensor(
+                        [torch.cat(all_objectives_per_head[h]).mean().item() for h in range(num_heads)],
+                        dtype=torch.float32,
+                    )
+                    winner = int(head_mean_objs.argmax().item())
+                    loss = losses_per_head[winner]
+
+                if _learned_router_enabled(args) and alloc_actions:
+                    rewards = torch.stack(alloc_rewards).to(device=args.device, dtype=torch.float32)
+                    if rewards.numel() > 1:
+                        rewards = (rewards - rewards.mean()) / rewards.std(unbiased=False).clamp_min(1e-6)
+                    else:
+                        rewards = rewards - rewards.mean()
+                    alloc_loss, alloc_kl, alloc_clip, alloc_entropy, alloc_entropy_bonus = _allocation_ppo_loss(
+                        alloc_logits, alloc_actions, rewards, args
+                    )
+                    loss = loss + float(getattr(args, "allocator_loss_coef", 1.0)) * alloc_loss
+
+                # Head-diversity reward (TSP/CVRP _multi_head_js_loss_term): keep the
+                # heads specialized so best-across-heads / the learned allocator can
+                # beat any single head, especially OOD.
+                js_loss = _multi_head_js_loss_term(prior_all, args)
+                if js_loss.detach().item() != 0.0:
+                    loss = loss + js_loss
+                    metrics.add("loss_js", js_loss.detach().item())
+
+                # L2 penalty on the raw prior magnitude: the additive-logit exp/tanh
+                # mapping lets Adam drift outputs into the tanh-saturation zone (std
+                # ~1e6), which destabilizes long multi-head training and regresses OOD.
+                prior_reg = float(getattr(args, "prior_reg_coef", 0.0) or 0.0)
+                if prior_reg > 0.0:
+                    loss = loss + prior_reg * prior_all.pow(2).mean()
+                    metrics.add("prior_l2", prior_all.detach().pow(2).mean().item())
+
+                # Update head router using last inner-step costs
+                head_counts = utils.head_counts_for_router(args, num_heads, aco.n_ants, head_router)
+                utils.update_head_router(head_router, head_counts, costs_t.cpu().numpy())
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+                metrics.add("loss", loss.item())
+                metrics.add("grad_norm", grad_norm.item())
+                if _learned_router_enabled(args) and alloc_actions:
+                    metrics.add("allocator_loss", float(alloc_loss.detach().item()))
+                    metrics.add("allocator_kl", float(alloc_kl.item()))
+                    metrics.add("allocator_clip_frac", float(alloc_clip.item()))
+                    metrics.add("allocator_policy_entropy_update", float(alloc_entropy.item()))
+                    metrics.add("allocator_entropy_bonus", float(alloc_entropy_bonus.item()))
+                for h in range(num_heads):
+                    metrics.add(f"head{h}/prior_mean", prior_all[h].mean().item())
+                    metrics.add(f"head{h}/prior_std", prior_all[h].std().item())
+                outer_pbar.set_postfix({
+                    "obj": f"{best_seen:.4f}",
+                    "avg": f"{avg_cost_last:.4f}",
+                    "loss": f"{loss.item():.4f}",
+                })
+
+        else:
+            # Match the TSP/CVRP training path: decode one state-aware prior
+            # for this outer ACO state, then replay the full inner rollout
+            # against the stored pheromone states during the policy update.
+            prior_output = model(pyg_data)
+            prior = reshape_extended_prior_output(
+                prior_output,
+                args.problem,
+                **get_extended_prior_kwargs(args.problem, data),
+            )
+            t_neural_total += time.time() - t0
+
+            all_logp_sums: List[torch.Tensor] = []
+            all_objectives: List[torch.Tensor] = []
+
+            for inner in range(args.mini_H):
+                t_inner_start = time.time()
+                t_aco_start_inner = time.time()
+                current_prior = prior
+                if args.train_anneal:
+                    factor = compute_annealing_factor(inner, args.mini_H, args.gamma, args.min_gamma)
+                    current_prior = prior * factor
+
+                current_heuristic = extended_prior_output_to_heuristic(
+                    current_prior,
+                    base_heuristic,
+                    logit_net=not bool(getattr(args, "no_logit_net", False)),
+                )
+                aco.heuristic = current_heuristic.to(device=args.device, dtype=torch.float32)
+                aco._sync_cpp_inputs()
+
+                costs, paths, logps, _ = aco.sample(require_prob=True, prior=None, parallel_traced=True)
+                costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+                objective_t = extended_raw_values_to_objective(costs_t, args.problem)
+                best_cost_obj = select_extended_best_value(costs_t, args.problem)
+                best_seen = max(best_seen, best_cost_obj)
+
+                with torch.no_grad():
+                    aco.update_pheromone(paths, costs)
+
+                avg_cost_last = float(objective_t.mean().item())
+                t_aco_total += time.time() - t_aco_start_inner
+
+                if outer >= args.warmup:
                     logp_sum = logps.sum(dim=0)
 
-                all_logp_sums.append(logp_sum)
-                all_objectives.append(objective_t)
+                    all_logp_sums.append(logp_sum)
+                    all_objectives.append(objective_t)
 
-        if outer >= args.warmup and all_logp_sums:
-            logp_sums_t = torch.cat(all_logp_sums)
-            objectives_t = torch.cat(all_objectives)
-            baseline = objectives_t.mean()
-            adv = (objectives_t - baseline).detach()
-            loss = -torch.sum(adv * logp_sums_t) / (aco.n_ants * args.mini_H)
+            if outer >= args.warmup and all_logp_sums:
+                logp_sums_t = torch.cat(all_logp_sums)
+                objectives_t = torch.cat(all_objectives)
+                baseline = objectives_t.mean()
+                adv = (objectives_t - baseline).detach()
+                loss = -torch.sum(adv * logp_sums_t) / (aco.n_ants * args.mini_H)
+
+                prior_reg = float(getattr(args, "prior_reg_coef", 0.0) or 0.0)
+                if prior_reg > 0.0:
+                    loss = loss + prior_reg * prior.pow(2).mean()
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+                metrics.add("loss", loss.item())
+                metrics.add("grad_norm", grad_norm.item())
+                metrics.add("prior_mean", prior.mean().item())
+                metrics.add("prior_std", prior.std().item())
+                outer_pbar.set_postfix({
+                    "obj": f"{best_seen:.4f}",
+                    "avg": f"{avg_cost_last:.4f}",
+                    "loss": f"{loss.item():.4f}",
+                })
+
+    out_metrics = metrics.get_all_means()
+    out_metrics["time_neural"] = t_neural_total
+    out_metrics["time_aco"] = t_aco_total
+    return avg_cost_last, best_seen, out_metrics
+
+
+def _train_extended_instance_ppo(
+    model: Any,
+    optimizer: torch.optim.Optimizer,
+    instance_data: Any,
+    args: argparse.Namespace,
+    head_router: Any = None,
+) -> Tuple[float, float, Dict[str, float]]:
+    """Train one extended-problem instance with multi-head PPO.
+
+    Mirrors the TSP/CVRP PPO multi-head loop (``configs/tsp/n1000_deep_100.yaml``):
+    roll out ``mini_H`` inner ACO steps under the *old* (detached) per-head prior,
+    store the ant paths / pheromone states / old log-probs, then run ``ppo_epochs``
+    clipped-surrogate updates that re-decode the priors (with grad) and replay the
+    stored paths.  The winner-take-all head selection plus repeated PPO updates give
+    different heads room to specialise, which the short single-update REINFORCE loop
+    never did (heads collapsed to identical policies).
+    """
+    model.train()
+
+    data = extract_extended_problem_data(args.problem, instance_data)
+    aco, pyg_args = setup_extended_aco(args, instance_data, args.problem, heuristic=None)
+    base_heuristic = aco.heuristic.detach().clone()
+    expected_edge_feats = get_extended_model_edge_feats(args)
+    dynamic_graph = use_extended_dynamic_edge_features(args)
+    num_heads = int(getattr(args, "num_heads", 1))
+    n_problem = get_extended_problem_n(args.problem, data)
+    logit_net = not bool(getattr(args, "no_logit_net", False))
+    ppo_epochs = int(getattr(args, "ppo_epochs", 3) or 1)
+    ppo_clip = float(getattr(args, "ppo_clip", 0.1) or 0.1)
+    no_adv_norm = bool(getattr(args, "no_adv_norm", False))
+
+    def _decode_prior_all(pyg_data):
+        return reshape_multihead_extended_prior(model(pyg_data), num_heads, n_problem)
+
+    best_seen = float("-inf")
+    avg_cost_last = None
+    metrics = MetricsCollector()
+    t_neural_total = 0.0
+    t_aco_total = 0.0
+
+    outer_pbar = tqdm(range(args.H), desc="Outer", leave=False)
+    for outer in outer_pbar:
+        # ---- Rollout under the frozen (old) prior ----
+        # Build the graph ONCE per outer (outer-start pheromone state) and decode
+        # both the old prior (rollout) and the new priors (PPO updates) from it, so
+        # the PPO ratio compares policies on the *same* input (matches TSP/CVRP).
+        t0 = time.time()
+        pyg_data_outer = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=dynamic_graph)
+        pyg_data_outer = align_extended_edge_attr_width(pyg_data_outer, expected_edge_feats)
+        with torch.no_grad():
+            prior_all_old = _decode_prior_all(pyg_data_outer).detach()
+            heur_old = [
+                extended_prior_output_to_heuristic(prior_all_old[h], base_heuristic, logit_net=logit_net)
+                .to(device=args.device, dtype=torch.float32)
+                for h in range(num_heads)
+            ]
+        t_neural_total += time.time() - t0
+
+        rollout_steps: List[Dict[str, Any]] = []
+        for inner in range(args.mini_H):
+            t_aco_start_inner = time.time()
+            head_counts = utils.head_counts_for_router(args, num_heads, aco.n_ants, head_router)
+            pheromone_before = aco.pheromone.detach().clone()
+            path_chunks: List[torch.Tensor] = []
+            cost_chunks: List[torch.Tensor] = []
+            objective_chunks: List[torch.Tensor] = []
+            old_logp_chunks: List[torch.Tensor] = []
+
+            with torch.no_grad():
+                for h, count in enumerate(head_counts):
+                    aco.heuristic = heur_old[h]
+                    aco._sync_cpp_inputs()
+                    costs_h, paths_h, _logps_h, _ = aco.sample(
+                        require_prob=False, prior=None, parallel_traced=True
+                    )
+                    costs_h_t = torch.as_tensor(costs_h, device=args.device, dtype=torch.float32)[:count]
+                    path_chunks.append(paths_h[:, :count])
+                    cost_chunks.append(costs_h_t)
+                    objective_chunks.append(extended_raw_values_to_objective(costs_h_t, args.problem))
+
+                paths = _concat_extended_head_batches(path_chunks, args.device)
+                costs_t = torch.cat(cost_chunks)
+                best_seen = max(best_seen, select_extended_best_value(costs_t, args.problem))
+                aco.update_pheromone(paths, costs_t)
+
+                # per-head old log-prob (detached), replaying only that head's own
+                # ants (the extended replays are now width-agnostic → 8x cheaper).
+                for h, count in enumerate(head_counts):
+                    logp_h = aco._replay_logp_from_paths(
+                        path_chunks[h], prior=None, pheromone=pheromone_before, heuristic=heur_old[h]
+                    )
+                    old_logp_chunks.append(
+                        logp_h.sum(dim=0) if logp_h.size(0) > 0
+                        else torch.zeros((count,), device=args.device)
+                    )
+
+            # Per-step winner from THIS step's stochastic ants (high variance ->
+            # different heads win on different steps -> the winner rotates and every
+            # head gets trained across the rollout). Selecting one winner per outer
+            # from rollout-averaged objectives instead collapses to head 0 (ties) and
+            # starves the rest -> heads collapse. This mirrors TSP/CVRP's per-step
+            # selected_head in _collect_multi_head_rollout.
+            step_sel = int(np.argmax([c.mean().item() for c in objective_chunks]))
+            avg_cost_last = float(torch.cat(objective_chunks).mean().item())
+            t_aco_total += time.time() - t_aco_start_inner
+            if outer >= args.warmup:
+                rollout_steps.append({
+                    "head_paths": path_chunks,
+                    "pheromone_before": pheromone_before,
+                    "head_counts": head_counts,
+                    "objectives": objective_chunks,
+                    "old_logp": old_logp_chunks,
+                    "selected_head": step_sel,
+                })
+
+        if not rollout_steps:
+            continue
+
+        head_loss_mode = _head_loss_mode(args)
+        win_counts = [0] * num_heads
+        for step in rollout_steps:
+            win_counts[step["selected_head"]] += 1
+        for h in range(num_heads):
+            metrics.add(f"head_win_{h}", win_counts[h] / len(rollout_steps))
+
+        # ---- PPO updates: re-decode prior (grad), replay each step's winning head ----
+        for _ppo in range(ppo_epochs):
+            t0 = time.time()
+            prior_all_new = _decode_prior_all(pyg_data_outer)
+            t_neural_total += time.time() - t0
+
+            heur_cache: Dict[int, torch.Tensor] = {}
+            def _heur_new(h: int) -> torch.Tensor:
+                if h not in heur_cache:
+                    heur_cache[h] = extended_prior_output_to_heuristic(
+                        prior_all_new[h], base_heuristic, logit_net=logit_net
+                    ).to(device=args.device, dtype=torch.float32)
+                return heur_cache[h]
+
+            step_losses: List[torch.Tensor] = []
+            approx_kls: List[float] = []
+            clip_fracs: List[float] = []
+            for step in rollout_steps:
+                heads_to_train = (
+                    range(num_heads) if head_loss_mode == "mean"
+                    else (step["selected_head"],)
+                )
+                for h in heads_to_train:
+                    logp_h = aco._replay_logp_from_paths(
+                        step["head_paths"][h], prior=None,
+                        pheromone=step["pheromone_before"], heuristic=_heur_new(h),
+                    )
+                    new_logp = (
+                        logp_h.sum(dim=0) if logp_h.size(0) > 0
+                        else torch.zeros((int(step["head_counts"][h]),), device=args.device)
+                    )
+                    old_logp = step["old_logp"][h]
+                    obj = step["objectives"][h]
+                    adv = (obj - obj.mean()).detach()
+                    if not no_adv_norm:
+                        adv = adv / (adv.std(unbiased=False) + 1e-8)
+                    ratio = torch.exp(new_logp - old_logp)
+                    surr1 = ratio * adv
+                    surr2 = torch.clamp(ratio, 1.0 - ppo_clip, 1.0 + ppo_clip) * adv
+                    step_losses.append(-torch.mean(torch.min(surr1, surr2)))
+                    with torch.no_grad():
+                        log_ratio = new_logp - old_logp
+                        approx_kls.append(float((0.5 * log_ratio.pow(2)).mean().item()))
+                        clip_fracs.append(float(((ratio > 1 + ppo_clip) | (ratio < 1 - ppo_clip)).float().mean().item()))
+
+            loss = torch.stack(step_losses).mean()
+
+            prior_reg = float(getattr(args, "prior_reg_coef", 0.0) or 0.0)
+            if prior_reg > 0.0:
+                loss = loss + prior_reg * prior_all_new.pow(2).mean()
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -2764,18 +3199,42 @@ def _train_extended_instance_reinforce(
 
             metrics.add("loss", loss.item())
             metrics.add("grad_norm", grad_norm.item())
-            metrics.add("prior_mean", prior.mean().item())
-            metrics.add("prior_std", prior.std().item())
-            outer_pbar.set_postfix({
-                "obj": f"{best_seen:.4f}",
-                "avg": f"{avg_cost_last:.4f}",
-                "loss": f"{loss.item():.4f}",
-            })
+            metrics.add("ppo_approx_kl", float(np.mean(approx_kls)))
+            metrics.add("ppo_clip_frac", float(np.mean(clip_fracs)))
+
+        # head router + diversity metrics
+        head_counts = utils.head_counts_for_router(args, num_heads, aco.n_ants, head_router)
+        utils.update_head_router(head_router, head_counts, torch.cat(rollout_steps[-1]["objectives"]).cpu().numpy())
+        with torch.no_grad():
+            for key, value in _multi_head_js_diversity_metrics(prior_all_old).items():
+                metrics.add(key, value)
+            for h in range(num_heads):
+                metrics.add(f"head{h}/prior_mean", prior_all_old[h].mean().item())
+                metrics.add(f"head{h}/prior_std", prior_all_old[h].std().item())
+        outer_pbar.set_postfix({"obj": f"{best_seen:.4f}", "avg": f"{avg_cost_last:.4f}"})
 
     out_metrics = metrics.get_all_means()
     out_metrics["time_neural"] = t_neural_total
     out_metrics["time_aco"] = t_aco_total
     return avg_cost_last, best_seen, out_metrics
+
+
+def _concat_extended_head_batches(
+    path_chunks: List[torch.Tensor],
+    device: str,
+) -> torch.Tensor:
+    """Concatenate per-head extended-problem paths into one ant batch."""
+    if not path_chunks:
+        raise ValueError("Expected at least one per-head path chunk")
+    max_len = max(int(paths.size(0)) for paths in path_chunks)
+    padded = []
+    for paths in path_chunks:
+        paths = paths.to(device=device, dtype=torch.long)
+        if paths.size(0) < max_len:
+            last = paths[-1:].expand(max_len - paths.size(0), -1)
+            paths = torch.cat((paths, last), dim=0)
+        padded.append(paths)
+    return torch.cat(padded, dim=1)
 
 
 def _run_extended_validation_epoch(
@@ -2789,34 +3248,43 @@ def _run_extended_validation_epoch(
     dynamic_graph = use_extended_dynamic_edge_features(args)
     expected_edge_feats = get_extended_model_edge_feats(args)
 
+    is_multihead = _multi_head_enabled(args)
+    num_heads_val = int(getattr(args, "num_heads", 1)) if is_multihead else 1
+
     for instance_data in val_instances:
         data = extract_extended_problem_data(args.problem, instance_data)
         aco, pyg_args = setup_extended_aco(args, instance_data, args.problem, heuristic=None)
+        base_heuristic = aco.heuristic.detach().clone()
+        n_val = get_extended_problem_n(args.problem, data) if is_multihead else 0
+
+        def _decode_prior(pyg_data_inner):
+            prior_output = model(pyg_data_inner)
+            if is_multihead:
+                prior_all = reshape_multihead_extended_prior(prior_output, num_heads_val, n_val)
+                return prior_all.mean(dim=0)
+            return reshape_extended_prior_output(
+                prior_output, args.problem, **get_extended_prior_kwargs(args.problem, data)
+            )
 
         model.eval()
         with torch.no_grad():
+            best_prior_seen = float("-inf")
             if args.static_prior:
                 pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=False)
                 pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
-                prior_output = model(pyg_data)
-                prior = reshape_extended_prior_output(
-                    prior_output,
-                    args.problem,
-                    **get_extended_prior_kwargs(args.problem, data),
-                )
-                aco.heuristic = prior.to(device=args.device, dtype=torch.float32)
+                prior = _decode_prior(pyg_data)
+                aco.heuristic = extended_prior_output_to_heuristic(
+                    prior,
+                    base_heuristic,
+                    logit_net=not bool(getattr(args, "no_logit_net", False)),
+                ).to(device=args.device, dtype=torch.float32)
                 aco._sync_cpp_inputs()
 
             for outer in range(args.H):
                 if not args.static_prior:
                     pyg_data = build_extended_pyg_data(aco, args.problem, *pyg_args, dynamic=dynamic_graph)
                     pyg_data = align_extended_edge_attr_width(pyg_data, expected_edge_feats)
-                    prior_output = model(pyg_data)
-                    prior = reshape_extended_prior_output(
-                        prior_output,
-                        args.problem,
-                        **get_extended_prior_kwargs(args.problem, data),
-                    )
+                    prior = _decode_prior(pyg_data)
 
                 for inner in range(args.mini_H):
                     current_prior = prior
@@ -2824,19 +3292,26 @@ def _run_extended_validation_epoch(
                         factor = compute_annealing_factor(inner, args.mini_H, args.gamma, args.min_gamma)
                         current_prior = prior * factor
 
-                    aco.heuristic = current_prior.to(device=args.device, dtype=torch.float32)
+                    aco.heuristic = extended_prior_output_to_heuristic(
+                        current_prior,
+                        base_heuristic,
+                        logit_net=not bool(getattr(args, "no_logit_net", False)),
+                    ).to(device=args.device, dtype=torch.float32)
                     aco._sync_cpp_inputs()
                     costs, paths, _, _ = aco.sample(require_prob=False, prior=None, parallel_traced=True)
+                    costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
+                    best_prior_seen = max(best_prior_seen, select_extended_best_value(costs_t, args.problem))
                     with torch.no_grad():
                         aco.update_pheromone(paths, costs)
-
-            costs_t = torch.as_tensor(costs, device=args.device, dtype=torch.float32)
-            val_with_prior.append(select_extended_best_value(costs_t, args.problem))
+            val_with_prior.append(best_prior_seen)
 
         aco_baseline, _ = setup_extended_aco(args, instance_data, args.problem)
-        costs_baseline, _, _, _ = aco_baseline.sample(require_prob=False, prior=None, parallel_traced=True)
-        costs_baseline_t = torch.as_tensor(costs_baseline, device=args.device, dtype=torch.float32)
-        val_without_prior.append(select_extended_best_value(costs_baseline_t, args.problem))
+        if args.problem == "bpp":
+            baseline_best = float(aco_baseline.run(args.H * args.mini_H))
+        else:
+            baseline_best, _ = aco_baseline.run(args.H * args.mini_H)
+            baseline_best = float(baseline_best)
+        val_without_prior.append(baseline_best)
         model.train()
 
     avg_val_with_prior = float(np.mean(val_with_prior))
@@ -2850,12 +3325,56 @@ def _run_extended_validation_epoch(
     return avg_val_with_prior, avg_val_without_prior, 0.0 if improvement is None else float(improvement)
 
 
+def _init_extended_dynamic_from_static(model: Any, checkpoint_path: str, device: str) -> None:
+    """Initialize a dynamic extended model from a static-prior checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    target_state = model.state_dict()
+    patched_state: Dict[str, torch.Tensor] = {}
+    for key, target_tensor in target_state.items():
+        if key not in state_dict:
+            patched_state[key] = target_tensor
+            continue
+        source_tensor = state_dict[key].to(device=target_tensor.device, dtype=target_tensor.dtype)
+        if source_tensor.shape == target_tensor.shape:
+            patched_state[key] = source_tensor
+            continue
+        if key == "emb_net.e_lin0.weight" and source_tensor.ndim == 2 and target_tensor.ndim == 2:
+            widened = target_tensor.clone()
+            copy_cols = min(source_tensor.shape[1], target_tensor.shape[1])
+            widened[:, :copy_cols] = source_tensor[:, :copy_cols]
+            if target_tensor.shape[1] > copy_cols:
+                widened[:, copy_cols:] = 0.0
+            patched_state[key] = widened
+            continue
+        raise RuntimeError(
+            f"Cannot initialize dynamic model from {checkpoint_path}: "
+            f"shape mismatch for {key}: source={tuple(source_tensor.shape)} target={tuple(target_tensor.shape)}"
+        )
+    model.load_state_dict(patched_state)
+    print(f"Initialized dynamic extended model from static checkpoint: {checkpoint_path}")
+
+
 def _train_extended_main(args: argparse.Namespace):
     """Main training loop for BPP, MKP, and OP."""
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
     model_name = build_extended_model_name(args)
+    model_kwargs = {
+        "multi_head": _multi_head_enabled(args),
+        "num_heads": int(getattr(args, "num_heads", 1)),
+        "rank": int(getattr(args, "lora_rank", 8)),
+        "lora_alpha": float(getattr(args, "lora_alpha", 1.0)),
+        "freeze_lora_base": bool(getattr(args, "freeze_lora_base", False)),
+        "head_decoder_type": getattr(args, "head_decoder_type", "deep_lora"),
+        "head_zdim": int(getattr(args, "head_zdim", 128)),
+        "head_adapter_init": getattr(args, "head_adapter_init", "random"),
+        "head_adapter_init_std": float(getattr(args, "head_adapter_init_std", 0.02)),
+        "alloc_mode": getattr(args, "alloc_mode", "mlp"),
+        "grad_checkpointing": bool(getattr(args, "grad_checkpointing", False)),
+        "logit_net": not bool(getattr(args, "no_logit_net", False)),
+    }
 
     if args.wandb_project and not args.no_wandb:
         run_id = wandb.util.generate_id()
@@ -2875,8 +3394,33 @@ def _train_extended_main(args: argparse.Namespace):
         args.problem,
         m=args.m,
         edge_feats=edge_feats,
+        **model_kwargs,
     ).to(args.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    if getattr(args, "init_static_checkpoint", None):
+        if bool(getattr(args, "static_prior", False)):
+            raise ValueError("--init_static_checkpoint is only valid for dynamic extended training")
+        _init_extended_dynamic_from_static(model, args.init_static_checkpoint, args.device)
+    if getattr(args, "init_mh_base_checkpoint", None):
+        ck = torch.load(args.init_mh_base_checkpoint, map_location=args.device, weights_only=False)
+        src = ck.get("model_state_dict", ck)
+        tgt = model.state_dict()
+        copied, skipped = 0, 0
+        for k, v in src.items():
+            if k in tgt and tgt[k].shape == v.shape:
+                tgt[k].copy_(v); copied += 1
+            else:
+                skipped += 1
+        model.load_state_dict(tgt)
+        print(f"Initialized MH base from {args.init_mh_base_checkpoint}: copied {copied} tensors, "
+              f"skipped {skipped} (head-dim adapters).")
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr,
+        weight_decay=float(getattr(args, "weight_decay", 0.01) or 0.0),
+    )
+
+    head_router = None
+    if _multi_head_enabled(args) and not _learned_router_enabled(args):
+        head_router = utils.make_head_router(args, int(getattr(args, "num_heads", 1)), int(getattr(args, "n_ants", 20)))
 
     val_instances = []
     torch.manual_seed(args.seed + 1000)
@@ -2886,13 +3430,23 @@ def _train_extended_main(args: argparse.Namespace):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    best_val_with_prior = float("-inf")
+    best_checkpoint_path = Path(args.save_dir) / f"{model_name}_best.pt"
+
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
         train_costs = []
 
         for step in range(args.steps_per_epoch):
             instance_data = utils.get_problem_data(args.problem, args.n_node, args.device, args.k_sparse, m=args.m)
-            avg_cost, best_cost, metrics = _train_extended_instance_reinforce(model, optimizer, instance_data, args)
+            if _multi_head_enabled(args) and str(getattr(args, "algo", "ppo")).lower() == "ppo":
+                avg_cost, best_cost, metrics = _train_extended_instance_ppo(
+                    model, optimizer, instance_data, args, head_router=head_router
+                )
+            else:
+                avg_cost, best_cost, metrics = _train_extended_instance_reinforce(
+                    model, optimizer, instance_data, args, head_router=head_router
+                )
             train_costs.append(avg_cost)
 
             if args.wandb_project and not args.no_wandb:
@@ -2909,6 +3463,23 @@ def _train_extended_main(args: argparse.Namespace):
         print(f"  Val Cost (with prior): {avg_val_with_prior:.4f}")
         print(f"  Val Cost (without prior): {avg_val_without_prior:.4f}")
         print(f"  Improvement: {improvement:.2f}%")
+
+        if avg_val_with_prior > best_val_with_prior:
+            best_val_with_prior = avg_val_with_prior
+            best_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_cost": np.mean(train_costs),
+                "val_cost_with_prior": avg_val_with_prior,
+                "val_cost_without_prior": avg_val_without_prior,
+                "improvement": improvement,
+                "selection_metric": "val_cost_with_prior",
+                "model_kwargs": model_kwargs,
+                "config": _serializable_args(args),
+            }, best_checkpoint_path)
+            print(f"  Saved new best checkpoint: {best_checkpoint_path}")
 
         if args.wandb_project and not args.no_wandb:
             wandb.log({
@@ -2930,16 +3501,21 @@ def _train_extended_main(args: argparse.Namespace):
                 "val_cost_with_prior": avg_val_with_prior,
                 "val_cost_without_prior": avg_val_without_prior,
                 "improvement": improvement,
+                "model_kwargs": model_kwargs,
                 "config": _serializable_args(args),
             }, checkpoint_path)
             print(f"  Saved checkpoint: {checkpoint_path}")
 
-    final_path = Path(args.save_dir) / f"{model_name}_best.pt"
+    final_path = Path(args.save_dir) / f"{model_name}_final.pt"
     torch.save({
+        "epoch": args.epochs - 1,
         "model_state_dict": model.state_dict(),
+        "selection_metric": "final",
+        "model_kwargs": model_kwargs,
         "config": _serializable_args(args),
     }, final_path)
     print(f"\nSaved final model: {final_path}")
+    print(f"Best validation checkpoint: {best_checkpoint_path}")
 
     if args.wandb_project and not args.no_wandb:
         wandb.finish()
@@ -2972,11 +3548,58 @@ def _parse_extended_train_args(argv: Optional[List[str]] = None) -> argparse.Nam
     parser.add_argument("--train_anneal", action="store_true", help="Use annealing")
     parser.add_argument("--no_dynamic_feats", action="store_true", help="Disable dynamic features")
     parser.add_argument("--smallvram", action="store_true", help="Use small VRAM mode")
+    parser.add_argument("--grad_checkpointing", action="store_true", help="Enable gradient checkpointing")
+    parser.add_argument("--no_logit_net", action="store_true", help="Apply sigmoid output instead of logit priors")
+    parser.add_argument("--init_static_checkpoint", type=str, default=None, help="Initialize dynamic extended training from a static-prior checkpoint")
+    parser.add_argument("--init_mh_base_checkpoint", type=str, default=None,
+                        help="Initialize the multi-head shared base (emb_net + base decoder) from a trained "
+                             "single-head (mh1) checkpoint; per-head adapters keep their init. Use with "
+                             "--freeze_lora_base so the adapters specialize on top of a good frozen base.")
     parser.add_argument(
         "--static_prior",
         action="store_true",
         help="Train a DeepACO-style static-prior baseline (1 edge feature, no dynamic prior)",
     )
+    # Multi-head
+    parser.add_argument("--multi_head", action="store_true", help="Enable multi-head training")
+    parser.add_argument("--num_heads", type=int, default=1, help="Number of heads")
+    parser.add_argument(
+        "--head_decoder_type", type=str, default="deep_lora",
+        choices=["lora", "deep_lora", "film", "multi_decoder", "lowrank", "polynet"],
+    )
+    parser.add_argument("--lora_rank", type=int, default=8, help="LoRA rank")
+    parser.add_argument("--head_zdim", type=int, default=128, help="Head code dimension")
+    parser.add_argument(
+        "--head_router", type=str, default="static", choices=["static", "learned"],
+        help="Ant allocation strategy",
+    )
+    parser.add_argument(
+        "--head_loss_mode", type=str, default="winner", choices=["mean", "winner"],
+        help="How to aggregate per-head losses",
+    )
+    parser.add_argument("--head_adapter_init", type=str, default="random", help="LoRA adapter init mode")
+    parser.add_argument("--head_adapter_init_std", type=float, default=0.02, help="LoRA adapter init std")
+    parser.add_argument("--lora_alpha", type=float, default=1.0, help="LoRA scaling alpha")
+    parser.add_argument("--freeze_lora_base", action="store_true", help="Freeze shared LoRA base decoder")
+    parser.add_argument("--head_ant_weights", type=str, default=None, help="Comma-delimited per-head ant weights")
+    parser.add_argument("--head_router_min_frac", type=float, default=0.0, help="Min ant fraction per head")
+    # Learned-allocator (PPO) hyperparameters, matching the TSP/CVRP parser so the
+    # learned head router works for the extended problems too.
+    parser.add_argument("--ppo_clip", type=float, default=0.1, help="PPO clip epsilon (multi-head PPO + learned allocator)")
+    parser.add_argument("--algo", choices=["reinforce", "ppo"], default="ppo",
+                        help="Multi-head training uses PPO (TSP/CVRP-style) when 'ppo'")
+    parser.add_argument("--elitist", action="store_true",
+                        help="Best-only pheromone deposit (MMAS/elitist), matching TSP/CVRP")
+    parser.add_argument("--ppo_epochs", type=int, default=4, help="PPO update epochs per rollout (sample reuse)")
+    parser.add_argument("--no_adv_norm", action="store_true", help="Disable per-head advantage normalization")
+    parser.add_argument("--allocator_loss_coef", type=float, default=1.0, help="Weight of the allocator PPO loss")
+    parser.add_argument("--allocator_entropy_coef", type=float, default=0.01, help="Allocator entropy bonus coefficient")
+    parser.add_argument("--allocator_temperature", type=float, default=1.0, help="Softmax temperature for allocation")
+    parser.add_argument("--head_router_alpha", type=float, default=0.25, help="EMA router smoothing (unused for learned)")
+    parser.add_argument("--loss_js", "--loss-js", dest="loss_js", type=float, default=0.0, help="Jensen-Shannon head-diversity reward coefficient (TSP-style)")
+    parser.add_argument("--prior_reg_coef", type=float, default=0.0, help="L2 penalty on raw prior magnitude (stabilizes long training)")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay (raise to stabilize long multi-head training)")
+
     parser.add_argument("--wandb_project", type=str, default="ngfaco_extended", help="WandB project")
     parser.add_argument("--wandb_entity", type=str, default=None, help="WandB entity")
     parser.add_argument("--wandb_group", type=str, default=None, help="WandB group")
@@ -3103,6 +3726,8 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--head_decoder_type", "--head-decoder-type", dest="head_decoder_type",
                         choices=["lora", "deep_lora", "film", "multi_decoder", "per_head_mlp", "lowrank", "polynet"], default="lora",
                         help="Multi-head decoder type: PolyNet residual block, LoRA variants, FiLM, independent full decoders, or legacy low-rank residual")
+    parser.add_argument("--poly_units", "--poly-units", dest="poly_units", type=int, default=256,
+                        help="Hidden width of the PolyNet code-conditioned residual block")
     parser.add_argument("--lora_rank", "--lora-rank", dest="lora_rank", type=int, default=8,
                         help="Rank of each head-specific LoRA adapter in the multi-head decoder")
     parser.add_argument("--lora_alpha", "--lora-alpha", dest="lora_alpha", type=float, default=1.0,
@@ -3117,6 +3742,9 @@ def _parse_base_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Standard deviation for nonzero head-adapter initialization")
     parser.add_argument("--log_best_head", "--log-best-head", dest="log_best_head", action="store_true",
                         help="Log expensive multi-head diagnostics, including JS diversity, to WandB")
+    parser.add_argument("--head_loss_mode", "--head-loss-mode", dest="head_loss_mode",
+                        choices=["winner", "mean"], default="winner",
+                        help="Multi-head PPO loss aggregation: winner updates only the best mean-cost head; mean averages loss over all heads")
     parser.add_argument("--loss_js", "--loss-js", dest="loss_js", type=float, default=0.0,
                         help="Coefficient for Jensen-to-mean PolyNet head-diversity reward; 0 disables it")
     parser.add_argument("--head_ant_weights", type=str, default=None,
@@ -3236,7 +3864,17 @@ def _extract_cli_value(argv: List[str], flag: str) -> Optional[str]:
 def _infer_train_problem(argv: Optional[List[str]] = None) -> Optional[str]:
     """Infer the requested problem before selecting the parser/implementation."""
     args_list = _normalize_cli_argv(argv)
-    return _extract_cli_value(args_list, "--problem")
+    problem = _extract_cli_value(args_list, "--problem")
+    if problem is None:
+        config_path = _extract_cli_value(args_list, "--config")
+        if config_path:
+            try:
+                with open(config_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                problem = cfg.get("problem")
+            except Exception:
+                pass
+    return problem
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -3305,6 +3943,8 @@ def build_model_name(args: argparse.Namespace) -> str:
             name += f"_lora_r{int(getattr(args, 'lora_rank', 8))}"
         if getattr(args, "head_decoder_type", "lora") != "lora":
             name += f"_{getattr(args, 'head_decoder_type')}"
+        if getattr(args, "head_decoder_type", "lora") == "polynet" and int(getattr(args, "poly_units", 256)) != 256:
+            name += f"_pu{int(getattr(args, 'poly_units'))}"
         if getattr(args, "head_adapter_init", "anchored") != "anchored":
             name += f"_hi{getattr(args, 'head_adapter_init')}"
         if getattr(args, "head_ant_weights", None):
@@ -3500,7 +4140,23 @@ def main(argv: Optional[List[str]] = None):
     args_list = _normalize_cli_argv(argv)
     problem = _infer_train_problem(args_list)
     if problem in EXTENDED_PROBLEMS:
-        args = _parse_extended_train_args(args_list)
+        # Inject --problem into args_list if it came from YAML (not the CLI)
+        extended_args_list = list(args_list)
+        if "--problem" not in extended_args_list and not any(a.startswith("--problem=") for a in extended_args_list):
+            extended_args_list = ["--problem", problem] + extended_args_list
+        args = _parse_extended_train_args(extended_args_list)
+        # Load YAML config for extended problems (same pattern as base problems)
+        if hasattr(args, "config") and args.config:
+            with open(args.config) as f:
+                yaml_config = yaml.safe_load(f) or {}
+            cli_flags = {
+                token.lstrip("-").split("=")[0].replace("-", "_")
+                for token in args_list
+                if token.startswith("--")
+            }
+            for key, value in yaml_config.items():
+                if not hasattr(args, key) or key not in cli_flags:
+                    setattr(args, key, value)
         return _train_extended_main(args)
 
     args = _parse_base_args(args_list)
@@ -3529,7 +4185,6 @@ def main(argv: Optional[List[str]] = None):
             "head_index",
             "head_training",
             "head_gamma",
-            "head_score_mode",
             "head_topq",
             "head_diversity_coef",
             "head_complement_coef",
@@ -3707,13 +4362,15 @@ def main(argv: Optional[List[str]] = None):
             lora_alpha=args.lora_alpha,
             freeze_lora_base=args.freeze_lora_base,
             head_decoder_type=args.head_decoder_type,
+            poly_units=args.poly_units,
             head_adapter_init=args.head_adapter_init,
             head_adapter_init_std=args.head_adapter_init_std,
             alloc_mode=getattr(args, "alloc_mode", "mlp"),
         )
         print(
             f"Using shared encoder + {args.head_decoder_type} multi-head decoder: "
-            f"heads={args.num_heads}, rank={args.lora_rank}, ant-group routing"
+            f"heads={args.num_heads}, rank={args.lora_rank}, "
+            f"poly_units={args.poly_units}, ant-group routing"
         )
 
     net_model = model_cls(
